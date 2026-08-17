@@ -1,0 +1,11 @@
+name = "gestion-happydeal"
+main = "src/index.js"
+compatibility_date = "2026-08-17"
+
+[[durable_objects.bindings]]
+name = "ORDERS_STORE"
+class_name = "OrdersStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OrdersStore"]
