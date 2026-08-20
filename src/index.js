@@ -519,7 +519,7 @@ function render(orders) {
     if (!access) return \`<tr>\${baseCells}</tr>\`;
 
     const meta = COLOR_META[o.colorTag];
-    const rowStyle = meta ? \`border-left: 5px solid \${meta.dot};\` : "";
+    const rowStyle = meta ? \`border-left: 5px solid \${meta.dot}; background-color: \${meta.bg};\` : "";
     const chip = meta ? \`<span class="estado-chip" style="background:\${meta.bg};color:\${meta.text}">\${meta.label}</span>\` : "";
     const options = Object.entries(COLOR_META).map(([key, m]) =>
       \`<option value="\${key}"\${o.colorTag === key ? " selected" : ""}>\${m.label}</option>\`
