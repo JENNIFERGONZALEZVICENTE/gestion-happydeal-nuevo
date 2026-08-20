@@ -152,7 +152,7 @@ const PLATFORMS = [
 ];
 
 const USERS = ["JENNIFER", "ARIADNA", "ARANTXA", "SERGIO"];
-const COLOR_ACCESS_USERS = ["JENNIFER", "SERGIO"];
+const COLOR_ACCESS_USERS = ["SERGIO"];
 const COLOR_META = {
   rojo: { label: "Cancelado", bg: "#fee2e2", text: "#991b1b", dot: "#ef4444" },
   verde: { label: "Entregado", bg: "#dcfce7", text: "#146138", dot: "#22c55e" },
@@ -511,7 +511,7 @@ function statusBadge(status) {
 }
 
 function renderHead() {
-  const cells = hasColorAccess() ? ["Estado", ...BASE_HEAD, "Observaciones"] : BASE_HEAD;
+  const cells = hasColorAccess() ? ["Estado", ...BASE_HEAD, "Observaciones Sergio"] : BASE_HEAD;
   document.getElementById("orders-head-row").innerHTML = cells.map(c => \`<th>\${c}</th>\`).join("");
 }
 
@@ -546,7 +546,7 @@ function render(orders) {
         </select>
         \${chip}
       </td>\`;
-    const obsCell = \`<td><input type="text" class="obs-input" data-id="\${o.id}" value="\${escapeAttr(o.observaciones)}" placeholder="Observaciones..."></td>\`;
+    const obsCell = \`<td><input type="text" class="obs-input" data-id="\${o.id}" value="\${escapeAttr(o.observaciones)}" placeholder="Observaciones Sergio..."></td>\`;
 
     return \`<tr style="\${rowStyle}">\${estadoCell}\${baseCells}\${obsCell}</tr>\`;
   }).join("");
