@@ -116,6 +116,16 @@ async function handleWebhook(request, env) {
   return new Response("ok");
 }
 
+async function handleUpdateMeta(request, env) {
+  const body = await request.json();
+  const id = env.ORDERS_STORE.idFromName("shopify");
+  const stub = env.ORDERS_STORE.get(id);
+  return stub.fetch("https://do/orders/meta", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 async function handleGetOrders(env) {
   const id = env.ORDERS_STORE.idFromName("shopify");
   const stub = env.ORDERS_STORE.get(id);
@@ -141,6 +151,16 @@ const PLATFORMS = [
   { id: "reforman", label: "Reforman", ready: false },
 ];
 
+const USERS = ["JENNIFER", "ARIADNA", "ARANTXA", "SERGIO"];
+const COLOR_ACCESS_USERS = ["JENNIFER", "SERGIO"];
+const COLOR_META = {
+  rojo: { label: "Cancelado", bg: "#fee2e2", text: "#991b1b", dot: "#ef4444" },
+  verde: { label: "Entregado", bg: "#dcfce7", text: "#146138", dot: "#22c55e" },
+  naranja: { label: "Enviado", bg: "#ffedd5", text: "#9a3412", dot: "#f97316" },
+  amarillo: { label: "No enviado", bg: "#fef9c3", text: "#854d0e", dot: "#eab308" },
+  azul: { label: "Pendiente de pago", bg: "#dbeafe", text: "#1e40af", dot: "#3b82f6" },
+};
+
 function renderPage() {
   const navItems = PLATFORMS.map(
     (p) => `<li>
@@ -149,6 +169,8 @@ function renderPage() {
         </a>
       </li>`
   ).join("");
+
+  const userButtons = USERS.map((u) => `<button class="user-btn" data-user="${u}">${u}</button>`).join("");
 
   return `<!doctype html>
 <html lang="es">
@@ -323,9 +345,84 @@ function renderPage() {
     text-align: center;
     color: var(--muted);
   }
+  .header-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .user-badge { font-size: 0.85rem; color: white; opacity: 0.95; white-space: nowrap; }
+  .user-badge button {
+    padding: 4px 10px;
+    font-size: 12px;
+    margin-left: 8px;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.15);
+  }
+  .user-badge button:hover { background: rgba(255,255,255,0.28); }
+  .user-gate {
+    position: fixed;
+    inset: 0;
+    background: rgba(15,61,36,0.92);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .user-gate-card {
+    background: var(--panel);
+    border-radius: 16px;
+    padding: 2.5rem 3rem;
+    text-align: center;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.25);
+  }
+  .user-gate-card h2 { margin: 0 0 1.5rem; color: var(--text); }
+  .user-gate-options { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .user-btn {
+    padding: 14px 26px;
+    font-size: 15px;
+    border-radius: 10px;
+    background: var(--brand-light);
+    color: var(--brand-dark);
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .user-btn:hover { background: var(--brand); color: white; }
+  #color-filter {
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    background: white;
+  }
+  .estado-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; white-space: normal; }
+  .estado-select {
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12.5px;
+  }
+  .estado-chip {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .obs-input {
+    width: 100%;
+    min-width: 150px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-family: inherit;
+  }
 </style>
 </head>
 <body>
+<div id="user-gate" class="user-gate">
+  <div class="user-gate-card">
+    <h2>¿Quién eres?</h2>
+    <div class="user-gate-options">${userButtons}</div>
+  </div>
+</div>
 <nav class="sidebar">
   <div class="brand">Gestión HappyDeal</div>
   <button class="section-title" id="pedidos-toggle">
@@ -336,24 +433,33 @@ function renderPage() {
 </nav>
 <div class="main">
 <header>
-  <h1 id="view-title">Pedidos · Shopify</h1>
-  <p>Vista en vivo sincronizada con tu tienda</p>
+  <div class="header-row">
+    <div>
+      <h1 id="view-title">Pedidos · Shopify</h1>
+      <p>Vista en vivo sincronizada con tu tienda</p>
+    </div>
+    <div class="user-badge" id="user-badge"></div>
+  </div>
 </header>
 
 <div id="view-shopify">
   <div class="toolbar">
     <input id="search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <select id="color-filter" style="display:none">
+      <option value="">Todos los estados</option>
+      <option value="rojo">🔴 Cancelado</option>
+      <option value="verde">🟢 Entregado</option>
+      <option value="naranja">🟠 Enviado</option>
+      <option value="amarillo">🟡 No enviado</option>
+      <option value="azul">🔵 Pendiente de pago</option>
+    </select>
     <button id="sync">Sincronizar ahora</button>
   </div>
   <div id="count"></div>
   <div class="table-wrap">
   <table id="orders">
     <thead>
-      <tr>
-        <th>Nº Pedido</th><th>Nombre</th><th>Dirección de entrega</th><th>Teléfono</th>
-        <th>Producto comprado</th><th>Servicios adicionales</th><th>Método de pago</th>
-        <th>Situación de envío</th><th>Precio</th>
-      </tr>
+      <tr id="orders-head-row"></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -366,6 +472,22 @@ function renderPage() {
 <script>
 let allOrders = [];
 const platforms = ${JSON.stringify(PLATFORMS)};
+const USERS = ${JSON.stringify(USERS)};
+const COLOR_ACCESS_USERS = ${JSON.stringify(COLOR_ACCESS_USERS)};
+const COLOR_META = ${JSON.stringify(COLOR_META)};
+const BASE_HEAD = ["Nº Pedido","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Situación de envío","Precio"];
+
+let currentUser = localStorage.getItem("hd_user");
+let editing = false;
+let pendingRefresh = false;
+
+function hasColorAccess() {
+  return COLOR_ACCESS_USERS.includes(currentUser);
+}
+
+function escapeAttr(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 
 function statusBadge(status) {
   const s = (status || "pendiente").toLowerCase();
@@ -374,10 +496,16 @@ function statusBadge(status) {
   return \`<span class="badge \${cls}">\${label}</span>\`;
 }
 
+function renderHead() {
+  const cells = hasColorAccess() ? ["Estado", ...BASE_HEAD, "Observaciones"] : BASE_HEAD;
+  document.getElementById("orders-head-row").innerHTML = cells.map(c => \`<th>\${c}</th>\`).join("");
+}
+
 function render(orders) {
+  const access = hasColorAccess();
   const tbody = document.querySelector("#orders tbody");
-  tbody.innerHTML = orders.map(o => \`
-    <tr>
+  tbody.innerHTML = orders.map(o => {
+    const baseCells = \`
       <td>BEZEN\${o.orderNumber}</td>
       <td>\${o.name}</td>
       <td>\${o.address}</td>
@@ -387,9 +515,61 @@ function render(orders) {
       <td>\${o.paymentMethod}</td>
       <td>\${statusBadge(o.shippingStatus)}</td>
       <td class="price">\${o.price} \${o.currency || ""}</td>
-    </tr>
-  \`).join("");
+    \`;
+    if (!access) return \`<tr>\${baseCells}</tr>\`;
+
+    const meta = COLOR_META[o.colorTag];
+    const rowStyle = meta ? \`border-left: 5px solid \${meta.dot};\` : "";
+    const chip = meta ? \`<span class="estado-chip" style="background:\${meta.bg};color:\${meta.text}">\${meta.label}</span>\` : "";
+    const options = Object.entries(COLOR_META).map(([key, m]) =>
+      \`<option value="\${key}"\${o.colorTag === key ? " selected" : ""}>\${m.label}</option>\`
+    ).join("");
+    const estadoCell = \`
+      <td class="estado-cell">
+        <select class="estado-select" data-id="\${o.id}">
+          <option value="">— Sin estado —</option>
+          \${options}
+        </select>
+        \${chip}
+      </td>\`;
+    const obsCell = \`<td><input type="text" class="obs-input" data-id="\${o.id}" value="\${escapeAttr(o.observaciones)}" placeholder="Observaciones..."></td>\`;
+
+    return \`<tr style="\${rowStyle}">\${estadoCell}\${baseCells}\${obsCell}</tr>\`;
+  }).join("");
   document.getElementById("count").textContent = orders.length + " pedidos";
+
+  if (access) {
+    tbody.querySelectorAll(".estado-select").forEach(sel => {
+      sel.addEventListener("change", () => {
+        const order = allOrders.find(o => String(o.id) === sel.dataset.id);
+        if (order) order.colorTag = sel.value || null;
+        saveMeta(sel.dataset.id, { colorTag: sel.value || null });
+        render(currentFiltered());
+      });
+    });
+    tbody.querySelectorAll(".obs-input").forEach(inp => {
+      inp.addEventListener("focus", () => { editing = true; });
+      inp.addEventListener("blur", () => {
+        editing = false;
+        const order = allOrders.find(o => String(o.id) === inp.dataset.id);
+        if (order) order.observaciones = inp.value;
+        saveMeta(inp.dataset.id, { observaciones: inp.value });
+        if (pendingRefresh) { pendingRefresh = false; loadOrders(); }
+      });
+    });
+  }
+}
+
+async function saveMeta(id, patch) {
+  try {
+    await fetch("/api/pedidos/shopify/meta", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, ...patch }),
+    });
+  } catch (e) {
+    console.error("No se pudo guardar", e);
+  }
 }
 
 async function loadOrders() {
@@ -398,16 +578,59 @@ async function loadOrders() {
   applyFilter();
 }
 
-function applyFilter() {
+function currentFiltered() {
   const q = document.getElementById("search").value.trim().toLowerCase();
-  if (!q) return render(allOrders);
-  const filtered = allOrders.filter(o =>
-    ("bezen" + o.orderNumber).includes(q) || (o.name || "").toLowerCase().includes(q)
-  );
-  render(filtered);
+  const colorFilter = hasColorAccess() ? document.getElementById("color-filter").value : "";
+  let filtered = allOrders;
+  if (q) {
+    filtered = filtered.filter(o => ("bezen" + o.orderNumber).includes(q) || (o.name || "").toLowerCase().includes(q));
+  }
+  if (colorFilter) {
+    filtered = filtered.filter(o => o.colorTag === colorFilter);
+  }
+  return filtered;
+}
+
+function applyFilter() {
+  render(currentFiltered());
 }
 
 document.getElementById("search").addEventListener("input", applyFilter);
+document.getElementById("color-filter").addEventListener("change", applyFilter);
+
+function updateUserBadge() {
+  const badge = document.getElementById("user-badge");
+  badge.innerHTML = currentUser + ' <button id="switch-user">Cambiar</button>';
+  document.getElementById("switch-user").addEventListener("click", () => {
+    localStorage.removeItem("hd_user");
+    location.reload();
+  });
+}
+
+function onUserReady() {
+  renderHead();
+  document.getElementById("color-filter").style.display = hasColorAccess() ? "" : "none";
+  updateUserBadge();
+  loadOrders();
+  connectWS();
+}
+
+function initUser() {
+  if (!currentUser || !USERS.includes(currentUser)) {
+    document.getElementById("user-gate").style.display = "flex";
+  } else {
+    onUserReady();
+  }
+}
+
+document.querySelectorAll(".user-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    currentUser = btn.dataset.user;
+    localStorage.setItem("hd_user", currentUser);
+    document.getElementById("user-gate").style.display = "none";
+    onUserReady();
+  });
+});
 
 document.getElementById("sync").addEventListener("click", async () => {
   await fetch("/api/pedidos/shopify/sync");
@@ -447,12 +670,13 @@ pedidosToggle.addEventListener("click", () => {
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(proto + "//" + location.host + "/pedidos/shopify/ws");
-  ws.onmessage = () => loadOrders();
+  ws.onmessage = () => {
+    if (editing) { pendingRefresh = true; } else { loadOrders(); }
+  };
   ws.onclose = () => setTimeout(connectWS, 2000);
 }
 
-loadOrders();
-connectWS();
+initUser();
 </script>
 </body>
 </html>`;
@@ -476,6 +700,10 @@ export default {
 
     if (url.pathname === "/api/pedidos/shopify") {
       return handleGetOrders(env);
+    }
+
+    if (url.pathname === "/api/pedidos/shopify/meta" && request.method === "POST") {
+      return handleUpdateMeta(request, env);
     }
 
     if (url.pathname === "/pedidos/shopify/ws") {
