@@ -1,11 +1,19 @@
 const ORPHAN_RE = /BEZEN0*([0-9]+)/i;
 
-// Estado (color) y observaciones son datos manuales de control interno, no
-// vienen de Shopify: hay que conservarlos cuando un sync/webhook reemplaza
-// los campos de la tienda con datos frescos.
+// Estado (color), observaciones y los datos de inventario (agencia, pendiente
+// de fabricante) son datos manuales o calculados una sola vez, no vienen de
+// Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
+// de la tienda con datos frescos. La agencia se fija con el stock que había
+// en el momento de la venta, no se recalcula en resyncs posteriores.
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed"];
+
 function mergeCustomFields(existing, incoming) {
   if (!existing) return incoming;
-  return { ...incoming, colorTag: existing.colorTag, observaciones: existing.observaciones };
+  const merged = { ...incoming };
+  for (const field of PRESERVED_FIELDS) {
+    if (existing[field] !== undefined) merged[field] = existing[field];
+  }
+  return merged;
 }
 
 // Staff sometimes register a montaje/diferencia de precio/etc. as its own
@@ -55,7 +63,11 @@ export class OrdersStore {
       const incoming = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       for (const order of incoming) {
-        orders[order.id] = mergeCustomFields(orders[order.id], order);
+        const existing = orders[order.id];
+        if (!existing || !existing.inventoryProcessed) {
+          await this.processInventory(order);
+        }
+        orders[order.id] = mergeCustomFields(existing, order);
       }
       await this.state.storage.put("orders", orders);
       this.broadcast();
@@ -65,7 +77,11 @@ export class OrdersStore {
     if (url.pathname === "/orders/upsert" && request.method === "POST") {
       const order = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
-      orders[order.id] = mergeCustomFields(orders[order.id], order);
+      const existing = orders[order.id];
+      if (!existing || !existing.inventoryProcessed) {
+        await this.processInventory(order);
+      }
+      orders[order.id] = mergeCustomFields(existing, order);
       await this.state.storage.put("orders", orders);
       this.broadcast();
       return new Response("ok");
@@ -94,6 +110,20 @@ export class OrdersStore {
     }
 
     return new Response("not found", { status: 404 });
+  }
+
+  async processInventory(order) {
+    const id = this.env.INVENTORY_STORE.idFromName("main");
+    const stub = this.env.INVENTORY_STORE.get(id);
+    const res = await stub.fetch("https://do/process-sale", {
+      method: "POST",
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [] }),
+    });
+    const { agencia, pendingManufacture, needsReview } = await res.json();
+    order.agencia = agencia;
+    order.pendingManufacture = pendingManufacture;
+    order.needsReview = needsReview;
+    order.inventoryProcessed = true;
   }
 
   broadcast() {

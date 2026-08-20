@@ -1,8 +1,10 @@
 export { OrdersStore } from "./orders-store.js";
+export { InventoryStore } from "./inventory-store.js";
 
 function mapOrder(order) {
   const productTitles = [];
   const serviceParts = [];
+  const items = [];
 
   for (const item of order.line_items || []) {
     if (item.title) productTitles.push(item.title);
@@ -10,6 +12,18 @@ function mapOrder(order) {
       if (!prop.name || !prop.value) continue;
       if (prop.name.startsWith("_")) continue;
       serviceParts.push(`${prop.name}: ${prop.value}`);
+    }
+    // Shopify duplica algunas líneas para adjuntar las opciones (montaje,
+    // tapa...) elegidas como "properties": esa línea duplicada siempre trae
+    // product_id null. Solo la línea real (con product_id) sirve para
+    // resolver categoría/stock/agencia.
+    if (item.product_id != null) {
+      items.push({
+        productId: item.product_id,
+        sku: item.sku || "",
+        variantTitle: item.variant_title || "",
+        qty: item.quantity || 1,
+      });
     }
   }
 
@@ -40,6 +54,7 @@ function mapOrder(order) {
     shippingStatus: order.fulfillment_status || "pendiente",
     price: order.total_price,
     currency: order.currency,
+    items,
   };
 }
 
@@ -61,6 +76,48 @@ async function fetchShopifyOrders(env) {
     url = next ? next.match(/<(.+)>/)[1] : null;
   }
   return orders;
+}
+
+const RELEVANT_PRODUCT_TYPES = new Set([
+  "Colchones",
+  "Almohada",
+  "Protector de colchón",
+  "Topper",
+  "Canapé",
+  "Canapé fijo",
+  "Base",
+  "Cabecero",
+  "Pack",
+]);
+
+async function fetchShopifyProducts(env) {
+  const products = [];
+  let url = `https://${env.SHOPIFY_SHOP_DOMAIN}/admin/api/2026-07/products.json?limit=250&fields=id,title,variants,product_type`;
+  while (url) {
+    const res = await fetch(url, { headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN } });
+    if (!res.ok) throw new Error(`Shopify API error: ${res.status} ${await res.text()}`);
+    const data = await res.json();
+    products.push(...data.products);
+    const link = res.headers.get("Link");
+    const next = link && link.split(",").find((p) => p.includes('rel="next"'));
+    url = next ? next.match(/<(.+)>/)[1] : null;
+  }
+  return products.filter((p) => RELEVANT_PRODUCT_TYPES.has(p.product_type));
+}
+
+function inventoryStub(env) {
+  const id = env.INVENTORY_STORE.idFromName("main");
+  return env.INVENTORY_STORE.get(id);
+}
+
+async function handleSyncCatalog(env) {
+  const products = await fetchShopifyProducts(env);
+  const stub = inventoryStub(env);
+  const res = await stub.fetch("https://do/catalog/sync", {
+    method: "POST",
+    body: JSON.stringify(products),
+  });
+  return new Response(await res.text(), { headers: { "content-type": "application/json" } });
 }
 
 async function handleSync(env) {
@@ -124,6 +181,13 @@ async function handleUpdateMeta(request, env) {
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+async function proxyInventory(env, path, request) {
+  const stub = inventoryStub(env);
+  const init = request.method === "GET" ? undefined : { method: request.method, body: await request.text() };
+  const res = await stub.fetch("https://do" + path, init);
+  return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
 }
 
 async function handleGetOrders(env) {
@@ -334,6 +398,10 @@ function renderPage() {
   .badge.pendiente { background: #fef3c7; color: #92400e; }
   .badge.fulfilled { background: #dcfce7; color: #146138; }
   .badge.partial { background: #dbeafe; color: #1e40af; }
+  .badge.agencia-seur { background: #e0e7ff; color: #3730a3; }
+  .badge.agencia-furniture { background: #fce7f3; color: #9d174d; }
+  .badge.agencia-pendiente { background: #fef3c7; color: #92400e; margin-top: 4px; }
+  .badge.agencia-revisar { background: #fee2e2; color: #991b1b; }
   .services { color: var(--brand-dark); font-size: 12.5px; }
   .price { font-weight: 600; }
   .placeholder {
@@ -425,6 +493,32 @@ function renderPage() {
     font-size: 12.5px;
     font-family: inherit;
   }
+  .inventario-count { color: var(--muted); font-size: 0.85rem; padding: 0 2rem 0.5rem; }
+  .stock-model-input {
+    width: 100%;
+    min-width: 180px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-family: inherit;
+  }
+  .adjust-form { display: flex; align-items: center; gap: 6px; }
+  .adjust-form button {
+    padding: 4px 10px;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .adjust-form input {
+    width: 60px;
+    padding: 6px 4px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12.5px;
+    text-align: center;
+  }
+  .cantidad-baja { color: #991b1b; font-weight: 700; }
+  .resolver-btn { padding: 6px 12px; font-size: 12.5px; }
 </style>
 </head>
 <body>
@@ -441,6 +535,15 @@ function renderPage() {
     <span class="chevron">▶</span>
   </button>
   <ul id="pedidos-list">${navItems}</ul>
+  <button class="section-title" id="inventario-toggle">
+    <span>Inventario</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="inventario-list">
+    <li><a href="#" class="nav-link" data-inventario="catalogo">Catálogo</a></li>
+    <li><a href="#" class="nav-link" data-inventario="stock">Stock</a></li>
+    <li><a href="#" class="nav-link" data-inventario="pendientes">Pendientes de fabricante</a></li>
+  </ul>
 </nav>
 <div class="main">
 <header>
@@ -482,6 +585,44 @@ function renderPage() {
 
 <div id="view-placeholder" class="placeholder" style="display:none"></div>
 
+<div id="view-catalogo" style="display:none">
+  <div class="toolbar">
+    <button id="sync-catalogo">Sincronizar catálogo</button>
+    <span id="catalogo-count" class="inventario-count"></span>
+  </div>
+  <div class="table-wrap">
+    <table id="catalogo-table">
+      <thead>
+        <tr><th>Producto</th><th>Modelo de stock</th><th>Excepción FURNITURE</th><th>No llevamos stock</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-stock" style="display:none">
+  <div class="toolbar">
+    <input id="stock-search" type="text" placeholder="Buscar modelo o talla..." />
+  </div>
+  <div id="stock-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="stock-table">
+      <thead><tr><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Ajustar</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-pendientes" style="display:none">
+  <div id="pendientes-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="pendientes-table">
+      <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha</th><th>Estado</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
 </div>
 <script>
 let allOrders = [];
@@ -489,7 +630,7 @@ const platforms = ${JSON.stringify(PLATFORMS)};
 const USERS = ${JSON.stringify(USERS)};
 const COLOR_ACCESS_USERS = ${JSON.stringify(COLOR_ACCESS_USERS)};
 const COLOR_META = ${JSON.stringify(COLOR_META)};
-const BASE_HEAD = ["Nº Pedido","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Situación de envío","Precio"];
+const BASE_HEAD = ["Nº Pedido","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Situación de envío","Agencia","Precio"];
 
 let currentUser = localStorage.getItem("hd_user");
 let editing = false;
@@ -510,6 +651,19 @@ function statusBadge(status) {
   return \`<span class="badge \${cls}">\${label}</span>\`;
 }
 
+function agenciaBadge(order) {
+  if (!order.agencia) return order.needsReview ? '<span class="badge agencia-revisar">Revisar</span>' : "";
+  const cls = order.agencia === "FURNITURE" ? "agencia-furniture" : "agencia-seur";
+  let html = \`<span class="badge \${cls}">\${order.agencia}</span>\`;
+  if (order.pendingManufacture) {
+    html += \`<br><span class="badge agencia-pendiente" title="\${order.pendingManufacture.modelo} \${order.pendingManufacture.talla}">Colchón pendiente</span>\`;
+  }
+  if (order.needsReview) {
+    html += ' <span class="badge agencia-revisar">Revisar</span>';
+  }
+  return html;
+}
+
 function renderHead() {
   const cells = hasColorAccess() ? ["Estado", ...BASE_HEAD, "Observaciones Sergio"] : BASE_HEAD;
   document.getElementById("orders-head-row").innerHTML = cells.map(c => \`<th>\${c}</th>\`).join("");
@@ -528,6 +682,7 @@ function render(orders) {
       <td class="services">\${o.services}</td>
       <td>\${o.paymentMethod}</td>
       <td>\${statusBadge(o.shippingStatus)}</td>
+      <td>\${agenciaBadge(o)}</td>
       <td class="price">\${o.price} \${o.currency || ""}</td>
     \`;
     if (!access) return \`<tr>\${baseCells}</tr>\`;
@@ -651,26 +806,42 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
+const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes"];
+function hideAllViews() {
+  ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
+}
+
 function selectPlatform(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.platform === id));
   const platform = platforms.find(p => p.id === id);
   document.getElementById("view-title").textContent = "Pedidos · " + platform.label;
+  hideAllViews();
 
   if (id === "shopify") {
     document.getElementById("view-shopify").style.display = "block";
-    document.getElementById("view-placeholder").style.display = "none";
   } else {
-    document.getElementById("view-shopify").style.display = "none";
     const ph = document.getElementById("view-placeholder");
     ph.style.display = "block";
     ph.textContent = platform.label + " todavía no está conectado. Lo añadiremos próximamente.";
   }
 }
 
+const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", pendientes: "Pendientes de fabricante" };
+function selectInventario(id) {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.inventario === id));
+  document.getElementById("view-title").textContent = "Inventario · " + INVENTARIO_LABELS[id];
+  hideAllViews();
+  document.getElementById("view-" + id).style.display = "block";
+  if (id === "catalogo") loadCatalogo();
+  if (id === "stock") loadStock();
+  if (id === "pendientes") loadPendientes();
+}
+
 document.querySelectorAll(".nav-link").forEach(a => {
   a.addEventListener("click", (e) => {
     e.preventDefault();
-    selectPlatform(a.dataset.platform);
+    if (a.dataset.platform) selectPlatform(a.dataset.platform);
+    else if (a.dataset.inventario) selectInventario(a.dataset.inventario);
   });
 });
 
@@ -680,6 +851,138 @@ pedidosToggle.addEventListener("click", () => {
   pedidosToggle.classList.toggle("open");
   pedidosList.classList.toggle("open");
 });
+
+const inventarioToggle = document.getElementById("inventario-toggle");
+const inventarioListEl = document.getElementById("inventario-list");
+inventarioToggle.addEventListener("click", () => {
+  inventarioToggle.classList.toggle("open");
+  inventarioListEl.classList.toggle("open");
+});
+
+let catalogoProducts = [];
+async function loadCatalogo() {
+  const res = await fetch("/api/inventario/catalogo");
+  catalogoProducts = await res.json();
+  renderCatalogo();
+}
+
+function renderCatalogo() {
+  const colchones = catalogoProducts
+    .filter(p => p.product_type === "Colchones")
+    .sort((a, b) => a.title.localeCompare(b.title));
+  const tbody = document.querySelector("#catalogo-table tbody");
+  tbody.innerHTML = colchones.map(p => \`
+    <tr>
+      <td>\${p.title}</td>
+      <td><input type="text" class="stock-model-input" data-id="\${p.productId}" value="\${escapeAttr(p.stockModel)}"></td>
+      <td><input type="checkbox" class="exception-check" data-id="\${p.productId}"\${p.exceptionFurniture ? " checked" : ""}></td>
+      <td><input type="checkbox" class="nostock-check" data-id="\${p.productId}"\${p.noStock ? " checked" : ""}></td>
+    </tr>
+  \`).join("");
+  document.getElementById("catalogo-count").textContent = colchones.length + " modelos de colchón";
+
+  tbody.querySelectorAll(".stock-model-input").forEach(inp => {
+    inp.addEventListener("change", () => saveCatalogoFlags(inp.dataset.id, { stockModel: inp.value }));
+  });
+  tbody.querySelectorAll(".exception-check").forEach(chk => {
+    chk.addEventListener("change", () => saveCatalogoFlags(chk.dataset.id, { exceptionFurniture: chk.checked }));
+  });
+  tbody.querySelectorAll(".nostock-check").forEach(chk => {
+    chk.addEventListener("change", () => saveCatalogoFlags(chk.dataset.id, { noStock: chk.checked }));
+  });
+}
+
+async function saveCatalogoFlags(productId, patch) {
+  await fetch("/api/inventario/catalogo", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ productId: Number(productId), ...patch }),
+  });
+  loadCatalogo();
+}
+
+document.getElementById("sync-catalogo").addEventListener("click", async () => {
+  await fetch("/api/inventario/sync");
+  loadCatalogo();
+});
+
+let stockRows = [];
+async function loadStock() {
+  const res = await fetch("/api/inventario/stock");
+  stockRows = await res.json();
+  renderStock();
+}
+
+function renderStock() {
+  const q = document.getElementById("stock-search").value.trim().toLowerCase();
+  const filtered = q
+    ? stockRows.filter(r => r.stockModel.toLowerCase().includes(q) || r.talla.toLowerCase().includes(q))
+    : stockRows;
+  const sorted = [...filtered].sort((a, b) => a.stockModel.localeCompare(b.stockModel) || a.talla.localeCompare(b.talla));
+  const tbody = document.querySelector("#stock-table tbody");
+  tbody.innerHTML = sorted.map(r => \`
+    <tr>
+      <td>\${r.stockModel}</td>
+      <td>\${r.talla}</td>
+      <td class="\${r.cantidad <= 0 ? "cantidad-baja" : ""}">\${r.cantidad}</td>
+      <td>
+        <span class="adjust-form">
+          <button type="button" class="stock-adjust" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="-1">−</button>
+          <button type="button" class="stock-adjust" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="1">+</button>
+        </span>
+      </td>
+    </tr>
+  \`).join("");
+  document.getElementById("stock-count").textContent = sorted.length + " artículos";
+
+  tbody.querySelectorAll(".stock-adjust").forEach(btn => {
+    btn.addEventListener("click", () => adjustStock(btn.dataset.model, btn.dataset.talla, Number(btn.dataset.delta)));
+  });
+}
+
+async function adjustStock(stockModel, talla, delta) {
+  await fetch("/api/inventario/stock", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stockModel, talla, delta }),
+  });
+  loadStock();
+}
+
+document.getElementById("stock-search").addEventListener("input", renderStock);
+
+let backorders = [];
+async function loadPendientes() {
+  const res = await fetch("/api/inventario/pendientes");
+  backorders = await res.json();
+  renderPendientes();
+}
+
+function renderPendientes() {
+  const pendientes = backorders.filter(b => b.estado === "pendiente");
+  const tbody = document.querySelector("#pendientes-table tbody");
+  tbody.innerHTML = pendientes.map(b => \`
+    <tr>
+      <td>BEZEN\${b.orderNumber}</td>
+      <td>\${b.modelo}</td>
+      <td>\${b.talla}</td>
+      <td>\${b.cantidad}</td>
+      <td>\${new Date(b.fecha).toLocaleDateString("es-ES")}</td>
+      <td>Pendiente</td>
+      <td><button type="button" class="resolver-btn" data-id="\${b.id}">Marcar recibido</button></td>
+    </tr>
+  \`).join("");
+  document.getElementById("pendientes-count").textContent = pendientes.length + " colchones pendientes de fabricante";
+
+  tbody.querySelectorAll(".resolver-btn").forEach(btn => {
+    btn.addEventListener("click", () => resolverPendiente(btn.dataset.id));
+  });
+}
+
+async function resolverPendiente(id) {
+  await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST" });
+  loadPendientes();
+}
 
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -726,6 +1029,39 @@ export default {
 
     if (url.pathname === "/webhooks/shopify/orders" && request.method === "POST") {
       return handleWebhook(request, env);
+    }
+
+    if (url.pathname === "/api/inventario/sync") {
+      try {
+        return await handleSyncCatalog(env);
+      } catch (err) {
+        return new Response("Sync error: " + err.message, { status: 500 });
+      }
+    }
+
+    if (url.pathname === "/api/inventario/catalogo" && request.method === "GET") {
+      return proxyInventory(env, "/catalog", request);
+    }
+
+    if (url.pathname === "/api/inventario/catalogo" && request.method === "POST") {
+      return proxyInventory(env, "/catalog/flags", request);
+    }
+
+    if (url.pathname === "/api/inventario/stock" && request.method === "GET") {
+      return proxyInventory(env, "/stock", request);
+    }
+
+    if (url.pathname === "/api/inventario/stock" && request.method === "POST") {
+      return proxyInventory(env, "/stock/adjust", request);
+    }
+
+    if (url.pathname === "/api/inventario/pendientes" && request.method === "GET") {
+      return proxyInventory(env, "/backorders", request);
+    }
+
+    const resolvePendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/resolver$/);
+    if (resolvePendingMatch && request.method === "POST") {
+      return proxyInventory(env, `/backorders/${resolvePendingMatch[1]}/resolver`, request);
     }
 
     return new Response("not found", { status: 404 });

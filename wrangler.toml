@@ -6,9 +6,17 @@ compatibility_date = "2026-08-17"
 name = "ORDERS_STORE"
 class_name = "OrdersStore"
 
+[[durable_objects.bindings]]
+name = "INVENTORY_STORE"
+class_name = "InventoryStore"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["OrdersStore"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["InventoryStore"]
 
 [triggers]
 crons = ["0 * * * *"]
