@@ -383,6 +383,17 @@ function renderPage() {
     border: 1px solid var(--border);
   }
   .user-btn:hover { background: var(--brand); color: white; }
+  .color-filter-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .color-filter-wrap label {
+    font-size: 13px;
+    color: var(--muted);
+    font-weight: 600;
+    white-space: nowrap;
+  }
   #color-filter {
     padding: 10px 14px;
     border: 1px solid var(--border);
@@ -445,14 +456,17 @@ function renderPage() {
 <div id="view-shopify">
   <div class="toolbar">
     <input id="search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
-    <select id="color-filter" style="display:none">
-      <option value="">Todos los estados</option>
-      <option value="rojo">🔴 Cancelado</option>
-      <option value="verde">🟢 Entregado</option>
-      <option value="naranja">🟠 Enviado</option>
-      <option value="amarillo">🟡 No enviado</option>
-      <option value="azul">🔵 Pendiente de pago</option>
-    </select>
+    <span class="color-filter-wrap" id="color-filter-wrap" style="display:none">
+      <label for="color-filter">Filtrar por estado:</label>
+      <select id="color-filter">
+        <option value="">Todos</option>
+        <option value="rojo">🔴 Cancelado</option>
+        <option value="verde">🟢 Entregado</option>
+        <option value="naranja">🟠 Enviado</option>
+        <option value="amarillo">🟡 No enviado</option>
+        <option value="azul">🔵 Pendiente de pago</option>
+      </select>
+    </span>
     <button id="sync">Sincronizar ahora</button>
   </div>
   <div id="count"></div>
@@ -609,7 +623,7 @@ function updateUserBadge() {
 
 function onUserReady() {
   renderHead();
-  document.getElementById("color-filter").style.display = hasColorAccess() ? "" : "none";
+  document.getElementById("color-filter-wrap").style.display = hasColorAccess() ? "flex" : "none";
   updateUserBadge();
   loadOrders();
   connectWS();
