@@ -77,6 +77,45 @@ async function handleSync(env) {
   return Response.json({ synced: mapped.length });
 }
 
+async function handleUpsertOrder(rawOrder, env) {
+  const mapped = mapOrder(rawOrder);
+  const id = env.ORDERS_STORE.idFromName("shopify");
+  const stub = env.ORDERS_STORE.get(id);
+  await stub.fetch("https://do/orders/upsert", {
+    method: "POST",
+    body: JSON.stringify(mapped),
+  });
+}
+
+async function verifyShopifyWebhook(request, env) {
+  const hmacHeader = request.headers.get("X-Shopify-Hmac-Sha256");
+  if (!hmacHeader) return null;
+
+  const rawBody = await request.text();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.SHOPIFY_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(rawBody));
+  const computed = btoa(String.fromCharCode(...new Uint8Array(signature)));
+
+  if (computed !== hmacHeader) return null;
+  return rawBody;
+}
+
+async function handleWebhook(request, env) {
+  const rawBody = await verifyShopifyWebhook(request, env);
+  if (!rawBody) {
+    return new Response("Invalid signature", { status: 401 });
+  }
+  const order = JSON.parse(rawBody);
+  await handleUpsertOrder(order, env);
+  return new Response("ok");
+}
+
 async function handleGetOrders(env) {
   const id = env.ORDERS_STORE.idFromName("shopify");
   const stub = env.ORDERS_STORE.get(id);
@@ -443,6 +482,14 @@ export default {
       return handleWebSocket(request, env);
     }
 
+    if (url.pathname === "/webhooks/shopify/orders" && request.method === "POST") {
+      return handleWebhook(request, env);
+    }
+
     return new Response("not found", { status: 404 });
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(handleSync(env));
   },
 };

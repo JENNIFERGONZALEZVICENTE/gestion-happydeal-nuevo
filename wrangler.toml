@@ -9,3 +9,6 @@ class_name = "OrdersStore"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["OrdersStore"]
+
+[triggers]
+crons = ["0 * * * *"]
