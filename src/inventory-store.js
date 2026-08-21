@@ -244,10 +244,11 @@ export class InventoryStore {
 
   // Aplica la venta de un artículo con stock: descuenta primero de la
   // cantidad real disponible (nunca la deja negativa) y, si no llega, el
-  // resto pasa a "vendidoPendiente" — unidades ya vendidas que no había en
-  // el almacén. Ese excedente se libera más tarde, cuando el pedido que lo
-  // generó se marca como enviado (ver settleShipment), no cuando llega
-  // mercancía nueva del fabricante.
+  // resto pasa a "vendidoPendiente" — pero eso solo se refleja en el Stock
+  // para colchones (a petición de Jennifer). Para almohada/protector/topper
+  // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
+  // columna. El excedente de vendidoPendiente se libera cuando el pedido
+  // que lo generó se marca como enviado (ver settleShipment).
   applyStockUsage(stock, backorders, item, orderId, orderNumber) {
     const key = stockKey(item.product.stockModel, item.talla);
     const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
@@ -255,7 +256,9 @@ export class InventoryStore {
     row.cantidad -= covered;
     const falta = item.qty - covered;
     if (falta > 0) {
-      row.vendidoPendiente = (row.vendidoPendiente || 0) + falta;
+      if (item.tipo === "colchon") {
+        row.vendidoPendiente = (row.vendidoPendiente || 0) + falta;
+      }
       const id = `${orderId}-${key}`;
       if (!backorders.some((b) => b.id === id)) {
         backorders.push({
