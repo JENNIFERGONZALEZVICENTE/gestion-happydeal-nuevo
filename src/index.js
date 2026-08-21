@@ -603,9 +603,8 @@ function renderPage() {
 
 <div id="view-stock" style="display:none">
   <div class="toolbar">
-    <select id="stock-model-select">
-      <option value="">— Selecciona un modelo —</option>
-    </select>
+    <input id="stock-model-select" type="text" list="stock-models-datalist" placeholder="Escribe o elige un modelo..." autocomplete="off" />
+    <datalist id="stock-models-datalist"></datalist>
   </div>
   <div id="stock-count" class="inventario-count"></div>
   <div class="table-wrap">
@@ -918,12 +917,9 @@ async function loadStock() {
 }
 
 function populateStockModelSelect() {
-  const select = document.getElementById("stock-model-select");
-  const current = select.value;
+  const datalist = document.getElementById("stock-models-datalist");
   const models = [...new Set(stockRows.map(r => r.stockModel))].sort((a, b) => a.localeCompare(b));
-  select.innerHTML = '<option value="">— Selecciona un modelo —</option>'
-    + models.map(m => \`<option value="\${escapeAttr(m)}">\${m}</option>\`).join("");
-  if (models.includes(current)) select.value = current;
+  datalist.innerHTML = models.map(m => \`<option value="\${escapeAttr(m)}"></option>\`).join("");
 }
 
 function parseTalla(talla) {
@@ -940,12 +936,21 @@ function compareTalla(a, b) {
 }
 
 function renderStock() {
-  const model = document.getElementById("stock-model-select").value;
+  const typed = document.getElementById("stock-model-select").value.trim();
   const tbody = document.querySelector("#stock-table tbody");
+
+  if (!typed) {
+    tbody.innerHTML = "";
+    document.getElementById("stock-count").textContent = "Escribe o elige un modelo para ver su stock.";
+    return;
+  }
+
+  const model = stockRows.find(r => r.stockModel === typed) ? typed
+    : (stockRows.find(r => r.stockModel.toLowerCase() === typed.toLowerCase())?.stockModel || null);
 
   if (!model) {
     tbody.innerHTML = "";
-    document.getElementById("stock-count").textContent = "Selecciona un modelo para ver su stock.";
+    document.getElementById("stock-count").textContent = "No hay ningún modelo que coincida exactamente con \\"" + typed + "\\".";
     return;
   }
 
@@ -985,7 +990,7 @@ async function adjustStock(stockModel, talla, delta, field) {
   loadStock();
 }
 
-document.getElementById("stock-model-select").addEventListener("change", renderStock);
+document.getElementById("stock-model-select").addEventListener("input", renderStock);
 
 let backorders = [];
 async function loadPendientes() {
