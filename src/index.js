@@ -1186,8 +1186,11 @@ initUser();
 </html>`;
 }
 
-export default {
-  async fetch(request, env) {
+// Es una app interna con datos que cambian a cada momento (pedidos, stock);
+// dejar que Cloudflare cachee las respuestas en el borde causó una vez que
+// una ruta nueva siguiera devolviendo un 404 viejo en producción. Todas las
+// respuestas se marcan no-store para evitarlo.
+async function handleFetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/") {
@@ -1287,6 +1290,17 @@ export default {
     }
 
     return new Response("not found", { status: 404 });
+}
+
+export default {
+  async fetch(request, env) {
+    const res = await handleFetch(request, env);
+    // WebSocket upgrades (status 101) no admiten cabeceras extra sobre la
+    // respuesta de upgrade.
+    if (res.status === 101) return res;
+    const headers = new Headers(res.headers);
+    headers.set("Cache-Control", "no-store");
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
   },
 
   async scheduled(event, env, ctx) {
