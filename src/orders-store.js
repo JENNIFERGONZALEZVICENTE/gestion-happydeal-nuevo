@@ -137,7 +137,11 @@ export class OrdersStore {
       method: "POST",
       body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [] }),
     });
-    const { agencia, pendingManufacture, needsReview } = await res.json();
+    const { agencia, pendingManufacture, needsReview, paused } = await res.json();
+    // Si Inventario está en pausa, no se marca inventoryProcessed: el
+    // pedido se reintentará en el próximo sync/webhook hasta que Jennifer
+    // reactive el procesamiento con /admin/resume.
+    if (paused) return;
     order.agencia = agencia;
     order.pendingManufacture = pendingManufacture;
     order.needsReview = needsReview;

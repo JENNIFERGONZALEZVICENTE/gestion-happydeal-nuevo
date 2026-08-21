@@ -1068,6 +1068,18 @@ export default {
       return proxyInventory(env, "/admin/reset-stock", request);
     }
 
+    if (url.pathname === "/api/inventario/admin/pause" && request.method === "POST") {
+      return proxyInventory(env, "/admin/pause", request);
+    }
+
+    if (url.pathname === "/api/inventario/admin/resume" && request.method === "POST") {
+      return proxyInventory(env, "/admin/resume", request);
+    }
+
+    if (url.pathname === "/api/inventario/admin/status" && request.method === "GET") {
+      return proxyInventory(env, "/admin/status", request);
+    }
+
     if (url.pathname === "/api/pedidos/shopify/clear-pending" && request.method === "POST") {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);

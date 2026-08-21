@@ -134,6 +134,20 @@ export class InventoryStore {
       return this.resetStock();
     }
 
+    if (url.pathname === "/admin/pause" && method === "POST") {
+      await this.state.storage.put("paused", true);
+      return Response.json({ paused: true });
+    }
+
+    if (url.pathname === "/admin/resume" && method === "POST") {
+      await this.state.storage.put("paused", false);
+      return Response.json({ paused: false });
+    }
+
+    if (url.pathname === "/admin/status" && method === "GET") {
+      return Response.json({ paused: await this.load("paused", false) });
+    }
+
     return new Response("not found", { status: 404 });
   }
 
@@ -256,6 +270,14 @@ export class InventoryStore {
   }
 
   async processSale({ orderId, orderNumber, items }) {
+    // Mientras el catálogo/stock no esté configurado del todo, Jennifer
+    // pidió no tocar los pedidos que van entrando (ni agencia ni stock).
+    // Cuando esté todo listo, un POST a /admin/resume lo reactiva y los
+    // pedidos que se sincronicen a partir de ahí sí se procesan.
+    if (await this.load("paused", false)) {
+      return Response.json({ agencia: null, pendingManufacture: null, needsReview: false, paused: true });
+    }
+
     const products = await this.load("products", {});
     const stock = await this.load("stock", {});
     const backorders = await this.load("backorders", []);
