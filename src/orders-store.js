@@ -111,6 +111,25 @@ export class OrdersStore {
       return Response.json({ ok: true, cleared });
     }
 
+    // Prueba puntual: fuerza el cálculo de agencia/stock de UN pedido
+    // concreto sin tocar la pausa general de Inventario (para poder
+    // enseñarle a Jennifer cómo queda un pedido real sin reactivar el
+    // procesamiento de todos los pedidos pendientes de golpe).
+    if (url.pathname === "/orders/force-process" && request.method === "POST") {
+      const { orderId } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const existing = orders[orderId];
+      if (!existing) return new Response("not found", { status: 404 });
+      await this.processInventory(existing, true);
+      if (existing.shippingStatus === "fulfilled") {
+        await this.settleShipment(existing.id);
+      }
+      orders[orderId] = existing;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json(existing);
+    }
+
     if (url.pathname === "/orders/meta" && request.method === "POST") {
       const { id, colorTag, observaciones } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
@@ -136,12 +155,12 @@ export class OrdersStore {
     return new Response("not found", { status: 404 });
   }
 
-  async processInventory(order) {
+  async processInventory(order, force) {
     const id = this.env.INVENTORY_STORE.idFromName("main");
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [] }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force }),
     });
     const { agencia, pendingManufacture, needsReview, paused } = await res.json();
     // Si Inventario está en pausa, no se marca inventoryProcessed: el

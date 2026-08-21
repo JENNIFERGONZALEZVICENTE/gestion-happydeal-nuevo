@@ -534,12 +534,14 @@ export class InventoryStore {
     return Response.json(entry);
   }
 
-  async processSale({ orderId, orderNumber, items }) {
+  async processSale({ orderId, orderNumber, items, force }) {
     // Mientras el catálogo/stock no esté configurado del todo, Jennifer
     // pidió no tocar los pedidos que van entrando (ni agencia ni stock).
     // Cuando esté todo listo, un POST a /admin/resume lo reactiva y los
-    // pedidos que se sincronicen a partir de ahí sí se procesan.
-    if (await this.load("paused", false)) {
+    // pedidos que se sincronicen a partir de ahí sí se procesan. `force`
+    // permite procesar un pedido suelto a modo de prueba sin reactivar el
+    // procesamiento general (usado desde /orders/force-process).
+    if (!force && (await this.load("paused", false))) {
       return Response.json({ agencia: null, pendingManufacture: null, needsReview: false, paused: true });
     }
 

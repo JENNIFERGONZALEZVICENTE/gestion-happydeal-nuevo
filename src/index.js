@@ -1338,6 +1338,14 @@ async function handleFetch(request, env) {
       return proxyInventory(env, "/admin/status", request);
     }
 
+    if (url.pathname === "/api/pedidos/shopify/force-process" && request.method === "POST") {
+      const body = await request.text();
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/orders/force-process", { method: "POST", body });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
     if (url.pathname === "/api/pedidos/shopify/clear-pending" && request.method === "POST") {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
