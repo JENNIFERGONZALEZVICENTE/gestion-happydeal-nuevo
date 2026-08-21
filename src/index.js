@@ -462,13 +462,14 @@ function renderPage() {
     font-weight: 600;
     white-space: nowrap;
   }
-  #color-filter {
+  #color-filter, #stock-model-select {
     padding: 10px 14px;
     border: 1px solid var(--border);
     border-radius: 8px;
     font-size: 14px;
     background: white;
   }
+  #stock-model-select { min-width: 280px; }
   .estado-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; white-space: normal; }
   .estado-select {
     padding: 6px 8px;
@@ -602,12 +603,14 @@ function renderPage() {
 
 <div id="view-stock" style="display:none">
   <div class="toolbar">
-    <input id="stock-search" type="text" placeholder="Buscar modelo o talla..." />
+    <select id="stock-model-select">
+      <option value="">— Selecciona un modelo —</option>
+    </select>
   </div>
   <div id="stock-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="stock-table">
-      <thead><tr><th>Modelo</th><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th>Pedido a proveedor</th><th>Disponible al llegar</th><th>Ajustar</th></tr></thead>
+      <thead><tr><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th>Pedido a proveedor</th><th>Disponible al llegar</th><th>Ajustar</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -910,7 +913,17 @@ let stockRows = [];
 async function loadStock() {
   const res = await fetch("/api/inventario/stock");
   stockRows = await res.json();
+  populateStockModelSelect();
   renderStock();
+}
+
+function populateStockModelSelect() {
+  const select = document.getElementById("stock-model-select");
+  const current = select.value;
+  const models = [...new Set(stockRows.map(r => r.stockModel))].sort((a, b) => a.localeCompare(b));
+  select.innerHTML = '<option value="">— Selecciona un modelo —</option>'
+    + models.map(m => \`<option value="\${escapeAttr(m)}">\${m}</option>\`).join("");
+  if (models.includes(current)) select.value = current;
 }
 
 function parseTalla(talla) {
@@ -927,18 +940,21 @@ function compareTalla(a, b) {
 }
 
 function renderStock() {
-  const q = document.getElementById("stock-search").value.trim().toLowerCase();
-  const filtered = q
-    ? stockRows.filter(r => r.stockModel.toLowerCase().includes(q) || r.talla.toLowerCase().includes(q))
-    : stockRows;
-  const sorted = [...filtered].sort((a, b) => a.stockModel.localeCompare(b.stockModel) || compareTalla(a.talla, b.talla));
+  const model = document.getElementById("stock-model-select").value;
   const tbody = document.querySelector("#stock-table tbody");
+
+  if (!model) {
+    tbody.innerHTML = "";
+    document.getElementById("stock-count").textContent = "Selecciona un modelo para ver su stock.";
+    return;
+  }
+
+  const sorted = stockRows.filter(r => r.stockModel === model).sort((a, b) => compareTalla(a.talla, b.talla));
   tbody.innerHTML = sorted.map(r => {
     const pedido = r.pedidoProveedor || 0;
     const disponible = pedido - (r.vendidoPendiente || 0);
     return \`
     <tr>
-      <td>\${r.stockModel}</td>
       <td>\${r.talla}</td>
       <td class="\${r.cantidad <= 0 ? "cantidad-baja" : ""}">\${r.cantidad}</td>
       <td class="\${r.vendidoPendiente > 0 ? "cantidad-baja" : ""}">\${r.vendidoPendiente || 0}</td>
@@ -953,7 +969,7 @@ function renderStock() {
     </tr>
   \`;
   }).join("");
-  document.getElementById("stock-count").textContent = sorted.length + " artículos";
+  document.getElementById("stock-count").textContent = sorted.length + " tallas de " + model;
 
   tbody.querySelectorAll(".stock-adjust").forEach(btn => {
     btn.addEventListener("click", () => adjustStock(btn.dataset.model, btn.dataset.talla, Number(btn.dataset.delta), btn.dataset.field));
@@ -969,7 +985,7 @@ async function adjustStock(stockModel, talla, delta, field) {
   loadStock();
 }
 
-document.getElementById("stock-search").addEventListener("input", renderStock);
+document.getElementById("stock-model-select").addEventListener("change", renderStock);
 
 let backorders = [];
 async function loadPendientes() {
