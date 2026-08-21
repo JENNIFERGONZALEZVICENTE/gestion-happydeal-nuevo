@@ -45,6 +45,7 @@ function mapOrder(order) {
   return {
     id: order.id,
     orderNumber: order.order_number,
+    orderDate: order.created_at || "",
     name: customerName,
     address: addressStr,
     phone: order.phone || address.phone || order.customer?.phone || "",
@@ -686,7 +687,7 @@ const platforms = ${JSON.stringify(PLATFORMS)};
 const USERS = ${JSON.stringify(USERS)};
 const COLOR_ACCESS_USERS = ${JSON.stringify(COLOR_ACCESS_USERS)};
 const COLOR_META = ${JSON.stringify(COLOR_META)};
-const BASE_HEAD = ["Nº Pedido","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Situación de envío","Agencia","Precio"];
+const BASE_HEAD = ["Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Situación de envío","Agencia","Precio"];
 
 let currentUser = localStorage.getItem("hd_user");
 let editing = false;
@@ -698,6 +699,13 @@ function hasColorAccess() {
 
 function escapeAttr(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function formatOrderDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("es-ES");
 }
 
 function statusBadge(status) {
@@ -731,6 +739,7 @@ function render(orders) {
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
       <td>BEZEN\${o.orderNumber}</td>
+      <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
       <td>\${o.address}</td>
       <td>\${o.phone}</td>
