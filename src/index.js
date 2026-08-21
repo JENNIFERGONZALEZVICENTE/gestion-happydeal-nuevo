@@ -607,7 +607,7 @@ function renderPage() {
   <div id="stock-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="stock-table">
-      <thead><tr><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Ajustar</th></tr></thead>
+      <thead><tr><th>Modelo</th><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th>Ajustar</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -617,7 +617,7 @@ function renderPage() {
   <div id="pendientes-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="pendientes-table">
-      <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha</th><th>Estado</th><th></th></tr></thead>
+      <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha</th><th>Recibido de fábrica</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -925,6 +925,7 @@ function renderStock() {
       <td>\${r.stockModel}</td>
       <td>\${r.talla}</td>
       <td class="\${r.cantidad <= 0 ? "cantidad-baja" : ""}">\${r.cantidad}</td>
+      <td class="\${r.vendidoPendiente > 0 ? "cantidad-baja" : ""}">\${r.vendidoPendiente || 0}</td>
       <td>
         <span class="adjust-form">
           <button type="button" class="stock-adjust" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="-1">−</button>
@@ -964,15 +965,14 @@ function renderPendientes() {
   tbody.innerHTML = pendientes.map(b => \`
     <tr>
       <td>BEZEN\${b.orderNumber}</td>
-      <td>\${b.modelo}</td>
+      <td>\${b.stockModel}</td>
       <td>\${b.talla}</td>
       <td>\${b.cantidad}</td>
       <td>\${new Date(b.fecha).toLocaleDateString("es-ES")}</td>
-      <td>Pendiente</td>
-      <td><button type="button" class="resolver-btn" data-id="\${b.id}">Marcar recibido</button></td>
+      <td><button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" : "Marcar recibido"}</button></td>
     </tr>
   \`).join("");
-  document.getElementById("pendientes-count").textContent = pendientes.length + " colchones pendientes de fabricante";
+  document.getElementById("pendientes-count").textContent = pendientes.length + " artículos pendientes de fabricante (se cierran solos al marcarse el pedido como enviado)";
 
   tbody.querySelectorAll(".resolver-btn").forEach(btn => {
     btn.addEventListener("click", () => resolverPendiente(btn.dataset.id));

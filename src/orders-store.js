@@ -67,6 +67,9 @@ export class OrdersStore {
         if (!existing || !existing.inventoryProcessed) {
           await this.processInventory(order);
         }
+        if (order.shippingStatus === "fulfilled" && existing?.shippingStatus !== "fulfilled") {
+          await this.settleShipment(order.id);
+        }
         orders[order.id] = mergeCustomFields(existing, order);
       }
       await this.state.storage.put("orders", orders);
@@ -80,6 +83,9 @@ export class OrdersStore {
       const existing = orders[order.id];
       if (!existing || !existing.inventoryProcessed) {
         await this.processInventory(order);
+      }
+      if (order.shippingStatus === "fulfilled" && existing?.shippingStatus !== "fulfilled") {
+        await this.settleShipment(order.id);
       }
       orders[order.id] = mergeCustomFields(existing, order);
       await this.state.storage.put("orders", orders);
@@ -146,6 +152,15 @@ export class OrdersStore {
     order.pendingManufacture = pendingManufacture;
     order.needsReview = needsReview;
     order.inventoryProcessed = true;
+  }
+
+  async settleShipment(orderId) {
+    const id = this.env.INVENTORY_STORE.idFromName("main");
+    const stub = this.env.INVENTORY_STORE.get(id);
+    await stub.fetch("https://do/settle-shipment", {
+      method: "POST",
+      body: JSON.stringify({ orderId }),
+    });
   }
 
   broadcast() {

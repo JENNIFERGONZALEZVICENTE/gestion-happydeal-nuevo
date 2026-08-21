@@ -130,6 +130,10 @@ export class InventoryStore {
       return this.processSale(await request.json());
     }
 
+    if (url.pathname === "/settle-shipment" && method === "POST") {
+      return this.settleShipment(await request.json());
+    }
+
     if (url.pathname === "/admin/reset-stock" && method === "POST") {
       return this.resetStock();
     }
@@ -174,7 +178,7 @@ export class InventoryStore {
       if (tipo && STOCK_TYPES.has(tipo) && !entry.noStock) {
         for (const talla of entry.tallas) {
           const key = stockKey(entry.stockModel, talla);
-          if (!stock[key]) stock[key] = { stockModel: entry.stockModel, talla, cantidad: 0 };
+          if (!stock[key]) stock[key] = { stockModel: entry.stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
         }
       }
     }
@@ -208,7 +212,7 @@ export class InventoryStore {
             const oldKey = stockKey(oldStockModel, talla);
             stock[key] = stock[oldKey]
               ? { ...stock[oldKey], stockModel: entry.stockModel }
-              : { stockModel: entry.stockModel, talla, cantidad: 0 };
+              : { stockModel: entry.stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
           }
         }
       }
@@ -226,7 +230,7 @@ export class InventoryStore {
         }
         for (const talla of entry.tallas || []) {
           const oldKey = stockKey(oldStockModel, talla);
-          if (stock[oldKey] && !stillNeeded.has(oldKey) && stock[oldKey].cantidad === 0) {
+          if (stock[oldKey] && !stillNeeded.has(oldKey) && stock[oldKey].cantidad === 0 && !stock[oldKey].vendidoPendiente) {
             delete stock[oldKey];
           }
         }
@@ -238,11 +242,73 @@ export class InventoryStore {
     return Response.json(entry);
   }
 
+  // Aplica la venta de un artículo con stock: descuenta primero de la
+  // cantidad real disponible (nunca la deja negativa) y, si no llega, el
+  // resto pasa a "vendidoPendiente" — unidades ya vendidas que no había en
+  // el almacén. Ese excedente se libera más tarde, cuando el pedido que lo
+  // generó se marca como enviado (ver settleShipment), no cuando llega
+  // mercancía nueva del fabricante.
+  applyStockUsage(stock, backorders, item, orderId, orderNumber) {
+    const key = stockKey(item.product.stockModel, item.talla);
+    const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
+    const covered = Math.min(row.cantidad, item.qty);
+    row.cantidad -= covered;
+    const falta = item.qty - covered;
+    if (falta > 0) {
+      row.vendidoPendiente = (row.vendidoPendiente || 0) + falta;
+      const id = `${orderId}-${key}`;
+      if (!backorders.some((b) => b.id === id)) {
+        backorders.push({
+          id,
+          orderId,
+          orderNumber,
+          stockModel: item.product.stockModel,
+          talla: item.talla,
+          cantidad: falta,
+          fecha: new Date().toISOString(),
+          estado: "pendiente",
+          recibidoFabrica: false,
+        });
+      }
+    }
+    stock[key] = row;
+    return falta;
+  }
+
+  // Cuando Shopify marca un pedido como enviado, las unidades que se habían
+  // quedado en "vendidoPendiente" para ese pedido ya han salido de verdad
+  // (o directas desde fábrica al cliente): se descuentan de esa columna y
+  // los pendientes de fabricante asociados se cierran. El stock real no se
+  // toca aquí — nunca llegó a estar disponible para descontarlo antes.
+  async settleShipment({ orderId }) {
+    const stock = await this.load("stock", {});
+    const backorders = await this.load("backorders", []);
+    let settled = 0;
+
+    for (const b of backorders) {
+      if (b.orderId !== orderId || b.estado === "servido") continue;
+      const key = stockKey(b.stockModel, b.talla);
+      const row = stock[key];
+      if (row) {
+        row.vendidoPendiente = Math.max(0, (row.vendidoPendiente || 0) - b.cantidad);
+        stock[key] = row;
+      }
+      b.estado = "servido";
+      settled++;
+    }
+
+    if (settled > 0) {
+      await this.state.storage.put("stock", stock);
+      await this.state.storage.put("backorders", backorders);
+    }
+    return Response.json({ ok: true, settled });
+  }
+
   async adjustStock({ stockModel, talla, delta }) {
     const stock = await this.load("stock", {});
     const key = stockKey(stockModel, talla);
-    const row = stock[key] || { stockModel, talla, cantidad: 0 };
-    row.cantidad = (row.cantidad || 0) + Number(delta);
+    const row = stock[key] || { stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
+    row.cantidad = Math.max(0, (row.cantidad || 0) + Number(delta));
     stock[key] = row;
     await this.state.storage.put("stock", stock);
     return Response.json(row);
@@ -254,17 +320,25 @@ export class InventoryStore {
   // procesado dejó cantidades que no representan stock físico real.
   async resetStock() {
     const stock = await this.load("stock", {});
-    for (const key of Object.keys(stock)) stock[key].cantidad = 0;
+    for (const key of Object.keys(stock)) {
+      stock[key].cantidad = 0;
+      stock[key].vendidoPendiente = 0;
+    }
     await this.state.storage.put("stock", stock);
     await this.state.storage.put("backorders", []);
     return Response.json({ ok: true, filas: Object.keys(stock).length });
   }
 
+  // Marca que el fabricante ya entregó ese colchón (aviso informativo para
+  // el equipo). No cambia el stock ni cierra el pendiente: el pendiente se
+  // cierra solo cuando el pedido del cliente se marca como enviado en
+  // Shopify (ver settleShipment) — puede que lo recibido de fábrica tarde
+  // en salir hacia el cliente.
   async resolveBackorder(id) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
-    entry.estado = "recibido";
+    entry.recibidoFabrica = !entry.recibidoFabrica;
     await this.state.storage.put("backorders", backorders);
     return Response.json(entry);
   }
@@ -309,39 +383,17 @@ export class InventoryStore {
       agencia = "FURNITURE";
       for (const item of flat) {
         if (!STOCK_TYPES.has(item.tipo) || !item.product || item.product.noStock) continue;
-        const key = stockKey(item.product.stockModel, item.talla);
-        const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0 };
-        if (item.tipo === "colchon" && row.cantidad < item.qty) {
-          const falta = item.qty - row.cantidad;
-          row.cantidad = 0;
-          const id = `${orderId}-${key}`;
-          if (!backorders.some((b) => b.id === id)) {
-            backorders.push({
-              id,
-              orderId,
-              orderNumber,
-              modelo: item.product.stockModel,
-              talla: item.talla,
-              cantidad: falta,
-              fecha: new Date().toISOString(),
-              estado: "pendiente",
-            });
-          }
+        const falta = this.applyStockUsage(stock, backorders, item, orderId, orderNumber);
+        if (item.tipo === "colchon" && falta > 0) {
           pendingManufacture = { modelo: item.product.stockModel, talla: item.talla, cantidad: falta };
-        } else {
-          row.cantidad -= item.qty;
         }
-        stock[key] = row;
       }
     } else {
       const colchones = flat.filter((c) => c.tipo === "colchon");
       agencia = colchones.some((c) => c.product.exceptionFurniture) ? "FURNITURE" : "SEUR";
       for (const item of flat) {
         if (!STOCK_TYPES.has(item.tipo) || !item.product || item.product.noStock) continue;
-        const key = stockKey(item.product.stockModel, item.talla);
-        const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0 };
-        row.cantidad -= item.qty;
-        stock[key] = row;
+        this.applyStockUsage(stock, backorders, item, orderId, orderNumber);
       }
     }
 
