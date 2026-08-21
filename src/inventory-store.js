@@ -37,24 +37,30 @@ function stockKey(stockModel, talla) {
 }
 
 // Un segmento de SKU de pack (ej. "COLZSUPREME90X190") no siempre trae el
-// código de producto tal cual: a veces le precede texto de "PACK" u otro
-// componente pegado. Buscamos, entre los productos base ya sincronizados,
-// cuál prefijo de SKU conocido aparece contenido en el segmento, quedandonos
-// con el más largo (más específico) si hay varios candidatos.
+// código de producto tal cual: a veces le precede texto de "PACK", un "2"
+// de marketplace, u otro componente pegado. Buscamos, entre los productos
+// base ya sincronizados —tanto por su SKU de Shopify como por los alias
+// que Jennifer haya añadido a mano (otras plataformas, ej. "AURORA")—, cuál
+// código conocido aparece contenido en el segmento, quedándonos con el más
+// largo (más específico) si hay varios candidatos.
 function findBestPrefixMatch(segmentRaw, products) {
   const segment = segmentRaw.toUpperCase();
   let best = null;
+  let bestPrefix = null;
   for (const p of Object.values(products)) {
     if (p.product_type === "Pack") continue;
-    if (!p.skuPrefix || p.skuPrefix.length < 4) continue;
-    const prefix = p.skuPrefix.toUpperCase();
-    if (segment.includes(prefix) && (!best || prefix.length > best.skuPrefix.length)) {
-      best = p;
+    const candidates = [p.skuPrefix, ...(p.altSkuPrefixes || [])].filter((c) => c && c.length >= 4);
+    for (const candidate of candidates) {
+      const prefix = candidate.toUpperCase();
+      if (segment.includes(prefix) && (!bestPrefix || prefix.length > bestPrefix.length)) {
+        best = p;
+        bestPrefix = prefix;
+      }
     }
   }
   if (!best) return null;
-  const idx = segment.indexOf(best.skuPrefix.toUpperCase());
-  const remainder = segmentRaw.slice(idx + best.skuPrefix.length);
+  const idx = segment.indexOf(bestPrefix);
+  const remainder = segmentRaw.slice(idx + bestPrefix.length);
   return { product: best, talla: normalizeTalla(remainder) };
 }
 
@@ -194,7 +200,7 @@ export class InventoryStore {
     return Response.json({ ok: true, total: Object.keys(products).length });
   }
 
-  async updateFlags({ productId, exceptionFurniture, noStock, stockModel, skuPrefix }) {
+  async updateFlags({ productId, exceptionFurniture, noStock, stockModel, skuPrefix, altSkuPrefixes }) {
     const products = await this.load("products", {});
     const entry = products[productId];
     if (!entry) return new Response("not found", { status: 404 });
@@ -207,6 +213,12 @@ export class InventoryStore {
     if (skuPrefix !== undefined && skuPrefix.trim()) {
       entry.skuPrefix = skuPrefix.trim();
       entry.skuPrefixManual = true;
+    }
+    if (altSkuPrefixes !== undefined) {
+      entry.altSkuPrefixes = altSkuPrefixes
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
     }
     products[productId] = entry;
     await this.state.storage.put("products", products);
