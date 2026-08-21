@@ -92,6 +92,37 @@ function resolveItem(item, products) {
   return { tipo, product, talla: normalizeTalla(item.variantTitle), qty: item.qty };
 }
 
+// Para el alta/baja rápida: localizar el "modelo de stock" a partir de lo
+// que Jennifer teclee, por nombre o por SKU (con la misma tolerancia a
+// prefijos/alias que ya usa el emparejamiento de packs).
+function resolveStockModel(query, mode, products) {
+  const q = (query || "").trim().toUpperCase();
+  if (!q) return null;
+
+  if (mode === "sku") {
+    let best = null;
+    let bestLen = 0;
+    for (const p of Object.values(products)) {
+      if (p.product_type === "Pack") continue;
+      const candidates = [p.skuPrefix, ...(p.altSkuPrefixes || [])].filter((c) => c && c.length >= 3);
+      for (const c of candidates) {
+        const prefix = c.toUpperCase();
+        if ((q.includes(prefix) || prefix.includes(q)) && prefix.length > bestLen) {
+          best = p;
+          bestLen = prefix.length;
+        }
+      }
+    }
+    return best ? best.stockModel : null;
+  }
+
+  const byName = Object.values(products).filter((p) => p.product_type !== "Pack" && p.stockModel);
+  const exact = byName.find((p) => p.stockModel.toUpperCase() === q);
+  if (exact) return exact.stockModel;
+  const partial = byName.find((p) => p.stockModel.toUpperCase().includes(q));
+  return partial ? partial.stockModel : null;
+}
+
 export class InventoryStore {
   constructor(state, env) {
     this.state = state;
@@ -123,6 +154,9 @@ export class InventoryStore {
     }
     if (url.pathname === "/stock/adjust" && method === "POST") {
       return this.adjustStock(await request.json());
+    }
+    if (url.pathname === "/stock/adjust-by-lookup" && method === "POST") {
+      return this.adjustStockByLookup(await request.json());
     }
     if (url.pathname === "/stock/delete" && method === "POST") {
       return this.deleteStock(await request.json());
@@ -327,6 +361,19 @@ export class InventoryStore {
       await this.state.storage.put("backorders", backorders);
     }
     return Response.json({ ok: true, settled });
+  }
+
+  async adjustStockByLookup({ query, mode, talla, delta }) {
+    const products = await this.load("products", {});
+    const stockModel = resolveStockModel(query, mode, products);
+    if (!stockModel) {
+      return Response.json({ error: "No se ha encontrado ningún modelo que coincida con \"" + query + "\"." }, { status: 404 });
+    }
+    const normalizedTalla = normalizeTalla(talla) || (talla || "").trim().toUpperCase();
+    if (!normalizedTalla) {
+      return Response.json({ error: "Indica una talla válida." }, { status: 400 });
+    }
+    return this.adjustStock({ stockModel, talla: normalizedTalla, delta });
   }
 
   async adjustStock({ stockModel, talla, delta, field }) {

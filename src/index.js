@@ -462,6 +462,27 @@ function renderPage() {
     font-weight: 600;
     white-space: nowrap;
   }
+  .quickform {
+    margin: 0 2rem 1rem;
+    padding: 1.25rem 1.5rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .quickform h3 { margin: 0 0 0.75rem; font-size: 0.95rem; color: var(--text); }
+  .quickform .toolbar { padding: 0; }
+  .quickform select, .quickform input[type="text"] {
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    background: white;
+  }
+  #quick-query { min-width: 260px; }
+  #quick-talla { width: 160px; }
+  #quick-qty { width: 80px; padding: 10px 8px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+  #quick-baja { background: var(--muted); }
+  #quick-baja:hover { background: #4a5a52; }
   #color-filter, #stock-model-select {
     padding: 10px 14px;
     border: 1px solid var(--border);
@@ -602,9 +623,25 @@ function renderPage() {
 </div>
 
 <div id="view-stock" style="display:none">
+  <div class="quickform">
+    <h3>Dar de alta / baja</h3>
+    <div class="toolbar">
+      <select id="quick-mode">
+        <option value="nombre">Por nombre</option>
+        <option value="sku">Por SKU</option>
+      </select>
+      <input id="quick-query" type="text" list="stock-models-datalist" placeholder="Nombre del modelo..." autocomplete="off" />
+      <input id="quick-talla" type="text" placeholder="Talla (ej. 150x190)" autocomplete="off" />
+      <input id="quick-qty" type="number" min="1" value="1" />
+      <button id="quick-alta" type="button">Dar de alta (+)</button>
+      <button id="quick-baja" type="button">Dar de baja (−)</button>
+    </div>
+    <div id="quick-result" class="inventario-count"></div>
+  </div>
   <div class="toolbar">
     <input id="stock-model-select" type="text" list="stock-models-datalist" placeholder="Escribe o elige un modelo..." autocomplete="off" />
     <datalist id="stock-models-datalist"></datalist>
+    <datalist id="stock-skus-datalist"></datalist>
   </div>
   <div id="stock-count" class="inventario-count"></div>
   <div class="table-wrap">
@@ -918,9 +955,14 @@ document.getElementById("sync-catalogo").addEventListener("click", async () => {
 
 let stockRows = [];
 async function loadStock() {
-  const res = await fetch("/api/inventario/stock");
-  stockRows = await res.json();
+  const [stockRes, catalogoRes] = await Promise.all([
+    fetch("/api/inventario/stock"),
+    fetch("/api/inventario/catalogo"),
+  ]);
+  stockRows = await stockRes.json();
+  catalogoProducts = await catalogoRes.json();
   populateStockModelSelect();
+  populateStockSkuDatalist();
   renderStock();
 }
 
@@ -928,6 +970,17 @@ function populateStockModelSelect() {
   const datalist = document.getElementById("stock-models-datalist");
   const models = [...new Set(stockRows.map(r => r.stockModel))].sort((a, b) => a.localeCompare(b));
   datalist.innerHTML = models.map(m => \`<option value="\${escapeAttr(m)}"></option>\`).join("");
+}
+
+function populateStockSkuDatalist() {
+  const datalist = document.getElementById("stock-skus-datalist");
+  const skus = new Set();
+  for (const p of catalogoProducts) {
+    if (p.skuPrefix) skus.add(p.skuPrefix);
+    for (const alt of p.altSkuPrefixes || []) skus.add(alt);
+  }
+  const sorted = [...skus].sort((a, b) => a.localeCompare(b));
+  datalist.innerHTML = sorted.map(s => \`<option value="\${escapeAttr(s)}"></option>\`).join("");
 }
 
 function parseTalla(talla) {
@@ -997,6 +1050,49 @@ async function adjustStock(stockModel, talla, delta, field) {
   });
   loadStock();
 }
+
+function updateQuickModeUI() {
+  const mode = document.getElementById("quick-mode").value;
+  const query = document.getElementById("quick-query");
+  query.setAttribute("list", mode === "sku" ? "stock-skus-datalist" : "stock-models-datalist");
+  query.placeholder = mode === "sku" ? "SKU (ej. COLZNIR)..." : "Nombre del modelo...";
+}
+document.getElementById("quick-mode").addEventListener("change", updateQuickModeUI);
+
+async function quickAdjust(sign) {
+  const mode = document.getElementById("quick-mode").value;
+  const query = document.getElementById("quick-query").value.trim();
+  const talla = document.getElementById("quick-talla").value.trim();
+  const qty = Math.max(1, Number(document.getElementById("quick-qty").value) || 1);
+  const resultEl = document.getElementById("quick-result");
+
+  if (!query || !talla) {
+    resultEl.textContent = "Rellena el modelo/SKU y la talla.";
+    return;
+  }
+
+  const res = await fetch("/api/inventario/stock/adjust-by-lookup", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query, mode, talla, delta: sign * qty }),
+  });
+  const body = await res.json();
+
+  if (!res.ok) {
+    resultEl.textContent = body.error || "No se ha encontrado el artículo.";
+    return;
+  }
+
+  resultEl.textContent = "Actualizado: " + body.stockModel + " " + body.talla + " → " + body.cantidad + " unidades.";
+  document.getElementById("quick-query").value = "";
+  document.getElementById("quick-talla").value = "";
+  document.getElementById("quick-qty").value = "1";
+  document.getElementById("stock-model-select").value = body.stockModel;
+  await loadStock();
+}
+
+document.getElementById("quick-alta").addEventListener("click", () => quickAdjust(1));
+document.getElementById("quick-baja").addEventListener("click", () => quickAdjust(-1));
 
 document.getElementById("stock-model-select").addEventListener("input", renderStock);
 
@@ -1101,6 +1197,10 @@ export default {
 
     if (url.pathname === "/api/inventario/stock" && request.method === "POST") {
       return proxyInventory(env, "/stock/adjust", request);
+    }
+
+    if (url.pathname === "/api/inventario/stock/adjust-by-lookup" && request.method === "POST") {
+      return proxyInventory(env, "/stock/adjust-by-lookup", request);
     }
 
     if (url.pathname === "/api/inventario/stock/delete" && request.method === "POST") {
