@@ -336,7 +336,7 @@ export class InventoryStore {
   // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
   // columna. El excedente de vendidoPendiente se libera cuando el pedido
   // que lo generó se marca como enviado (ver settleShipment).
-  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack) {
+  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate) {
     const key = stockKey(item.product.stockModel, item.talla);
     const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
     const covered = Math.min(row.cantidad, item.qty);
@@ -376,7 +376,9 @@ export class InventoryStore {
           talla: item.talla,
           tipo: item.tipo,
           cantidad: falta,
-          fecha: new Date().toISOString(),
+          // Fecha del pedido original (no la de hoy), para saber cuánto
+          // lleva esperando el cliente de verdad.
+          fecha: orderDate || new Date().toISOString(),
           estado: "pendiente",
           recibidoFabrica: false,
           // Solo tiene sentido para colchones dentro de un pack con
@@ -534,7 +536,7 @@ export class InventoryStore {
     return Response.json(entry);
   }
 
-  async processSale({ orderId, orderNumber, items, force }) {
+  async processSale({ orderId, orderNumber, items, force, orderDate }) {
     // Mientras el catálogo/stock no esté configurado del todo, Jennifer
     // pidió no tocar los pedidos que van entrando (ni agencia ni stock).
     // Cuando esté todo listo, un POST a /admin/resume lo reactiva y los
@@ -576,7 +578,7 @@ export class InventoryStore {
       agencia = "FURNITURE";
       for (const item of flat) {
         if (!STOCK_TYPES.has(item.tipo) || !item.product || item.product.noStock) continue;
-        const falta = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, true);
+        const falta = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, true, orderDate);
         if (item.tipo === "colchon" && falta > 0) {
           pendingManufacture = { modelo: item.product.stockModel, talla: item.talla, cantidad: falta };
         }
@@ -586,7 +588,7 @@ export class InventoryStore {
       agencia = colchones.some((c) => c.product.exceptionFurniture) ? "FURNITURE" : "SEUR";
       for (const item of flat) {
         if (!STOCK_TYPES.has(item.tipo) || !item.product || item.product.noStock) continue;
-        await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, false);
+        await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, false, orderDate);
       }
     }
 

@@ -664,7 +664,7 @@ function renderPage() {
   <div id="pendientes-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="pendientes-table">
-      <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha</th><th>Referencia</th><th>Camión estimado</th><th>Recibido de fábrica</th></tr></thead>
+      <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha del pedido</th><th>Referencia</th><th>Camión estimado</th><th>Recibido de fábrica</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>

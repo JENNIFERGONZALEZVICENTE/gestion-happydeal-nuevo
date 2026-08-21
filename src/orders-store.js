@@ -160,7 +160,7 @@ export class OrdersStore {
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force, orderDate: order.orderDate }),
     });
     const { agencia, pendingManufacture, needsReview, paused } = await res.json();
     // Si Inventario está en pausa, no se marca inventoryProcessed: el
