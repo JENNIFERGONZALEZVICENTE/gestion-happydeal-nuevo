@@ -564,8 +564,14 @@ function renderPage() {
   <ul id="inventario-list">
     <li><a href="#" class="nav-link" data-inventario="catalogo">Catálogo</a></li>
     <li><a href="#" class="nav-link" data-inventario="stock">Stock</a></li>
-    <li><a href="#" class="nav-link" data-inventario="pendientes">Pendientes de fabricante</a></li>
     <li><a href="#" class="nav-link" data-inventario="historial">Historial de stock</a></li>
+  </ul>
+  <button class="section-title" id="proveedores-toggle">
+    <span>Proveedores</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="proveedores-list">
+    <li><a href="#" class="nav-link" data-proveedores="pendientes">Pendientes de fábrica</a></li>
   </ul>
 </nav>
 <div class="main">
@@ -876,7 +882,7 @@ function selectPlatform(id) {
   }
 }
 
-const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", pendientes: "Pendientes de fabricante", historial: "Historial de stock" };
+const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", historial: "Historial de stock" };
 function selectInventario(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.inventario === id));
   document.getElementById("view-title").textContent = "Inventario · " + INVENTARIO_LABELS[id];
@@ -884,8 +890,16 @@ function selectInventario(id) {
   document.getElementById("view-" + id).style.display = "block";
   if (id === "catalogo") loadCatalogo();
   if (id === "stock") loadStock();
-  if (id === "pendientes") loadPendientes();
   if (id === "historial") loadHistorial();
+}
+
+const PROVEEDORES_LABELS = { pendientes: "Pendientes de fábrica" };
+function selectProveedores(id) {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.proveedores === id));
+  document.getElementById("view-title").textContent = "Proveedores · " + PROVEEDORES_LABELS[id];
+  hideAllViews();
+  document.getElementById("view-" + id).style.display = "block";
+  if (id === "pendientes") loadPendientes();
 }
 
 document.querySelectorAll(".nav-link").forEach(a => {
@@ -893,6 +907,7 @@ document.querySelectorAll(".nav-link").forEach(a => {
     e.preventDefault();
     if (a.dataset.platform) selectPlatform(a.dataset.platform);
     else if (a.dataset.inventario) selectInventario(a.dataset.inventario);
+    else if (a.dataset.proveedores) selectProveedores(a.dataset.proveedores);
   });
 });
 
@@ -908,6 +923,13 @@ const inventarioListEl = document.getElementById("inventario-list");
 inventarioToggle.addEventListener("click", () => {
   inventarioToggle.classList.toggle("open");
   inventarioListEl.classList.toggle("open");
+});
+
+const proveedoresToggle = document.getElementById("proveedores-toggle");
+const proveedoresListEl = document.getElementById("proveedores-list");
+proveedoresToggle.addEventListener("click", () => {
+  proveedoresToggle.classList.toggle("open");
+  proveedoresListEl.classList.toggle("open");
 });
 
 let catalogoProducts = [];
