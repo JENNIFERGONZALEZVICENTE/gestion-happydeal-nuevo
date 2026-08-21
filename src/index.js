@@ -565,6 +565,7 @@ function renderPage() {
     <li><a href="#" class="nav-link" data-inventario="catalogo">Catálogo</a></li>
     <li><a href="#" class="nav-link" data-inventario="stock">Stock</a></li>
     <li><a href="#" class="nav-link" data-inventario="pendientes">Pendientes de fabricante</a></li>
+    <li><a href="#" class="nav-link" data-inventario="historial">Historial de stock</a></li>
   </ul>
 </nav>
 <div class="main">
@@ -657,6 +658,16 @@ function renderPage() {
   <div class="table-wrap">
     <table id="pendientes-table">
       <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha</th><th>Recibido de fábrica</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-historial" style="display:none">
+  <div id="historial-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="historial-table">
+      <thead><tr><th>Fecha</th><th>Modelo</th><th>Talla</th><th>Campo</th><th>Cambio</th><th>Resultado</th><th>Origen</th><th>Detalle</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -845,7 +856,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes"];
+const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes", "view-historial"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -865,7 +876,7 @@ function selectPlatform(id) {
   }
 }
 
-const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", pendientes: "Pendientes de fabricante" };
+const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", pendientes: "Pendientes de fabricante", historial: "Historial de stock" };
 function selectInventario(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.inventario === id));
   document.getElementById("view-title").textContent = "Inventario · " + INVENTARIO_LABELS[id];
@@ -874,6 +885,7 @@ function selectInventario(id) {
   if (id === "catalogo") loadCatalogo();
   if (id === "stock") loadStock();
   if (id === "pendientes") loadPendientes();
+  if (id === "historial") loadHistorial();
 }
 
 document.querySelectorAll(".nav-link").forEach(a => {
@@ -1046,7 +1058,7 @@ async function adjustStock(stockModel, talla, delta, field) {
   await fetch("/api/inventario/stock", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stockModel, talla, delta, field }),
+    body: JSON.stringify({ stockModel, talla, delta, field, usuario: currentUser }),
   });
   loadStock();
 }
@@ -1074,7 +1086,7 @@ async function quickAdjust(sign) {
   const res = await fetch("/api/inventario/stock/adjust-by-lookup", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ query, mode, talla, delta: sign * qty }),
+    body: JSON.stringify({ query, mode, talla, delta: sign * qty, usuario: currentUser }),
   });
   const body = await res.json();
 
@@ -1126,6 +1138,37 @@ function renderPendientes() {
 async function resolverPendiente(id) {
   await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST" });
   loadPendientes();
+}
+
+const HISTORIAL_ORIGEN_LABELS = { manual: "Manual", venta: "Venta", envio: "Envío" };
+const HISTORIAL_CAMPO_LABELS = { cantidad: "Stock real", vendidoPendiente: "Vendido pendiente", pedidoProveedor: "Pedido a proveedor" };
+
+let historialMovimientos = [];
+async function loadHistorial() {
+  const res = await fetch("/api/inventario/movimientos");
+  historialMovimientos = await res.json();
+  renderHistorial();
+}
+
+function renderHistorial() {
+  const tbody = document.querySelector("#historial-table tbody");
+  tbody.innerHTML = historialMovimientos.map(m => {
+    const detalle = m.origen === "manual" ? (m.usuario || "—") : (m.orderNumber ? "BEZEN" + m.orderNumber : "—");
+    const signo = m.delta > 0 ? "+" : "";
+    return \`
+    <tr>
+      <td>\${new Date(m.fecha).toLocaleString("es-ES")}</td>
+      <td>\${m.stockModel}</td>
+      <td>\${m.talla}</td>
+      <td>\${HISTORIAL_CAMPO_LABELS[m.campo] || m.campo}</td>
+      <td class="\${m.delta < 0 ? "cantidad-baja" : ""}">\${signo}\${m.delta}</td>
+      <td>\${m.resultante}</td>
+      <td>\${HISTORIAL_ORIGEN_LABELS[m.origen] || m.origen}</td>
+      <td>\${detalle}</td>
+    </tr>
+  \`;
+  }).join("");
+  document.getElementById("historial-count").textContent = historialMovimientos.length + " movimientos (los últimos 1000)";
 }
 
 function connectWS() {
@@ -1201,6 +1244,10 @@ export default {
 
     if (url.pathname === "/api/inventario/stock/adjust-by-lookup" && request.method === "POST") {
       return proxyInventory(env, "/stock/adjust-by-lookup", request);
+    }
+
+    if (url.pathname === "/api/inventario/movimientos" && request.method === "GET") {
+      return proxyInventory(env, "/movements", request);
     }
 
     if (url.pathname === "/api/inventario/stock/delete" && request.method === "POST") {

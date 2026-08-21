@@ -134,6 +134,29 @@ export class InventoryStore {
     return value === undefined ? fallback : value;
   }
 
+  // Historial de movimientos de stock: tanto altas/bajas manuales como los
+  // descuentos automáticos por venta y las liberaciones al enviar un
+  // pedido. Se guarda con lo justo para poder auditar quién/qué lo generó,
+  // recortando a los últimos MAX_MOVEMENTS para no crecer sin límite.
+  async logMovement({ stockModel, talla, campo, delta, resultante, origen, usuario, orderNumber }) {
+    const movements = await this.load("movements", []);
+    movements.push({
+      id: crypto.randomUUID(),
+      fecha: new Date().toISOString(),
+      stockModel,
+      talla,
+      campo,
+      delta,
+      resultante,
+      origen,
+      usuario: usuario || null,
+      orderNumber: orderNumber || null,
+    });
+    const MAX_MOVEMENTS = 1000;
+    if (movements.length > MAX_MOVEMENTS) movements.splice(0, movements.length - MAX_MOVEMENTS);
+    await this.state.storage.put("movements", movements);
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const method = request.method;
@@ -160,6 +183,10 @@ export class InventoryStore {
     }
     if (url.pathname === "/stock/delete" && method === "POST") {
       return this.deleteStock(await request.json());
+    }
+    if (url.pathname === "/movements" && method === "GET") {
+      const movements = await this.load("movements", []);
+      return Response.json([...movements].reverse());
     }
     if (url.pathname === "/backorders" && method === "GET") {
       const backorders = await this.load("backorders", []);
@@ -305,15 +332,35 @@ export class InventoryStore {
   // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
   // columna. El excedente de vendidoPendiente se libera cuando el pedido
   // que lo generó se marca como enviado (ver settleShipment).
-  applyStockUsage(stock, backorders, item, orderId, orderNumber) {
+  async applyStockUsage(stock, backorders, item, orderId, orderNumber) {
     const key = stockKey(item.product.stockModel, item.talla);
     const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
     const covered = Math.min(row.cantidad, item.qty);
     row.cantidad -= covered;
+    if (covered > 0) {
+      await this.logMovement({
+        stockModel: item.product.stockModel,
+        talla: item.talla,
+        campo: "cantidad",
+        delta: -covered,
+        resultante: row.cantidad,
+        origen: "venta",
+        orderNumber,
+      });
+    }
     const falta = item.qty - covered;
     if (falta > 0) {
       if (item.tipo === "colchon") {
         row.vendidoPendiente = (row.vendidoPendiente || 0) + falta;
+        await this.logMovement({
+          stockModel: item.product.stockModel,
+          talla: item.talla,
+          campo: "vendidoPendiente",
+          delta: falta,
+          resultante: row.vendidoPendiente,
+          origen: "venta",
+          orderNumber,
+        });
       }
       const id = `${orderId}-${key}`;
       if (!backorders.some((b) => b.id === id)) {
@@ -349,8 +396,18 @@ export class InventoryStore {
       const key = stockKey(b.stockModel, b.talla);
       const row = stock[key];
       if (row) {
-        row.vendidoPendiente = Math.max(0, (row.vendidoPendiente || 0) - b.cantidad);
+        const before = row.vendidoPendiente || 0;
+        row.vendidoPendiente = Math.max(0, before - b.cantidad);
         stock[key] = row;
+        await this.logMovement({
+          stockModel: b.stockModel,
+          talla: b.talla,
+          campo: "vendidoPendiente",
+          delta: row.vendidoPendiente - before,
+          resultante: row.vendidoPendiente,
+          origen: "envio",
+          orderNumber: b.orderNumber,
+        });
       }
       b.estado = "servido";
       settled++;
@@ -363,7 +420,7 @@ export class InventoryStore {
     return Response.json({ ok: true, settled });
   }
 
-  async adjustStockByLookup({ query, mode, talla, delta }) {
+  async adjustStockByLookup({ query, mode, talla, delta, usuario }) {
     const products = await this.load("products", {});
     const stockModel = resolveStockModel(query, mode, products);
     if (!stockModel) {
@@ -373,10 +430,10 @@ export class InventoryStore {
     if (!normalizedTalla) {
       return Response.json({ error: "Indica una talla válida." }, { status: 400 });
     }
-    return this.adjustStock({ stockModel, talla: normalizedTalla, delta });
+    return this.adjustStock({ stockModel, talla: normalizedTalla, delta, usuario });
   }
 
-  async adjustStock({ stockModel, talla, delta, field }) {
+  async adjustStock({ stockModel, talla, delta, field, usuario }) {
     const targetField = field === "pedidoProveedor" ? "pedidoProveedor" : "cantidad";
     const stock = await this.load("stock", {});
     const key = stockKey(stockModel, talla);
@@ -384,6 +441,15 @@ export class InventoryStore {
     row[targetField] = Math.max(0, (row[targetField] || 0) + Number(delta));
     stock[key] = row;
     await this.state.storage.put("stock", stock);
+    await this.logMovement({
+      stockModel,
+      talla,
+      campo: targetField,
+      delta: Number(delta),
+      resultante: row[targetField],
+      origen: "manual",
+      usuario,
+    });
     return Response.json(row);
   }
 
@@ -467,7 +533,7 @@ export class InventoryStore {
       agencia = "FURNITURE";
       for (const item of flat) {
         if (!STOCK_TYPES.has(item.tipo) || !item.product || item.product.noStock) continue;
-        const falta = this.applyStockUsage(stock, backorders, item, orderId, orderNumber);
+        const falta = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber);
         if (item.tipo === "colchon" && falta > 0) {
           pendingManufacture = { modelo: item.product.stockModel, talla: item.talla, cantidad: falta };
         }
@@ -477,7 +543,7 @@ export class InventoryStore {
       agencia = colchones.some((c) => c.product.exceptionFurniture) ? "FURNITURE" : "SEUR";
       for (const item of flat) {
         if (!STOCK_TYPES.has(item.tipo) || !item.product || item.product.noStock) continue;
-        this.applyStockUsage(stock, backorders, item, orderId, orderNumber);
+        await this.applyStockUsage(stock, backorders, item, orderId, orderNumber);
       }
     }
 
