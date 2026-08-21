@@ -469,7 +469,7 @@ function renderPage() {
     font-size: 14px;
     background: white;
   }
-  #stock-model-select { min-width: 280px; }
+  #stock-model-select { min-width: 520px; width: 100%; max-width: 640px; }
   .estado-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; white-space: normal; }
   .estado-select {
     padding: 6px 8px;
