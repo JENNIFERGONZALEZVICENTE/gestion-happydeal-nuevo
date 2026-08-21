@@ -1074,6 +1074,10 @@ export default {
       return proxyInventory(env, "/stock/adjust", request);
     }
 
+    if (url.pathname === "/api/inventario/stock/delete" && request.method === "POST") {
+      return proxyInventory(env, "/stock/delete", request);
+    }
+
     if (url.pathname === "/api/inventario/pendientes" && request.method === "GET") {
       return proxyInventory(env, "/backorders", request);
     }

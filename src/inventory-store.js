@@ -118,6 +118,9 @@ export class InventoryStore {
     if (url.pathname === "/stock/adjust" && method === "POST") {
       return this.adjustStock(await request.json());
     }
+    if (url.pathname === "/stock/delete" && method === "POST") {
+      return this.deleteStock(await request.json());
+    }
     if (url.pathname === "/backorders" && method === "GET") {
       const backorders = await this.load("backorders", []);
       return Response.json(backorders);
@@ -316,6 +319,17 @@ export class InventoryStore {
     stock[key] = row;
     await this.state.storage.put("stock", stock);
     return Response.json(row);
+  }
+
+  // Mantenimiento puntual: borra una fila de stock suelta (ej. filas de
+  // prueba). No expuesto en la UI, solo por API.
+  async deleteStock({ stockModel, talla }) {
+    const stock = await this.load("stock", {});
+    const key = stockKey(stockModel, talla);
+    const existed = key in stock;
+    delete stock[key];
+    await this.state.storage.put("stock", stock);
+    return Response.json({ ok: true, existed });
   }
 
   // Mantenimiento puntual: pone todo el stock a 0 y borra los pendientes de
