@@ -914,7 +914,7 @@ async function loadStock() {
 }
 
 function parseTalla(talla) {
-  const m = (talla || "").match(/^(\d+)X(\d+)$/);
+  const m = (talla || "").match(/^(\\d+)X(\\d+)$/);
   if (m) return [Number(m[1]), Number(m[2])];
   const n = Number(talla);
   return [Number.isNaN(n) ? Infinity : n, 0];
