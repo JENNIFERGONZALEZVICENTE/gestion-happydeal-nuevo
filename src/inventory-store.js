@@ -130,6 +130,10 @@ export class InventoryStore {
       return this.processSale(await request.json());
     }
 
+    if (url.pathname === "/admin/reset-stock" && method === "POST") {
+      return this.resetStock();
+    }
+
     return new Response("not found", { status: 404 });
   }
 
@@ -228,6 +232,18 @@ export class InventoryStore {
     stock[key] = row;
     await this.state.storage.put("stock", stock);
     return Response.json(row);
+  }
+
+  // Mantenimiento puntual: pone todo el stock a 0 y borra los pendientes de
+  // fabricante. No expuesto en la UI a propósito (solo por API), pensado
+  // para arrancar el conteo real de cero cuando el histórico de pedidos ya
+  // procesado dejó cantidades que no representan stock físico real.
+  async resetStock() {
+    const stock = await this.load("stock", {});
+    for (const key of Object.keys(stock)) stock[key].cantidad = 0;
+    await this.state.storage.put("stock", stock);
+    await this.state.storage.put("backorders", []);
+    return Response.json({ ok: true, filas: Object.keys(stock).length });
   }
 
   async resolveBackorder(id) {

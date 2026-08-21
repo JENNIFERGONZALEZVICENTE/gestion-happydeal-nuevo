@@ -1064,6 +1064,17 @@ export default {
       return proxyInventory(env, `/backorders/${resolvePendingMatch[1]}/resolver`, request);
     }
 
+    if (url.pathname === "/api/inventario/admin/reset-stock" && request.method === "POST") {
+      return proxyInventory(env, "/admin/reset-stock", request);
+    }
+
+    if (url.pathname === "/api/pedidos/shopify/clear-pending" && request.method === "POST") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/orders/clear-pending", { method: "POST" });
+      return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
     return new Response("not found", { status: 404 });
   },
 

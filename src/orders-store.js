@@ -87,6 +87,24 @@ export class OrdersStore {
       return new Response("ok");
     }
 
+    // Mantenimiento puntual: limpia el aviso de "colchón pendiente de
+    // fabricante" que quedó calculado contra un stock histórico erróneo
+    // (arrancado a 0 y descontado con todo el histórico de pedidos). No
+    // toca colorTag/observaciones/agencia/inventoryProcessed.
+    if (url.pathname === "/orders/clear-pending" && request.method === "POST") {
+      const orders = (await this.state.storage.get("orders")) || {};
+      let cleared = 0;
+      for (const order of Object.values(orders)) {
+        if (order.pendingManufacture) {
+          order.pendingManufacture = null;
+          cleared++;
+        }
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, cleared });
+    }
+
     if (url.pathname === "/orders/meta" && request.method === "POST") {
       const { id, colorTag, observaciones } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
