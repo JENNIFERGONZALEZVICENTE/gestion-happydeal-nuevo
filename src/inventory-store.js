@@ -173,7 +173,10 @@ export class InventoryStore {
       };
       entry.title = sp.title;
       entry.product_type = sp.product_type;
-      entry.skuPrefix = longestCommonPrefix(skus);
+      // Si Jennifer ha corregido el SKU a mano (la detección automática por
+      // prefijo común falla con pocas variantes o SKU irregulares), no lo
+      // recalculamos en cada sync.
+      if (!entry.skuPrefixManual) entry.skuPrefix = longestCommonPrefix(skus);
       entry.tallas = [...new Set((sp.variants || []).map((v) => normalizeTalla(v.title)).filter(Boolean))];
       products[sp.id] = entry;
 
@@ -191,7 +194,7 @@ export class InventoryStore {
     return Response.json({ ok: true, total: Object.keys(products).length });
   }
 
-  async updateFlags({ productId, exceptionFurniture, noStock, stockModel }) {
+  async updateFlags({ productId, exceptionFurniture, noStock, stockModel, skuPrefix }) {
     const products = await this.load("products", {});
     const entry = products[productId];
     if (!entry) return new Response("not found", { status: 404 });
@@ -201,6 +204,10 @@ export class InventoryStore {
     if (exceptionFurniture !== undefined) entry.exceptionFurniture = !!exceptionFurniture;
     if (noStock !== undefined) entry.noStock = !!noStock;
     if (stockModel !== undefined && stockModel.trim()) entry.stockModel = stockModel.trim();
+    if (skuPrefix !== undefined && skuPrefix.trim()) {
+      entry.skuPrefix = skuPrefix.trim();
+      entry.skuPrefixManual = true;
+    }
     products[productId] = entry;
     await this.state.storage.put("products", products);
 

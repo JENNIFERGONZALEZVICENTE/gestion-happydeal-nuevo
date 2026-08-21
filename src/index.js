@@ -495,7 +495,7 @@ function renderPage() {
     font-family: inherit;
   }
   .inventario-count { color: var(--muted); font-size: 0.85rem; padding: 0 2rem 0.5rem; }
-  .stock-model-input {
+  .stock-model-input, .sku-input {
     width: 100%;
     min-width: 180px;
     padding: 6px 8px;
@@ -594,7 +594,7 @@ function renderPage() {
   <div class="table-wrap">
     <table id="catalogo-table">
       <thead>
-        <tr><th>Producto</th><th>Modelo de stock</th><th>Excepción FURNITURE</th><th>No llevamos stock</th></tr>
+        <tr><th>Producto</th><th>Modelo de stock</th><th>SKU</th><th>Excepción FURNITURE</th><th>No llevamos stock</th></tr>
       </thead>
       <tbody></tbody>
     </table>
@@ -877,6 +877,7 @@ function renderCatalogo() {
     <tr>
       <td>\${p.title}</td>
       <td><input type="text" class="stock-model-input" data-id="\${p.productId}" value="\${escapeAttr(p.stockModel)}"></td>
+      <td><input type="text" class="sku-input" data-id="\${p.productId}" value="\${escapeAttr(p.skuPrefix)}" placeholder="ej. COLZNIR"></td>
       <td><input type="checkbox" class="exception-check" data-id="\${p.productId}"\${p.exceptionFurniture ? " checked" : ""}></td>
       <td><input type="checkbox" class="nostock-check" data-id="\${p.productId}"\${p.noStock ? " checked" : ""}></td>
     </tr>
@@ -885,6 +886,9 @@ function renderCatalogo() {
 
   tbody.querySelectorAll(".stock-model-input").forEach(inp => {
     inp.addEventListener("change", () => saveCatalogoFlags(inp.dataset.id, { stockModel: inp.value }));
+  });
+  tbody.querySelectorAll(".sku-input").forEach(inp => {
+    inp.addEventListener("change", () => saveCatalogoFlags(inp.dataset.id, { skuPrefix: inp.value.toUpperCase() }));
   });
   tbody.querySelectorAll(".exception-check").forEach(chk => {
     chk.addEventListener("change", () => saveCatalogoFlags(chk.dataset.id, { exceptionFurniture: chk.checked }));
