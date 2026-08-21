@@ -571,7 +571,7 @@ function renderPage() {
     <span class="chevron">▶</span>
   </button>
   <ul id="proveedores-list">
-    <li><a href="#" class="nav-link" data-proveedores="pendientes">Pendientes de fábrica</a></li>
+    <li><a href="#" class="nav-link" data-proveedores="pendientes">Pendientes colchones</a></li>
   </ul>
 </nav>
 <div class="main">
@@ -663,7 +663,7 @@ function renderPage() {
   <div id="pendientes-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="pendientes-table">
-      <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha</th><th>Recibido de fábrica</th></tr></thead>
+      <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha</th><th>Referencia</th><th>Camión estimado</th><th>Recibido de fábrica</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -893,7 +893,7 @@ function selectInventario(id) {
   if (id === "historial") loadHistorial();
 }
 
-const PROVEEDORES_LABELS = { pendientes: "Pendientes de fábrica" };
+const PROVEEDORES_LABELS = { pendientes: "Pendientes colchones" };
 function selectProveedores(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.proveedores === id));
   document.getElementById("view-title").textContent = "Proveedores · " + PROVEEDORES_LABELS[id];
@@ -1140,25 +1140,54 @@ async function loadPendientes() {
 function renderPendientes() {
   const pendientes = backorders.filter(b => b.estado === "pendiente");
   const tbody = document.querySelector("#pendientes-table tbody");
-  tbody.innerHTML = pendientes.map(b => \`
+  tbody.innerHTML = pendientes.map(b => {
+    const esPackColchon = b.esPack && b.tipo === "colchon";
+    const referenciaCell = esPackColchon
+      ? \`<select class="tipo-envio-select" data-id="\${b.id}">
+           <option value="FPK"\${b.tipoEnvio === "FPK" ? " selected" : ""}>FPKBEZEN\${b.orderNumber} (independiente)</option>
+           <option value="FUR"\${b.tipoEnvio === "FUR" ? " selected" : ""}>FURBEZEN\${b.orderNumber} (junto)</option>
+         </select>\`
+      : "—";
+    const fechaCell = esPackColchon
+      ? \`<input type="date" class="fecha-camion-input" data-id="\${b.id}" value="\${b.fechaEstimadaLlegada ? b.fechaEstimadaLlegada.slice(0, 10) : ""}">\`
+      : "—";
+    return \`
     <tr>
       <td>BEZEN\${b.orderNumber}</td>
       <td>\${b.stockModel}</td>
       <td>\${b.talla}</td>
       <td>\${b.cantidad}</td>
       <td>\${new Date(b.fecha).toLocaleDateString("es-ES")}</td>
+      <td>\${referenciaCell}</td>
+      <td>\${fechaCell}</td>
       <td><button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" : "Marcar recibido"}</button></td>
     </tr>
-  \`).join("");
+  \`;
+  }).join("");
   document.getElementById("pendientes-count").textContent = pendientes.length + " artículos pendientes de fabricante (se cierran solos al marcarse el pedido como enviado)";
 
   tbody.querySelectorAll(".resolver-btn").forEach(btn => {
     btn.addEventListener("click", () => resolverPendiente(btn.dataset.id));
   });
+  tbody.querySelectorAll(".tipo-envio-select").forEach(sel => {
+    sel.addEventListener("change", () => updateBackorderPlan(sel.dataset.id, { tipoEnvio: sel.value }));
+  });
+  tbody.querySelectorAll(".fecha-camion-input").forEach(inp => {
+    inp.addEventListener("change", () => updateBackorderPlan(inp.dataset.id, { fechaEstimadaLlegada: inp.value || null }));
+  });
 }
 
 async function resolverPendiente(id) {
   await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST" });
+  loadPendientes();
+}
+
+async function updateBackorderPlan(id, patch) {
+  await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/plan", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
   loadPendientes();
 }
 
@@ -1286,6 +1315,11 @@ async function handleFetch(request, env) {
     const resolvePendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/resolver$/);
     if (resolvePendingMatch && request.method === "POST") {
       return proxyInventory(env, `/backorders/${resolvePendingMatch[1]}/resolver`, request);
+    }
+
+    const planPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/plan$/);
+    if (planPendingMatch && request.method === "POST") {
+      return proxyInventory(env, `/backorders/${planPendingMatch[1]}/plan`, request);
     }
 
     if (url.pathname === "/api/inventario/admin/reset-stock" && request.method === "POST") {

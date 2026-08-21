@@ -196,6 +196,10 @@ export class InventoryStore {
     if (resolveMatch && method === "POST") {
       return this.resolveBackorder(decodeURIComponent(resolveMatch[1]));
     }
+    const planMatch = url.pathname.match(/^\/backorders\/([^/]+)\/plan$/);
+    if (planMatch && method === "POST") {
+      return this.updateBackorderPlan(decodeURIComponent(planMatch[1]), await request.json());
+    }
     if (url.pathname === "/process-sale" && method === "POST") {
       return this.processSale(await request.json());
     }
@@ -332,7 +336,7 @@ export class InventoryStore {
   // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
   // columna. El excedente de vendidoPendiente se libera cuando el pedido
   // que lo generó se marca como enviado (ver settleShipment).
-  async applyStockUsage(stock, backorders, item, orderId, orderNumber) {
+  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack) {
     const key = stockKey(item.product.stockModel, item.talla);
     const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
     const covered = Math.min(row.cantidad, item.qty);
@@ -370,10 +374,19 @@ export class InventoryStore {
           orderNumber,
           stockModel: item.product.stockModel,
           talla: item.talla,
+          tipo: item.tipo,
           cantidad: falta,
           fecha: new Date().toISOString(),
           estado: "pendiente",
           recibidoFabrica: false,
+          // Solo tiene sentido para colchones dentro de un pack con
+          // tapicería: referencia FURBEZEN (tiene que salir junto con la
+          // tapicería) o FPKBEZEN (puede salir independiente), por defecto
+          // FPK hasta que se indique lo contrario o se sepa una fecha de
+          // camión cercana. Ver updateBackorderPlan.
+          esPack: !!esPack,
+          tipoEnvio: "FPK",
+          fechaEstimadaLlegada: null,
         });
       }
     }
@@ -493,6 +506,34 @@ export class InventoryStore {
     return Response.json(entry);
   }
 
+  // Decide la referencia FURBEZEN (tiene que salir junto con la tapicería)
+  // o FPKBEZEN (puede salir independiente) de un pendiente de colchón en
+  // pack. Si se manda tipoEnvio, es un cambio manual directo (el cliente
+  // lo pidió así). Si se manda fechaEstimadaLlegada, se recalcula sola:
+  // dentro de ~7 días (lo que tarda POLIVAL en la tapicería) → FUR, si no
+  // o si no se sabe la fecha → FPK. Siempre queda editable a mano después.
+  async updateBackorderPlan(id, { fechaEstimadaLlegada, tipoEnvio }) {
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
+
+    if (tipoEnvio !== undefined) {
+      entry.tipoEnvio = tipoEnvio === "FUR" ? "FUR" : "FPK";
+    } else if (fechaEstimadaLlegada !== undefined) {
+      entry.fechaEstimadaLlegada = fechaEstimadaLlegada || null;
+      if (entry.fechaEstimadaLlegada) {
+        const limite = new Date();
+        limite.setDate(limite.getDate() + 7);
+        entry.tipoEnvio = new Date(entry.fechaEstimadaLlegada) <= limite ? "FUR" : "FPK";
+      } else {
+        entry.tipoEnvio = "FPK";
+      }
+    }
+
+    await this.state.storage.put("backorders", backorders);
+    return Response.json(entry);
+  }
+
   async processSale({ orderId, orderNumber, items }) {
     // Mientras el catálogo/stock no esté configurado del todo, Jennifer
     // pidió no tocar los pedidos que van entrando (ni agencia ni stock).
@@ -533,7 +574,7 @@ export class InventoryStore {
       agencia = "FURNITURE";
       for (const item of flat) {
         if (!STOCK_TYPES.has(item.tipo) || !item.product || item.product.noStock) continue;
-        const falta = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber);
+        const falta = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, true);
         if (item.tipo === "colchon" && falta > 0) {
           pendingManufacture = { modelo: item.product.stockModel, talla: item.talla, cantidad: falta };
         }
@@ -543,7 +584,7 @@ export class InventoryStore {
       agencia = colchones.some((c) => c.product.exceptionFurniture) ? "FURNITURE" : "SEUR";
       for (const item of flat) {
         if (!STOCK_TYPES.has(item.tipo) || !item.product || item.product.noStock) continue;
-        await this.applyStockUsage(stock, backorders, item, orderId, orderNumber);
+        await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, false);
       }
     }
 
