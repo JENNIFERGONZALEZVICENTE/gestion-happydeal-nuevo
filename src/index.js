@@ -942,13 +942,7 @@ function renderStock() {
       <td>\${r.talla}</td>
       <td class="\${r.cantidad <= 0 ? "cantidad-baja" : ""}">\${r.cantidad}</td>
       <td class="\${r.vendidoPendiente > 0 ? "cantidad-baja" : ""}">\${r.vendidoPendiente || 0}</td>
-      <td>
-        \${pedido}
-        <span class="adjust-form">
-          <button type="button" class="stock-adjust" data-field="pedidoProveedor" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="-1">−</button>
-          <button type="button" class="stock-adjust" data-field="pedidoProveedor" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="1">+</button>
-        </span>
-      </td>
+      <td>\${pedido}</td>
       <td class="\${disponible < 0 ? "cantidad-baja" : ""}">\${disponible}</td>
       <td>
         <span class="adjust-form">
