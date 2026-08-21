@@ -913,12 +913,25 @@ async function loadStock() {
   renderStock();
 }
 
+function parseTalla(talla) {
+  const m = (talla || "").match(/^(\d+)X(\d+)$/);
+  if (m) return [Number(m[1]), Number(m[2])];
+  const n = Number(talla);
+  return [Number.isNaN(n) ? Infinity : n, 0];
+}
+
+function compareTalla(a, b) {
+  const [aw, ah] = parseTalla(a);
+  const [bw, bh] = parseTalla(b);
+  return aw - bw || ah - bh;
+}
+
 function renderStock() {
   const q = document.getElementById("stock-search").value.trim().toLowerCase();
   const filtered = q
     ? stockRows.filter(r => r.stockModel.toLowerCase().includes(q) || r.talla.toLowerCase().includes(q))
     : stockRows;
-  const sorted = [...filtered].sort((a, b) => a.stockModel.localeCompare(b.stockModel) || a.talla.localeCompare(b.talla));
+  const sorted = [...filtered].sort((a, b) => a.stockModel.localeCompare(b.stockModel) || compareTalla(a.talla, b.talla));
   const tbody = document.querySelector("#stock-table tbody");
   tbody.innerHTML = sorted.map(r => \`
     <tr>
