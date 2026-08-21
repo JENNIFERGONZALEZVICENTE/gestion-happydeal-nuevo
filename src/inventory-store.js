@@ -307,11 +307,12 @@ export class InventoryStore {
     return Response.json({ ok: true, settled });
   }
 
-  async adjustStock({ stockModel, talla, delta }) {
+  async adjustStock({ stockModel, talla, delta, field }) {
+    const targetField = field === "pedidoProveedor" ? "pedidoProveedor" : "cantidad";
     const stock = await this.load("stock", {});
     const key = stockKey(stockModel, talla);
-    const row = stock[key] || { stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
-    row.cantidad = Math.max(0, (row.cantidad || 0) + Number(delta));
+    const row = stock[key] || { stockModel, talla, cantidad: 0, vendidoPendiente: 0, pedidoProveedor: 0 };
+    row[targetField] = Math.max(0, (row[targetField] || 0) + Number(delta));
     stock[key] = row;
     await this.state.storage.put("stock", stock);
     return Response.json(row);

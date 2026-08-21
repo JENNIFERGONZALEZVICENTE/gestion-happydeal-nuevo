@@ -607,7 +607,7 @@ function renderPage() {
   <div id="stock-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="stock-table">
-      <thead><tr><th>Modelo</th><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th>Ajustar</th></tr></thead>
+      <thead><tr><th>Modelo</th><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th>Pedido a proveedor</th><th>Disponible al llegar</th><th>Ajustar</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -933,32 +933,44 @@ function renderStock() {
     : stockRows;
   const sorted = [...filtered].sort((a, b) => a.stockModel.localeCompare(b.stockModel) || compareTalla(a.talla, b.talla));
   const tbody = document.querySelector("#stock-table tbody");
-  tbody.innerHTML = sorted.map(r => \`
+  tbody.innerHTML = sorted.map(r => {
+    const pedido = r.pedidoProveedor || 0;
+    const disponible = pedido - (r.vendidoPendiente || 0);
+    return \`
     <tr>
       <td>\${r.stockModel}</td>
       <td>\${r.talla}</td>
       <td class="\${r.cantidad <= 0 ? "cantidad-baja" : ""}">\${r.cantidad}</td>
       <td class="\${r.vendidoPendiente > 0 ? "cantidad-baja" : ""}">\${r.vendidoPendiente || 0}</td>
       <td>
+        \${pedido}
         <span class="adjust-form">
-          <button type="button" class="stock-adjust" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="-1">−</button>
-          <button type="button" class="stock-adjust" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="1">+</button>
+          <button type="button" class="stock-adjust" data-field="pedidoProveedor" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="-1">−</button>
+          <button type="button" class="stock-adjust" data-field="pedidoProveedor" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="1">+</button>
+        </span>
+      </td>
+      <td class="\${disponible < 0 ? "cantidad-baja" : ""}">\${disponible}</td>
+      <td>
+        <span class="adjust-form">
+          <button type="button" class="stock-adjust" data-field="cantidad" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="-1">−</button>
+          <button type="button" class="stock-adjust" data-field="cantidad" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="1">+</button>
         </span>
       </td>
     </tr>
-  \`).join("");
+  \`;
+  }).join("");
   document.getElementById("stock-count").textContent = sorted.length + " artículos";
 
   tbody.querySelectorAll(".stock-adjust").forEach(btn => {
-    btn.addEventListener("click", () => adjustStock(btn.dataset.model, btn.dataset.talla, Number(btn.dataset.delta)));
+    btn.addEventListener("click", () => adjustStock(btn.dataset.model, btn.dataset.talla, Number(btn.dataset.delta), btn.dataset.field));
   });
 }
 
-async function adjustStock(stockModel, talla, delta) {
+async function adjustStock(stockModel, talla, delta, field) {
   await fetch("/api/inventario/stock", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stockModel, talla, delta }),
+    body: JSON.stringify({ stockModel, talla, delta, field }),
   });
   loadStock();
 }
