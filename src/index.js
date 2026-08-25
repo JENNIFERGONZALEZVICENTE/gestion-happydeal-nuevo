@@ -184,6 +184,16 @@ async function handleUpdateMeta(request, env) {
   });
 }
 
+async function handleReviewNote(request, env) {
+  const body = await request.json();
+  const id = env.ORDERS_STORE.idFromName("shopify");
+  const stub = env.ORDERS_STORE.get(id);
+  return stub.fetch("https://do/orders/review-note", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 async function proxyInventory(env, path, request) {
   const stub = inventoryStub(env);
   const init = request.method === "GET" ? undefined : { method: request.method, body: await request.text() };
@@ -402,7 +412,52 @@ function renderPage() {
   .badge.agencia-seur { background: #e0e7ff; color: #3730a3; }
   .badge.agencia-furniture { background: #fce7f3; color: #9d174d; }
   .badge.agencia-pendiente { background: #fef3c7; color: #92400e; margin-top: 4px; }
-  .badge.agencia-revisar { background: #fee2e2; color: #991b1b; }
+  .bell-cell { text-align: center; width: 1%; }
+  .review-bell {
+    background: none;
+    border: none;
+    cursor: pointer;
+    line-height: 1;
+    padding: 2px;
+    color: #ea580c;
+    animation: bell-pulse 1.6s infinite;
+  }
+  .review-bell svg { width: 20px; height: 20px; display: block; }
+  .review-bell.answered { animation: none; color: #16a34a; }
+  @keyframes bell-pulse {
+    0%, 100% { transform: rotate(0); }
+    10% { transform: rotate(-15deg); }
+    20% { transform: rotate(12deg); }
+    30% { transform: rotate(-8deg); }
+    40% { transform: rotate(4deg); }
+    50% { transform: rotate(0); }
+  }
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 61, 36, 0.45);
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: var(--panel, #fff);
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: min(480px, 90vw);
+    max-height: 85vh;
+    overflow-y: auto;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+  }
+  .modal-box h3 { margin: 0 0 0.75rem; color: var(--brand-dark); }
+  .review-question { margin-bottom: 1.1rem; }
+  .review-question:last-child { margin-bottom: 0; }
+  .review-question p { background: #fef3c7; color: #92400e; border-radius: 8px; padding: 0.6rem 0.85rem; margin: 0 0 0.5rem; font-size: 13.5px; }
+  .modal-box textarea { width: 100%; min-height: 60px; box-sizing: border-box; padding: 0.6rem; border: 1px solid var(--border); border-radius: 8px; font: inherit; resize: vertical; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 1rem; }
+  .modal-actions button.secondary { background: transparent; color: var(--brand-dark); border: 1px solid var(--border); }
   .services { color: var(--brand-dark); font-size: 12.5px; }
   .price { font-weight: 600; }
   .placeholder {
@@ -542,7 +597,18 @@ function renderPage() {
   }
   .cantidad-baja { color: #991b1b; font-weight: 700; }
   .resolver-btn { padding: 6px 12px; font-size: 12.5px; }
+  .fabricacion-input { width: 100%; min-width: 220px; min-height: 54px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical; }
+  #pendientes-filter-row th { padding: 4px 8px; background: var(--panel); position: sticky; top: 34px; }
+  #pendientes-filter-row input { width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12.5px; font-weight: 400; text-transform: none; border: 1px solid var(--border); border-radius: 4px; }
+  .pedido-generado-tag { display: block; font-size: 13px; font-weight: 600; color: #146138; margin-top: 4px; }
+  tr.fila-pedido-generado { background: #eafaf0; }
+  tr.fila-pedido-generado:hover { background: #d9f5e3; }
+  tr.fila-grupo-inicio td, tr.fila-grupo-medio td, tr.fila-grupo-fin td { border-left: 2px solid var(--brand); border-right: 2px solid var(--brand); }
+  tr.fila-grupo-inicio td { border-top: 2px solid var(--brand); }
+  tr.fila-grupo-fin td { border-bottom: 2px solid var(--brand); }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 </head>
 <body>
 <div id="user-gate" class="user-gate">
@@ -572,7 +638,11 @@ function renderPage() {
     <span class="chevron">▶</span>
   </button>
   <ul id="proveedores-list">
-    <li><a href="#" class="nav-link" data-proveedores="pendientes">Pendientes colchones</a></li>
+    <li><a href="#" class="nav-link" data-proveedores="polival">Polival</a></li>
+    <li><a href="#" class="nav-link" data-proveedores="luso">Luso</a></li>
+    <li><a href="#" class="nav-link" data-proveedores="new">New</a></li>
+    <li><a href="#" class="nav-link" data-proveedores="decision">Pendiente de decisión</a></li>
+    <li><a href="#" class="nav-link" data-proveedores="revisar">Sin proveedor</a></li>
   </ul>
 </nav>
 <div class="main">
@@ -623,7 +693,7 @@ function renderPage() {
   <div class="table-wrap">
     <table id="catalogo-table">
       <thead>
-        <tr><th>Producto</th><th>Modelo de stock</th><th>SKU (Shopify)</th><th>SKU alternativos (otras plataformas)</th><th>Excepción FURNITURE</th><th>No llevamos stock</th></tr>
+        <tr><th>Producto</th><th>Modelo de stock</th><th>SKU (Shopify)</th><th>SKU alternativos (otras plataformas)</th><th>Proveedor</th><th>Excepción FURNITURE</th><th>No llevamos stock</th></tr>
       </thead>
       <tbody></tbody>
     </table>
@@ -661,10 +731,23 @@ function renderPage() {
 </div>
 
 <div id="view-pendientes" style="display:none">
+  <div class="toolbar" id="pendientes-toolbar" style="display:none">
+    <button type="button" id="generar-pedido-btn" disabled>Generar pedido a fábrica (PDF)</button>
+    <span id="seleccion-count" class="inventario-count" style="padding:0"></span>
+  </div>
   <div id="pendientes-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="pendientes-table">
-      <thead><tr><th>Pedido</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Fecha del pedido</th><th>Referencia</th><th>Camión estimado</th><th>Recibido de fábrica</th></tr></thead>
+      <thead>
+        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Modelo</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Color</th><th>Talla</th><th>Cantidad</th><th>Fecha del pedido</th><th>FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
+        <tr id="pendientes-filter-row">
+          <th></th>
+          <th><input id="pendientes-pedido-search" type="text" placeholder="Filtrar..." /></th>
+          <th></th>
+          <th id="pendientes-refpolival-filter" style="display:none"><input id="pendientes-referencia-search" type="text" placeholder="Filtrar..." /></th>
+          <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+        </tr>
+      </thead>
       <tbody></tbody>
     </table>
   </div>
@@ -680,6 +763,18 @@ function renderPage() {
   </div>
 </div>
 
+
+<div class="modal-overlay" id="review-modal-overlay">
+  <div class="modal-box">
+    <h3 id="review-modal-title">Revisar pedido</h3>
+    <div id="review-modal-questions"></div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="review-modal-cancel">Cerrar</button>
+      <button type="button" id="review-modal-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
 </div>
 <script>
 let allOrders = [];
@@ -687,7 +782,7 @@ const platforms = ${JSON.stringify(PLATFORMS)};
 const USERS = ${JSON.stringify(USERS)};
 const COLOR_ACCESS_USERS = ${JSON.stringify(COLOR_ACCESS_USERS)};
 const COLOR_META = ${JSON.stringify(COLOR_META)};
-const BASE_HEAD = ["Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Situación de envío","Agencia","Precio"];
+const BASE_HEAD = ["","Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Situación de envío","Agencia","Precio"];
 
 let currentUser = localStorage.getItem("hd_user");
 let editing = false;
@@ -715,15 +810,27 @@ function statusBadge(status) {
   return \`<span class="badge \${cls}">\${label}</span>\`;
 }
 
+function isReviewAnswered(order) {
+  const reasons = order.reviewReasons || [];
+  const answers = order.reviewAnswers || [];
+  return reasons.length > 0 && reasons.every((r, i) => (answers[i] || "").trim());
+}
+
+function reviewBell(order) {
+  if (!order.needsReview) return "";
+  const answered = isReviewAnswered(order);
+  const cls = answered ? "review-bell answered" : "review-bell";
+  const title = answered ? "Ya tiene instrucciones — clic para ver/editar" : "Este pedido necesita una decisión — clic para revisar";
+  const icon = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a1 1 0 0 1 1 1v1.06A7.002 7.002 0 0 1 19 11v3.586l1.707 1.707A1 1 0 0 1 20 18H4a1 1 0 0 1-.707-1.707L5 14.586V11a7.002 7.002 0 0 1 6-6.94V3a1 1 0 0 1 1-1zm0 20a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22z"/></svg>';
+  return \`<button type="button" class="\${cls}" data-review-id="\${order.id}" title="\${escapeAttr(title)}">\${icon}</button>\`;
+}
+
 function agenciaBadge(order) {
-  if (!order.agencia) return order.needsReview ? '<span class="badge agencia-revisar">Revisar</span>' : "";
+  if (!order.agencia) return "";
   const cls = order.agencia === "FURNITURE" ? "agencia-furniture" : "agencia-seur";
   let html = \`<span class="badge \${cls}">\${order.agencia}</span>\`;
   if (order.pendingManufacture) {
     html += \`<br><span class="badge agencia-pendiente" title="\${order.pendingManufacture.modelo} \${order.pendingManufacture.talla}">Colchón pendiente</span>\`;
-  }
-  if (order.needsReview) {
-    html += ' <span class="badge agencia-revisar">Revisar</span>';
   }
   return html;
 }
@@ -738,6 +845,7 @@ function render(orders) {
   const tbody = document.querySelector("#orders tbody");
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
+      <td class="bell-cell">\${reviewBell(o)}</td>
       <td>BEZEN\${o.orderNumber}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
@@ -794,6 +902,54 @@ function render(orders) {
   }
 }
 
+let reviewModalOrderId = null;
+function openReviewModal(order) {
+  reviewModalOrderId = order.id;
+  document.getElementById("review-modal-title").textContent = "Revisar pedido BEZEN" + order.orderNumber;
+  const reasons = order.reviewReasons || [];
+  const answers = order.reviewAnswers || [];
+  const questionsEl = document.getElementById("review-modal-questions");
+  questionsEl.innerHTML = reasons.length
+    ? reasons.map((r, i) => \`
+        <div class="review-question">
+          <p>\${r}</p>
+          <textarea class="review-answer-input" data-index="\${i}" placeholder="Tu decisión para esto...">\${escapeAttr(answers[i] || "")}</textarea>
+        </div>
+      \`).join("")
+    : "<p>Este pedido está marcado para revisar.</p>";
+  document.getElementById("review-modal-overlay").classList.add("open");
+}
+function closeReviewModal() {
+  document.getElementById("review-modal-overlay").classList.remove("open");
+  reviewModalOrderId = null;
+}
+document.getElementById("review-modal-cancel").addEventListener("click", closeReviewModal);
+document.getElementById("review-modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "review-modal-overlay") closeReviewModal();
+});
+document.getElementById("review-modal-save").addEventListener("click", async () => {
+  if (reviewModalOrderId == null) return;
+  const inputs = document.querySelectorAll("#review-modal-questions .review-answer-input");
+  const answers = [];
+  inputs.forEach(inp => { answers[Number(inp.dataset.index)] = inp.value; });
+  await fetch("/api/pedidos/shopify/review-note", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: reviewModalOrderId, reviewAnswers: answers }),
+  });
+  const order = allOrders.find(o => String(o.id) === String(reviewModalOrderId));
+  if (order) order.reviewAnswers = answers;
+  closeReviewModal();
+  render(currentFiltered());
+  if (document.getElementById("view-pendientes").style.display !== "none") loadPendientes();
+});
+document.querySelector("#orders tbody").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-review-id]");
+  if (!btn) return;
+  const order = allOrders.find(o => String(o.id) === btn.dataset.reviewId);
+  if (order) openReviewModal(order);
+});
+
 async function saveMeta(id, patch) {
   try {
     await fetch("/api/pedidos/shopify/meta", {
@@ -830,6 +986,8 @@ function applyFilter() {
 }
 
 document.getElementById("search").addEventListener("input", applyFilter);
+document.getElementById("pendientes-referencia-search").addEventListener("input", renderPendientes);
+document.getElementById("pendientes-pedido-search").addEventListener("input", renderPendientes);
 document.getElementById("color-filter").addEventListener("change", applyFilter);
 
 function updateUserBadge() {
@@ -902,13 +1060,15 @@ function selectInventario(id) {
   if (id === "historial") loadHistorial();
 }
 
-const PROVEEDORES_LABELS = { pendientes: "Pendientes colchones" };
+const PROVEEDORES_LABELS = { polival: "Polival", luso: "Luso", new: "New", decision: "Pendiente de decisión", revisar: "Sin proveedor asignado" };
+let currentProveedorFilter = "polival";
 function selectProveedores(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.proveedores === id));
   document.getElementById("view-title").textContent = "Proveedores · " + PROVEEDORES_LABELS[id];
   hideAllViews();
-  document.getElementById("view-" + id).style.display = "block";
-  if (id === "pendientes") loadPendientes();
+  document.getElementById("view-pendientes").style.display = "block";
+  currentProveedorFilter = id;
+  loadPendientes();
 }
 
 document.querySelectorAll(".nav-link").forEach(a => {
@@ -959,6 +1119,14 @@ function renderCatalogo() {
       <td><input type="text" class="stock-model-input" data-id="\${p.productId}" value="\${escapeAttr(p.stockModel)}"></td>
       <td><input type="text" class="sku-input" data-id="\${p.productId}" value="\${escapeAttr(p.skuPrefix)}" placeholder="ej. COLZNIR"></td>
       <td><input type="text" class="alt-sku-input" data-id="\${p.productId}" value="\${escapeAttr((p.altSkuPrefixes || []).join(", "))}" placeholder="ej. COLPHAR, AURORA"></td>
+      <td>
+        <select class="proveedor-select" data-id="\${p.productId}">
+          <option value=""\${!p.proveedor ? " selected" : ""}>— sin asignar —</option>
+          <option value="POLIVAL"\${p.proveedor === "POLIVAL" ? " selected" : ""}>Polival</option>
+          <option value="LUSO"\${p.proveedor === "LUSO" ? " selected" : ""}>Luso</option>
+          <option value="NEW"\${p.proveedor === "NEW" ? " selected" : ""}>New</option>
+        </select>
+      </td>
       <td><input type="checkbox" class="exception-check" data-id="\${p.productId}"\${p.exceptionFurniture ? " checked" : ""}></td>
       <td><input type="checkbox" class="nostock-check" data-id="\${p.productId}"\${p.noStock ? " checked" : ""}></td>
     </tr>
@@ -973,6 +1141,9 @@ function renderCatalogo() {
   });
   tbody.querySelectorAll(".alt-sku-input").forEach(inp => {
     inp.addEventListener("change", () => saveCatalogoFlags(inp.dataset.id, { altSkuPrefixes: inp.value }));
+  });
+  tbody.querySelectorAll(".proveedor-select").forEach(sel => {
+    sel.addEventListener("change", () => saveCatalogoFlags(sel.dataset.id, { proveedor: sel.value }));
   });
   tbody.querySelectorAll(".exception-check").forEach(chk => {
     chk.addEventListener("change", () => saveCatalogoFlags(chk.dataset.id, { exceptionFurniture: chk.checked }));
@@ -1146,35 +1317,107 @@ async function loadPendientes() {
   renderPendientes();
 }
 
+let pedidoFabricaSeleccion = new Set();
 function renderPendientes() {
-  const pendientes = backorders.filter(b => b.estado === "pendiente");
+  const busquedaReferencia = document.getElementById("pendientes-referencia-search").value.trim().toLowerCase();
+  const busquedaPedido = document.getElementById("pendientes-pedido-search").value.trim().toLowerCase();
+  const pendientes = backorders.filter(b => {
+    if (b.estado !== "pendiente") return false;
+    if (busquedaReferencia && !(b.referencia || "").toLowerCase().includes(busquedaReferencia)) return false;
+    if (busquedaPedido && !("bezen" + b.orderNumber).includes(busquedaPedido)) return false;
+    if (currentProveedorFilter === "decision") return !!b.pendingDecision;
+    if (b.pendingDecision) return false;
+    if (currentProveedorFilter === "revisar") return !b.proveedor;
+    return b.proveedor === currentProveedorFilter.toUpperCase();
+  });
   const tbody = document.querySelector("#pendientes-table tbody");
-  tbody.innerHTML = pendientes.map(b => {
+  const isDecisionTab = currentProveedorFilter === "decision";
+  const showCheckbox = ["polival", "luso", "new"].includes(currentProveedorFilter);
+  document.getElementById("pendientes-check-head").style.display = showCheckbox ? "" : "none";
+  document.getElementById("pendientes-toolbar").style.display = showCheckbox ? "flex" : "none";
+  if (!showCheckbox) pedidoFabricaSeleccion.clear();
+  // En Polival nunca hay colchones de pack (esos van en Luso/New), así que
+  // "Camión estimado" (que solo aplica a esos) siempre saldría vacío ahí —
+  // Jennifer pidió quitarla directamente en esa pestaña.
+  const showCamionCol = currentProveedorFilter !== "polival";
+  document.getElementById("pendientes-camion-head").style.display = showCamionCol ? "" : "none";
+  const showRefPolivalCol = currentProveedorFilter === "polival";
+  document.getElementById("pendientes-refpolival-head").style.display = showRefPolivalCol ? "" : "none";
+  document.getElementById("pendientes-refpolival-filter").style.display = showRefPolivalCol ? "" : "none";
+
+  // Varios artículos del mismo pedido se agrupan visualmente en un mismo
+  // recuadro (Jennifer, 2026-08-25) — cada uno sigue en su fila (para
+  // poder editarlos por separado) pero con un borde que los rodea juntos.
+  const pendientesOrdenadas = [...pendientes].sort((a, b) => a.orderNumber - b.orderNumber);
+  tbody.innerHTML = pendientesOrdenadas.map((b, i) => {
+    const anterior = pendientesOrdenadas[i - 1];
+    const siguiente = pendientesOrdenadas[i + 1];
+    const mismoAnterior = anterior && anterior.orderNumber === b.orderNumber;
+    const mismoSiguiente = siguiente && siguiente.orderNumber === b.orderNumber;
+    let grupoClass = "";
+    if (!mismoAnterior && mismoSiguiente) grupoClass = "fila-grupo-inicio";
+    else if (mismoAnterior && mismoSiguiente) grupoClass = "fila-grupo-medio";
+    else if (mismoAnterior && !mismoSiguiente) grupoClass = "fila-grupo-fin";
     const esPackColchon = b.esPack && b.tipo === "colchon";
-    const referenciaCell = esPackColchon
+    const tipoEnvioSelect = esPackColchon
       ? \`<select class="tipo-envio-select" data-id="\${b.id}">
            <option value="FPK"\${b.tipoEnvio === "FPK" ? " selected" : ""}>FPKBEZEN\${b.orderNumber} (independiente)</option>
            <option value="FUR"\${b.tipoEnvio === "FUR" ? " selected" : ""}>FURBEZEN\${b.orderNumber} (junto)</option>
          </select>\`
-      : "—";
-    const fechaCell = esPackColchon
-      ? \`<input type="date" class="fecha-camion-input" data-id="\${b.id}" value="\${b.fechaEstimadaLlegada ? b.fechaEstimadaLlegada.slice(0, 10) : ""}">\`
-      : "—";
+      : "";
+    // En "Pendiente de decisión" se puede corregir directamente lo que
+    // aplique (FUR/FPK si es un colchón de pack) y además responder a la
+    // pregunta de texto (ej. confirmar qué artículo era del catálogo).
+    const referenciaCell = isDecisionTab
+      ? \`\${tipoEnvioSelect}<button type="button" class="responder-btn" data-order="\${b.orderNumber}">Responder dudas</button>\`
+      : (tipoEnvioSelect || "—");
+    const fechaCell = !showCamionCol
+      ? ""
+      : esPackColchon
+      ? \`<td><input type="date" class="fecha-camion-input" data-id="\${b.id}" value="\${b.fechaEstimadaLlegada ? b.fechaEstimadaLlegada.slice(0, 10) : ""}"></td>\`
+      : "<td>—</td>";
+    const checkCell = showCheckbox
+      ? \`<td><input type="checkbox" class="pendiente-check" data-id="\${b.id}"\${pedidoFabricaSeleccion.has(b.id) ? " checked" : ""}></td>\`
+      : "<td></td>";
+    const pedidoTag = b.pedidoGenerado
+      ? \`<span class="pedido-generado-tag">✓ Pedido a fábrica \${new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES")}</span>\`
+      : "";
+    const refPolivalCell = showRefPolivalCol
+      ? \`<td><input type="text" class="referencia-input" data-id="\${b.id}" value="\${escapeAttr(b.referencia || "")}" placeholder="ref."></td>\`
+      : "";
     return \`
-    <tr>
+    <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", grupoClass].filter(Boolean).join(" ")}">
+      \${checkCell}
       <td>BEZEN\${b.orderNumber}</td>
-      <td>\${b.stockModel}</td>
+      <td>\${b.stockModel}\${pedidoTag}</td>
+      \${refPolivalCell}
+      <td><textarea class="fabricacion-input" data-id="\${b.id}" placeholder="cómo pedirlo a fábrica...">\${escapeAttr(b.mercanciaFabrica != null ? b.mercanciaFabrica : (b.nombreFabricacion || ""))}</textarea></td>
+      <td>\${b.color || "—"}</td>
       <td>\${b.talla}</td>
       <td>\${b.cantidad}</td>
       <td>\${new Date(b.fecha).toLocaleDateString("es-ES")}</td>
       <td>\${referenciaCell}</td>
-      <td>\${fechaCell}</td>
+      \${fechaCell}
       <td><button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" : "Marcar recibido"}</button></td>
     </tr>
   \`;
   }).join("");
-  document.getElementById("pendientes-count").textContent = pendientes.length + " artículos pendientes de fabricante (se cierran solos al marcarse el pedido como enviado)";
+  document.getElementById("pendientes-count").textContent = pendientes.length + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)";
+  actualizarSeleccionUI();
 
+  tbody.querySelectorAll(".pendiente-check").forEach(chk => {
+    chk.addEventListener("change", () => {
+      if (chk.checked) pedidoFabricaSeleccion.add(chk.dataset.id);
+      else pedidoFabricaSeleccion.delete(chk.dataset.id);
+      actualizarSeleccionUI();
+    });
+  });
+  tbody.querySelectorAll(".fabricacion-input").forEach(inp => {
+    inp.addEventListener("change", () => guardarMercanciaFabrica(inp.dataset.id, inp.value));
+  });
+  tbody.querySelectorAll(".referencia-input").forEach(inp => {
+    inp.addEventListener("change", () => guardarReferenciaPolival(inp.dataset.id, inp.value));
+  });
   tbody.querySelectorAll(".resolver-btn").forEach(btn => {
     btn.addEventListener("click", () => resolverPendiente(btn.dataset.id));
   });
@@ -1184,7 +1427,83 @@ function renderPendientes() {
   tbody.querySelectorAll(".fecha-camion-input").forEach(inp => {
     inp.addEventListener("change", () => updateBackorderPlan(inp.dataset.id, { fechaEstimadaLlegada: inp.value || null }));
   });
+  tbody.querySelectorAll(".responder-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const order = allOrders.find(o => o.orderNumber === Number(btn.dataset.order));
+      if (order) openReviewModal(order);
+    });
+  });
 }
+
+function actualizarSeleccionUI() {
+  const n = pedidoFabricaSeleccion.size;
+  document.getElementById("generar-pedido-btn").disabled = n === 0;
+  document.getElementById("seleccion-count").textContent = n > 0 ? n + " seleccionados" : "";
+}
+
+async function guardarMercanciaFabrica(id, texto) {
+  await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/mercancia", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mercanciaFabrica: texto }),
+  });
+  const b = backorders.find(b => b.id === id);
+  if (b) b.mercanciaFabrica = texto;
+}
+
+async function guardarReferenciaPolival(id, referencia) {
+  await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/referencia", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ referencia }),
+  });
+  const b = backorders.find(b => b.id === id);
+  if (b) b.referencia = referencia;
+}
+
+document.getElementById("generar-pedido-btn").addEventListener("click", async () => {
+  const seleccionados = backorders.filter(b => pedidoFabricaSeleccion.has(b.id));
+  if (!seleccionados.length) return;
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  const proveedorLabel = PROVEEDORES_LABELS[currentProveedorFilter] || "";
+  doc.setFontSize(14);
+  doc.text("Pedido a fábrica · " + proveedorLabel, 14, 16);
+  doc.setFontSize(10);
+  doc.text(new Date().toLocaleDateString("es-ES"), 14, 22);
+
+  // Varios artículos del mismo pedido van en el mismo recuadro (misma
+  // fila), con las referencias juntas en una sola línea — a petición de
+  // Jennifer, 2026-08-25.
+  const grupos = new Map();
+  seleccionados.forEach(b => {
+    if (!grupos.has(b.orderNumber)) grupos.set(b.orderNumber, []);
+    grupos.get(b.orderNumber).push(b);
+  });
+  const filas = [...grupos.values()].map(items => [
+    items.map(b => b.referencia || "—").join(" / "),
+    items.map(b => b.mercanciaFabrica || b.nombreFabricacion || b.stockModel).join("\\n\\n"),
+  ]);
+  doc.autoTable({
+    head: [["Referencia", "Mercancía para pedir a fábrica"]],
+    body: filas,
+    startY: 28,
+    styles: { fontSize: 10, cellPadding: 3, valign: "middle" },
+    headStyles: { fillColor: [31, 138, 76] },
+    columnStyles: { 0: { cellWidth: 30 } },
+  });
+
+  doc.save("pedido-" + currentProveedorFilter + "-" + new Date().toISOString().slice(0, 10) + ".pdf");
+
+  await fetch("/api/inventario/pendientes/mark-ordered", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ids: seleccionados.map(b => b.id) }),
+  });
+  pedidoFabricaSeleccion.clear();
+  loadPendientes();
+});
 
 async function resolverPendiente(id) {
   await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST" });
@@ -1273,6 +1592,10 @@ async function handleFetch(request, env) {
       return handleUpdateMeta(request, env);
     }
 
+    if (url.pathname === "/api/pedidos/shopify/review-note" && request.method === "POST") {
+      return handleReviewNote(request, env);
+    }
+
     if (url.pathname === "/pedidos/shopify/ws") {
       return handleWebSocket(request, env);
     }
@@ -1317,6 +1640,10 @@ async function handleFetch(request, env) {
       return proxyInventory(env, "/stock/delete", request);
     }
 
+    if (url.pathname === "/api/inventario/pendientes/delete" && request.method === "POST") {
+      return proxyInventory(env, "/backorders/delete", request);
+    }
+
     if (url.pathname === "/api/inventario/pendientes" && request.method === "GET") {
       return proxyInventory(env, "/backorders", request);
     }
@@ -1331,8 +1658,38 @@ async function handleFetch(request, env) {
       return proxyInventory(env, `/backorders/${planPendingMatch[1]}/plan`, request);
     }
 
+    const referenciaPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/referencia$/);
+    if (referenciaPendingMatch && request.method === "POST") {
+      return proxyInventory(env, `/backorders/${referenciaPendingMatch[1]}/referencia`, request);
+    }
+
+    const mercanciaPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/mercancia$/);
+    if (mercanciaPendingMatch && request.method === "POST") {
+      return proxyInventory(env, `/backorders/${mercanciaPendingMatch[1]}/mercancia`, request);
+    }
+
+    if (url.pathname === "/api/inventario/pendientes/release-decision" && request.method === "POST") {
+      return proxyInventory(env, "/backorders/release-decision", request);
+    }
+
+    if (url.pathname === "/api/inventario/fabricacion" && request.method === "POST") {
+      return proxyInventory(env, "/fabricacion", request);
+    }
+
+    if (url.pathname === "/api/inventario/pendientes/mark-ordered" && request.method === "POST") {
+      return proxyInventory(env, "/backorders/mark-ordered", request);
+    }
+
     if (url.pathname === "/api/inventario/admin/reset-stock" && request.method === "POST") {
       return proxyInventory(env, "/admin/reset-stock", request);
+    }
+
+    if (url.pathname === "/api/inventario/admin/backfill-proveedor" && request.method === "POST") {
+      return proxyInventory(env, "/admin/backfill-proveedor", request);
+    }
+
+    if (url.pathname === "/api/inventario/admin/backfill-pending-decision" && request.method === "POST") {
+      return proxyInventory(env, "/admin/backfill-pending-decision", request);
     }
 
     if (url.pathname === "/api/inventario/admin/pause" && request.method === "POST") {

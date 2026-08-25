@@ -5,7 +5,7 @@ const ORPHAN_RE = /BEZEN0*([0-9]+)/i;
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers"];
 
 function mergeCustomFields(existing, incoming) {
   if (!existing) return incoming;
@@ -143,6 +143,31 @@ export class OrdersStore {
       return new Response("ok");
     }
 
+    // Respuestas de Jennifer a un pedido marcado "Revisar" (ver
+    // reviewReasons, generado por InventoryStore cuando no hay una regla fija
+    // posible) — una respuesta por pregunta, no una nota única para todo el
+    // pedido. No cambia agencia/proveedor, es solo instrucción visible para
+    // el equipo.
+    if (url.pathname === "/orders/review-note" && request.method === "POST") {
+      const { id, reviewAnswers } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const existing = orders[id];
+      if (!existing) return new Response("not found", { status: 404 });
+      const answers = Array.isArray(reviewAnswers) ? reviewAnswers : [];
+      existing.reviewAnswers = answers;
+      orders[id] = existing;
+      await this.state.storage.put("orders", orders);
+      // Mientras falte responder a alguna pregunta, sus pendientes de
+      // colchón siguen bloqueados (sin carpeta de Proveedores concreta); en
+      // cuanto están todas respondidas, se sueltan. Si luego borra una
+      // respuesta, se vuelven a bloquear.
+      const reasons = existing.reviewReasons || [];
+      const allAnswered = reasons.length > 0 && reasons.every((r, i) => (answers[i] || "").trim());
+      await this.releaseInventoryDecision(existing.id, !allAnswered);
+      this.broadcast();
+      return new Response("ok");
+    }
+
     if (url.pathname === "/ws") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -160,9 +185,9 @@ export class OrdersStore {
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force, orderDate: order.orderDate }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force, orderDate: order.orderDate, services: order.services || "" }),
     });
-    const { agencia, pendingManufacture, needsReview, paused } = await res.json();
+    const { agencia, pendingManufacture, needsReview, reviewReasons, paused } = await res.json();
     // Si Inventario está en pausa, no se marca inventoryProcessed: el
     // pedido se reintentará en el próximo sync/webhook hasta que Jennifer
     // reactive el procesamiento con /admin/resume.
@@ -170,7 +195,20 @@ export class OrdersStore {
     order.agencia = agencia;
     order.pendingManufacture = pendingManufacture;
     order.needsReview = needsReview;
+    order.reviewReasons = reviewReasons || [];
     order.inventoryProcessed = true;
+  }
+
+  // Suelta (o vuelve a bloquear) los pendientes de este pedido que estaban
+  // esperando la decisión de Jennifer — ver reviewReasons/reviewAnswers y
+  // InventoryStore.releaseDecision.
+  async releaseInventoryDecision(orderId, relock) {
+    const id = this.env.INVENTORY_STORE.idFromName("main");
+    const stub = this.env.INVENTORY_STORE.get(id);
+    await stub.fetch("https://do/backorders/release-decision", {
+      method: "POST",
+      body: JSON.stringify({ orderId, relock }),
+    });
   }
 
   async settleShipment(orderId) {
