@@ -97,6 +97,33 @@ export class OrdersStore {
     // fabricante" que quedó calculado contra un stock histórico erróneo
     // (arrancado a 0 y descontado con todo el histórico de pedidos). No
     // toca colorTag/observaciones/agencia/inventoryProcessed.
+    // Mantenimiento puntual (2026-08-26): "desprocesa" pedidos concretos —
+    // los vuelve a dejar como si nunca se hubieran calculado (agencia,
+    // pendingManufacture, needsReview, reviewReasons/reviewAnswers,
+    // inventoryProcessed a false), para que el próximo sync/webhook los
+    // recalcule desde cero con la lógica actual. Usado tras el incidente
+    // del 26/08 donde una sincronización completa procesó pedidos que
+    // todavía no estaban PAGADO.
+    if (url.pathname === "/orders/unprocess" && request.method === "POST") {
+      const { ids } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      let actualizados = 0;
+      for (const id of ids || []) {
+        const order = orders[id];
+        if (!order) continue;
+        order.agencia = null;
+        order.pendingManufacture = null;
+        order.needsReview = false;
+        order.reviewReasons = [];
+        order.reviewAnswers = [];
+        order.inventoryProcessed = false;
+        actualizados++;
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, actualizados });
+    }
+
     if (url.pathname === "/orders/clear-pending" && request.method === "POST") {
       const orders = (await this.state.storage.get("orders")) || {};
       let cleared = 0;
@@ -185,12 +212,14 @@ export class OrdersStore {
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force, orderDate: order.orderDate, services: order.services || "" }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force, orderDate: order.orderDate, services: order.services || "", paymentStatus: order.paymentStatus }),
     });
     const { agencia, pendingManufacture, needsReview, reviewReasons, paused } = await res.json();
-    // Si Inventario está en pausa, no se marca inventoryProcessed: el
-    // pedido se reintentará en el próximo sync/webhook hasta que Jennifer
-    // reactive el procesamiento con /admin/resume.
+    // `paused` cubre dos casos (InventoryStore.processSale): la pausa
+    // general, o que el pedido todavía no esté PAGADO (financiación/
+    // transferencia sin confirmar — regla de seguridad, no se salta ni con
+    // force). En ambos casos no se marca inventoryProcessed: se reintenta
+    // solo en el próximo sync/webhook.
     if (paused) return;
     order.agencia = agencia;
     order.pendingManufacture = pendingManufacture;

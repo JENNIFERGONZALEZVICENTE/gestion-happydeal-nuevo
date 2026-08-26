@@ -1,6 +1,23 @@
 export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
 
+// Shopify manda payment_gateway_names con nombres reales (Cetelem, SeQura
+// Payment Gateway, Transferencia bancaria, MONEI Pay · Bizum) pero a veces
+// junto con "shopify_payments" de relleno (visto en pedidos reales, ej.
+// "Cetelem, shopify_payments") — se prioriza el nombre real de
+// financiación/método sobre "shopify_payments", que solo significa tarjeta
+// cuando va solo.
+function normalizePaymentMethod(gatewayNames) {
+  const joined = (gatewayNames || []).join(", ").toLowerCase();
+  if (!joined) return "—";
+  if (joined.includes("cetelem")) return "CETELEM";
+  if (joined.includes("sequra")) return "SEQURA";
+  if (joined.includes("transferencia")) return "TRANSFERENCIA BANCARIA";
+  if (joined.includes("bizum") || joined.includes("monei")) return "BIZUM";
+  if (joined.includes("shopify_payments")) return "VISA";
+  return (gatewayNames || []).join(", ").toUpperCase();
+}
+
 function mapOrder(order) {
   const productTitles = [];
   const serviceParts = [];
@@ -51,7 +68,12 @@ function mapOrder(order) {
     phone: order.phone || address.phone || order.customer?.phone || "",
     product: uniqueProducts.join(", "),
     services: serviceParts.join(" · "),
-    paymentMethod: (order.payment_gateway_names || []).join(", "),
+    paymentMethod: normalizePaymentMethod(order.payment_gateway_names),
+    // Solo "paid" cuenta como pagado de verdad — pendiente cubre tanto la
+    // transferencia bancaria sin marcar recibida como la financiación
+    // (Cetelem/SeQura) todavía sin conceder. Nunca se procesa/pide a
+    // proveedor un pedido que no esté en PAGADO (Jennifer, 2026-08-26).
+    paymentStatus: order.financial_status === "paid" ? "PAGADO" : "PENDIENTE DE PAGO",
     shippingStatus: order.fulfillment_status || "pendiente",
     price: order.total_price,
     currency: order.currency,
@@ -407,6 +429,7 @@ function renderPage() {
     font-weight: 600;
   }
   .badge.pendiente { background: #fef3c7; color: #92400e; }
+  .badge.pago-pendiente { background: #fee2e2; color: #991b1b; }
   .badge.fulfilled { background: #dcfce7; color: #146138; }
   .badge.partial { background: #dbeafe; color: #1e40af; }
   .badge.agencia-seur { background: #e0e7ff; color: #3730a3; }
@@ -598,6 +621,7 @@ function renderPage() {
   .cantidad-baja { color: #991b1b; font-weight: 700; }
   .resolver-btn { padding: 6px 12px; font-size: 12.5px; }
   .fabricacion-input { width: 100%; min-width: 220px; min-height: 54px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical; }
+  .ocultar-recibidos-label { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--brand-dark); cursor: pointer; }
   #pendientes-filter-row th { padding: 4px 8px; background: var(--panel); position: sticky; top: 34px; }
   #pendientes-filter-row input { width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12.5px; font-weight: 400; text-transform: none; border: 1px solid var(--border); border-radius: 4px; }
   .pedido-generado-tag { display: block; font-size: 13px; font-weight: 600; color: #146138; margin-top: 4px; }
@@ -731,6 +755,9 @@ function renderPage() {
 </div>
 
 <div id="view-pendientes" style="display:none">
+  <div class="toolbar">
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-ocultar-recibidos" checked> Ocultar ya recibidos de fábrica</label>
+  </div>
   <div class="toolbar" id="pendientes-toolbar" style="display:none">
     <button type="button" id="generar-pedido-btn" disabled>Generar pedido a fábrica (PDF)</button>
     <span id="seleccion-count" class="inventario-count" style="padding:0"></span>
@@ -739,13 +766,13 @@ function renderPage() {
   <div class="table-wrap">
     <table id="pendientes-table">
       <thead>
-        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Modelo</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Color</th><th>Talla</th><th>Cantidad</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
+        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Modelo</th><th>Color</th><th>Talla</th><th>Cantidad</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
         <tr id="pendientes-filter-row">
           <th></th>
           <th><input id="pendientes-pedido-search" type="text" placeholder="Filtrar..." /></th>
-          <th></th>
+          <th></th><th></th><th></th><th></th>
           <th id="pendientes-refpolival-filter" style="display:none"><input id="pendientes-referencia-search" type="text" placeholder="Filtrar..." /></th>
-          <th></th><th></th><th></th><th></th><th></th><th id="pendientes-furfpk-filter"></th><th></th><th></th>
+          <th></th><th></th><th id="pendientes-furfpk-filter"></th><th></th><th></th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -782,7 +809,7 @@ const platforms = ${JSON.stringify(PLATFORMS)};
 const USERS = ${JSON.stringify(USERS)};
 const COLOR_ACCESS_USERS = ${JSON.stringify(COLOR_ACCESS_USERS)};
 const COLOR_META = ${JSON.stringify(COLOR_META)};
-const BASE_HEAD = ["","Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Situación de envío","Agencia","Precio"];
+const BASE_HEAD = ["","Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Estado de pago","Situación de envío","Agencia","Precio"];
 
 let currentUser = localStorage.getItem("hd_user");
 let editing = false;
@@ -808,6 +835,11 @@ function statusBadge(status) {
   const cls = s === "fulfilled" ? "fulfilled" : s === "partial" ? "partial" : "pendiente";
   const label = s === "fulfilled" ? "Enviado" : s === "partial" ? "Parcial" : "Pendiente";
   return \`<span class="badge \${cls}">\${label}</span>\`;
+}
+
+function paymentStatusBadge(paymentStatus) {
+  const pagado = paymentStatus === "PAGADO";
+  return \`<span class="badge \${pagado ? "fulfilled" : "pago-pendiente"}">\${paymentStatus || "PENDIENTE DE PAGO"}</span>\`;
 }
 
 function isReviewAnswered(order) {
@@ -854,6 +886,7 @@ function render(orders) {
       <td>\${o.product}</td>
       <td class="services">\${o.services}</td>
       <td>\${o.paymentMethod}</td>
+      <td>\${paymentStatusBadge(o.paymentStatus)}</td>
       <td>\${statusBadge(o.shippingStatus)}</td>
       <td>\${agenciaBadge(o)}</td>
       <td class="price">\${o.price} \${o.currency || ""}</td>
@@ -988,6 +1021,7 @@ function applyFilter() {
 document.getElementById("search").addEventListener("input", applyFilter);
 document.getElementById("pendientes-referencia-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-pedido-search").addEventListener("input", renderPendientes);
+document.getElementById("pendientes-ocultar-recibidos").addEventListener("change", renderPendientes);
 document.getElementById("color-filter").addEventListener("change", applyFilter);
 
 function updateUserBadge() {
@@ -1321,8 +1355,10 @@ let pedidoFabricaSeleccion = new Set();
 function renderPendientes() {
   const busquedaReferencia = document.getElementById("pendientes-referencia-search").value.trim().toLowerCase();
   const busquedaPedido = document.getElementById("pendientes-pedido-search").value.trim().toLowerCase();
+  const ocultarRecibidos = document.getElementById("pendientes-ocultar-recibidos").checked;
   const pendientes = backorders.filter(b => {
     if (b.estado !== "pendiente") return false;
+    if (ocultarRecibidos && b.recibidoFabrica) return false;
     if (busquedaReferencia && !(b.referencia || "").toLowerCase().includes(busquedaReferencia)) return false;
     if (busquedaPedido && !("bezen" + b.orderNumber).includes(busquedaPedido)) return false;
     if (currentProveedorFilter === "decision") return !!b.pendingDecision;
@@ -1396,11 +1432,11 @@ function renderPendientes() {
       \${checkCell}
       <td>BEZEN\${b.orderNumber}</td>
       <td>\${b.stockModel}\${pedidoTag}</td>
-      \${refPolivalCell}
-      <td><textarea class="fabricacion-input" data-id="\${b.id}" placeholder="cómo pedirlo a fábrica...">\${escapeAttr(b.mercanciaFabrica != null ? b.mercanciaFabrica : (b.nombreFabricacion || ""))}</textarea></td>
       <td>\${b.color || "—"}</td>
       <td>\${b.talla}</td>
       <td>\${b.cantidad}</td>
+      \${refPolivalCell}
+      <td><textarea class="fabricacion-input" data-id="\${b.id}" placeholder="cómo pedirlo a fábrica...">\${escapeAttr(b.mercanciaFabrica != null ? b.mercanciaFabrica : (b.nombreFabricacion || ""))}</textarea></td>
       <td>\${new Date(b.fecha).toLocaleDateString("es-ES")}</td>
       \${showFurFpkCol ? \`<td>\${referenciaCell}</td>\` : ""}
       \${fechaCell}
@@ -1722,6 +1758,13 @@ async function handleFetch(request, env) {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/orders/clear-pending", { method: "POST" });
+      return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/pedidos/shopify/unprocess" && request.method === "POST") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/orders/unprocess", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { headers: { "content-type": "application/json" } });
     }
 

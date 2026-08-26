@@ -126,7 +126,9 @@ const CANAPE_RECIPES = {
       cerezo: { color: "Cerezo", rejilla: "Marrón" },
       wengue: { color: "Wengué", rejilla: "Wengué" },
       blanco: { color: "Blanco", rejilla: "Blanca" },
-      nordico: { color: "Nórdico", rejilla: "Grafito" },
+      nordico: { color: "Nórdico", rejilla: "Gris Grafito" },
+      // "Gris" es el mismo color que "Nórdico" para el Zenit (Jennifer, 2026-08-26).
+      gris: { color: "Nórdico", rejilla: "Gris Grafito" },
     },
   },
   astra: {
@@ -138,7 +140,7 @@ const CANAPE_RECIPES = {
       cerezo: { color: "Cerezo", rejilla: "Marrón" },
       wengue: { color: "Wengué", rejilla: "Wengué" },
       blanco: { color: "Blanco", rejilla: "Blanca" },
-      nordico: { color: "Nórdico", rejilla: "Grafito" },
+      nordico: { color: "Nórdico", rejilla: "Gris Grafito" },
     },
   },
   space_extra: {
@@ -204,20 +206,32 @@ const CANAPE_RECIPES = {
   initial: {
     // Modelo, tapa y tirador dependen del color (Polipiel → INITIAL,
     // Tela → INITIAL DELUXE) — se calculan en buildCanapeMercancia.
-    // Shopify manda el color pelado, sin el prefijo "Polipiel"/"Tela" (ej.
-    // "Gris Niebla", no "Tela Gris Niebla" — visto en pedido real 12111),
-    // así que las claves son solo el nombre de color. "Beige" siempre es
-    // Duna Lino/INITIAL DELUXE (confirmado por Jennifer, 2026-08-25).
+    // Shopify manda el color de dos formas distintas según el pedido: a
+    // veces con el prefijo "Polipiel - "/"Tela - " (ej. pedidos 12104/
+    // 12108/12114) y a veces pelado, sin prefijo (ej. "Gris Niebla" en el
+    // 12111) — se guardan las dos versiones de cada color para que
+    // cualquiera de las dos formas encaje. "Beige" pelado (sin prefijo) es
+    // el único caso realmente ambiguo entre Polipiel y Tela — Jennifer
+    // confirmó que por defecto es Tela/Duna Lino cuando no se sabe cuál es.
     tirador: "Un tirador natural",
     colores: {
       blanco: { color: "Argos Blanco", rejilla: "Blanca", modelo: "INITIAL" },
+      "polipiel blanco": { color: "Argos Blanco", rejilla: "Blanca", modelo: "INITIAL" },
       marron: { color: "Argos Cuero", rejilla: "Marrón", modelo: "INITIAL" },
+      "polipiel marron": { color: "Argos Cuero", rejilla: "Marrón", modelo: "INITIAL" },
       negro: { color: "Argos Negro", rejilla: "Negra", modelo: "INITIAL" },
+      "polipiel negro": { color: "Argos Negro", rejilla: "Negra", modelo: "INITIAL" },
       gris: { color: "Argos Polar", rejilla: "Gris Antracita", modelo: "INITIAL" },
+      "polipiel gris": { color: "Argos Polar", rejilla: "Gris Antracita", modelo: "INITIAL" },
+      "polipiel beige": { color: "Argos Hielo", rejilla: "Beige", modelo: "INITIAL" },
       beige: { color: "Duna Lino", rejilla: "Tierra", modelo: "INITIAL DELUXE" },
+      "tela beige": { color: "Duna Lino", rejilla: "Tierra", modelo: "INITIAL DELUXE" },
       cacao: { color: "Tela Duna Cocoa", rejilla: "Wengué", modelo: "INITIAL DELUXE" },
+      "tela cacao": { color: "Tela Duna Cocoa", rejilla: "Wengué", modelo: "INITIAL DELUXE" },
       "gris antracita": { color: "Duna Onix", rejilla: "Grafito", modelo: "INITIAL DELUXE" },
+      "tela gris antracita": { color: "Duna Onix", rejilla: "Grafito", modelo: "INITIAL DELUXE" },
       "gris niebla": { color: "Duna Koala", rejilla: "Grafito", modelo: "INITIAL DELUXE" },
+      "tela gris niebla": { color: "Duna Koala", rejilla: "Grafito", modelo: "INITIAL DELUXE" },
     },
   },
   tela_tierra: {
@@ -293,13 +307,23 @@ function detectTapaExtra(servicesText) {
 // pedir a fábrica" de un canapé. Si el modelo o el color no están
 // clasificados, deja el texto en blanco (ella lo rellena a mano, el campo
 // siempre es editable) y pide confirmación por la campana.
+// Algunos pedidos mandan el color con el prefijo "Tela - "/"Polipiel - "
+// (ej. "Tela - Cacao", "Polipiel - Beige") y otros lo mandan pelado (ej.
+// "Gris Niebla") — visto en pedidos reales (12111 sin prefijo, 12104/12108/
+// 12114 con prefijo). Se normaliza el guion a espacio para que ambas formas
+// encajen contra las claves de CANAPE_RECIPES (que tienen tanto la versión
+// con prefijo como sin él para "initial", donde sí hace falta distinguir).
+function normalizeColorKey(color) {
+  return normalizeKey(color).replace(/-/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function buildCanapeMercancia(title, colorRaw, talla, servicesText) {
   const recipeKey = matchCanapeRecipeKey(title);
   if (!recipeKey) {
     return { texto: "", needsReview: true, reason: `No tengo la receta de fabricación para "${title}" — dime cómo pedirlo (modelo, color, tapa, tirador) o rellena "Mercancía para pedir a fábrica" a mano.` };
   }
   const recipe = CANAPE_RECIPES[recipeKey];
-  const colorKey = normalizeKey(colorRaw);
+  const colorKey = normalizeColorKey(colorRaw);
   const entry = recipe.colores[colorKey];
   if (!entry) {
     return { texto: "", needsReview: true, reason: `No tengo mapeado el color "${colorRaw || "(sin color)"}" para "${title}" en la receta de fábrica — dime el nombre de fábrica, la rejilla y corrige "Mercancía para pedir a fábrica" a mano.` };
@@ -1306,7 +1330,7 @@ export class InventoryStore {
     return Response.json(entry);
   }
 
-  async processSale({ orderId, orderNumber, items, force, orderDate, services }) {
+  async processSale({ orderId, orderNumber, items, force, orderDate, services, paymentStatus }) {
     // Mientras el catálogo/stock no esté configurado del todo, Jennifer
     // pidió no tocar los pedidos que van entrando (ni agencia ni stock).
     // Cuando esté todo listo, un POST a /admin/resume lo reactiva y los
@@ -1315,6 +1339,18 @@ export class InventoryStore {
     // procesamiento general (usado desde /orders/force-process).
     if (!force && (await this.load("paused", false))) {
       return Response.json({ agencia: null, pendingManufacture: null, needsReview: false, reviewReasons: [], paused: true });
+    }
+    // Regla de negocio crítica (Jennifer, 2026-08-26): nunca generar
+    // agencia/proveedor/referencia para un pedido que no esté PAGADO de
+    // verdad en Shopify — si es financiación (Cetelem/SeQura) sin conceder
+    // o transferencia sin marcar recibida y luego no se confirma, no
+    // queremos haber fabricado ya nada para un pedido que puede no
+    // llegar a venderse. A diferencia de la pausa general, esto NO se
+    // salta con `force` — es una regla de seguridad, no una prueba.
+    // No se marca inventoryProcessed (ver orders-store.js), así que se
+    // reintenta solo en el próximo sync/webhook una vez pase a PAGADO.
+    if (paymentStatus !== "PAGADO") {
+      return Response.json({ agencia: null, pendingManufacture: null, needsReview: false, reviewReasons: [], paused: true, unpaid: true });
     }
 
     const products = await this.load("products", {});
