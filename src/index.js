@@ -739,13 +739,13 @@ function renderPage() {
   <div class="table-wrap">
     <table id="pendientes-table">
       <thead>
-        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Modelo</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Color</th><th>Talla</th><th>Cantidad</th><th>Fecha del pedido</th><th>FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
+        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Modelo</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Color</th><th>Talla</th><th>Cantidad</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
         <tr id="pendientes-filter-row">
           <th></th>
           <th><input id="pendientes-pedido-search" type="text" placeholder="Filtrar..." /></th>
           <th></th>
           <th id="pendientes-refpolival-filter" style="display:none"><input id="pendientes-referencia-search" type="text" placeholder="Filtrar..." /></th>
-          <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+          <th></th><th></th><th></th><th></th><th></th><th id="pendientes-furfpk-filter"></th><th></th><th></th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -1344,6 +1344,12 @@ function renderPendientes() {
   const showRefPolivalCol = currentProveedorFilter === "polival";
   document.getElementById("pendientes-refpolival-head").style.display = showRefPolivalCol ? "" : "none";
   document.getElementById("pendientes-refpolival-filter").style.display = showRefPolivalCol ? "" : "none";
+  // En Polival la tapicería siempre sale por FUR (nunca hay colchón de pack
+  // ahí, eso va en Luso/New), así que esta columna no aporta nada — Jennifer
+  // pidió quitarla en esa pestaña.
+  const showFurFpkCol = currentProveedorFilter !== "polival";
+  document.getElementById("pendientes-furfpk-head").style.display = showFurFpkCol ? "" : "none";
+  document.getElementById("pendientes-furfpk-filter").style.display = showFurFpkCol ? "" : "none";
 
   // Varios artículos del mismo pedido se agrupan visualmente en un mismo
   // recuadro (Jennifer, 2026-08-25) — cada uno sigue en su fila (para
@@ -1396,7 +1402,7 @@ function renderPendientes() {
       <td>\${b.talla}</td>
       <td>\${b.cantidad}</td>
       <td>\${new Date(b.fecha).toLocaleDateString("es-ES")}</td>
-      <td>\${referenciaCell}</td>
+      \${showFurFpkCol ? \`<td>\${referenciaCell}</td>\` : ""}
       \${fechaCell}
       <td><button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" : "Marcar recibido"}</button></td>
     </tr>
