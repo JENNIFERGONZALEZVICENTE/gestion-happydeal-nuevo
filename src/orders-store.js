@@ -5,7 +5,23 @@ const ORPHAN_RE = /BEZEN0*([0-9]+)/i;
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta"];
+
+// Cargas de Furniture (Jennifer, 2026-08-26): cargan miércoles y viernes,
+// así que la "próxima carga" siempre es el miércoles o viernes más cercano
+// desde hoy (incluyendo hoy mismo si hoy ya es uno de esos días).
+const DIAS_CARGA = { 3: "MIÉRCOLES", 5: "VIERNES" };
+function nextCargaDate(from) {
+  const d = new Date(from);
+  d.setHours(0, 0, 0, 0);
+  while (!(d.getDay() in DIAS_CARGA)) {
+    d.setDate(d.getDate() + 1);
+  }
+  return d;
+}
+function cargaFechaKey(d) {
+  return d.toISOString().slice(0, 10);
+}
 
 function mergeCustomFields(existing, incoming) {
   if (!existing) return incoming;
@@ -158,12 +174,29 @@ export class OrdersStore {
     }
 
     if (url.pathname === "/orders/meta" && request.method === "POST") {
-      const { id, colorTag, observaciones } = await request.json();
+      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const existing = orders[id];
       if (!existing) return new Response("not found", { status: 404 });
       if (colorTag !== undefined) existing.colorTag = colorTag || null;
       if (observaciones !== undefined) existing.observaciones = observaciones;
+      // "Notas" (Jennifer, 2026-08-26): campo libre visible en Pedidos >
+      // Shopify y en Furniture > Pedidos pendientes, para avisos del
+      // cliente (ej. fecha de entrega concreta) — distinto de
+      // "Observaciones Sergio", que solo ven los usuarios con acceso a color.
+      if (notas !== undefined) existing.notas = notas;
+      // Cancelar un pedido (Jennifer, 2026-08-26): el cliente no puede
+      // esperar o cambia la compra. No borra nada ni lo saca de las listas
+      // de Proveedores/Furniture — se queda visible en rojo para no perder
+      // el rastro, pero no se puede seleccionar para pedir a fábrica ni
+      // meter en una carga (ver frontend).
+      if (cancelado !== undefined) existing.cancelado = !!cancelado;
+      // "Pedidos para tener en cuenta" (Jennifer, 2026-08-26): recuadro
+      // aparte en Furniture > Pedidos pendientes para avisos puntuales de
+      // compañeros (que tiene que salir en la próxima carga, algo por
+      // fechas...), sin que haga falta que la mercancía haya llegado ya.
+      // No quita al pedido de ningún otro sitio, es solo una marca.
+      if (paraTenerEnCuenta !== undefined) existing.paraTenerEnCuenta = !!paraTenerEnCuenta;
       orders[id] = existing;
       await this.state.storage.put("orders", orders);
       this.broadcast();
@@ -193,6 +226,69 @@ export class OrdersStore {
       await this.releaseInventoryDecision(existing.id, !allAnswered);
       this.broadcast();
       return new Response("ok");
+    }
+
+    // Cargas de Furniture (Jennifer, 2026-08-26): agrupan pedidos que van a
+    // salir por esa agencia en la próxima carga (miércoles o viernes). Solo
+    // hay una carga "abierta" a la vez — se crea sola con la fecha del
+    // próximo miércoles/viernes la primera vez que se añade algo, y se
+    // reutiliza hasta que Jennifer la cierra a mano.
+    if (url.pathname === "/cargas" && request.method === "GET") {
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      return Response.json(cargas);
+    }
+
+    if (url.pathname === "/cargas/add" && request.method === "POST") {
+      const { orderIds } = await request.json();
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      let abierta = cargas.find((c) => c.estado === "abierta");
+      if (!abierta) {
+        const fecha = nextCargaDate(new Date());
+        abierta = {
+          id: crypto.randomUUID(),
+          fecha: cargaFechaKey(fecha),
+          dia: DIAS_CARGA[fecha.getDay()],
+          estado: "abierta",
+          fechaCreacion: new Date().toISOString(),
+          fechaCierre: null,
+        };
+        cargas.push(abierta);
+      }
+      const orders = (await this.state.storage.get("orders")) || {};
+      let añadidos = 0;
+      for (const id of orderIds || []) {
+        const order = orders[id];
+        if (!order || order.cargaId) continue;
+        order.cargaId = abierta.id;
+        añadidos++;
+      }
+      await this.state.storage.put("orders", orders);
+      await this.state.storage.put("cargas", cargas);
+      this.broadcast();
+      return Response.json({ ok: true, carga: abierta, añadidos });
+    }
+
+    if (url.pathname === "/cargas/remove" && request.method === "POST") {
+      const { orderId } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order) return new Response("not found", { status: 404 });
+      order.cargaId = null;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+
+    if (url.pathname === "/cargas/close" && request.method === "POST") {
+      const { cargaId } = await request.json();
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const carga = cargas.find((c) => c.id === cargaId);
+      if (!carga) return new Response("not found", { status: 404 });
+      carga.estado = "cerrada";
+      carga.fechaCierre = new Date().toISOString();
+      await this.state.storage.put("cargas", cargas);
+      this.broadcast();
+      return Response.json({ ok: true, carga });
     }
 
     if (url.pathname === "/ws") {

@@ -1,5 +1,6 @@
 export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
+import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES } from "./inventory-store.js";
 
 // Shopify manda payment_gateway_names con nombres reales (Cetelem, SeQura
 // Payment Gateway, Transferencia bancaria, MONEI Pay · Bizum) pero a veces
@@ -24,7 +25,17 @@ function mapOrder(order) {
   const items = [];
 
   for (const item of order.line_items || []) {
-    if (item.title) productTitles.push(item.title);
+    if (item.title) {
+      // Los productos simples (ej. un colchón suelto, sin pack ni línea
+      // duplicada de Shopify) solo traen la medida en variant_title, no en
+      // el título — sin esto, "Producto comprado" se queda sin medida
+      // (Jennifer, 2026-08-27). Se evita duplicar cuando el título ya la
+      // trae incluida (packs y canapés que sí llegan con la línea repetida
+      // más detallada, ver filtro de prefijos más abajo).
+      const variant = (item.variant_title || "").trim();
+      const yaIncluida = !variant || variant.toLowerCase() === "default title" || item.title.toLowerCase().includes(variant.toLowerCase());
+      productTitles.push(yaIncluida ? item.title : `${item.title} - ${variant}`);
+    }
     for (const prop of item.properties || []) {
       if (!prop.name || !prop.value) continue;
       if (prop.name.startsWith("_")) continue;
@@ -59,12 +70,29 @@ function mapOrder(order) {
   const customerName = address.name
     || `${order.customer?.first_name || ""} ${order.customer?.last_name || ""}`.trim();
 
+  // Campos separados de la dirección (Jennifer, 2026-08-27): necesarios
+  // para el fichero de etiquetas de Furniture (C.POSTAL/POBLACIÓN/
+  // PROVINCIA van en columnas propias, no mezclados en un solo texto como
+  // "Dirección de entrega"). "furnitureAddress" incluye la empresa (si la
+  // hay) delante de la calle, tal y como pidió Jennifer con el ejemplo de
+  // BEZEN12123 ("Desguace Recupera2" + "Av segre 1").
+  const furnitureAddress = [address.company, address.address1, address.address2].filter(Boolean).join(", ");
+
   return {
     id: order.id,
+    // Único origen conectado por ahora — cuando se conecte otra plataforma
+    // (Leroy, Carrefour...), su propio mapeo de pedidos deberá poner aquí
+    // su nombre en vez de "Shopify" (usado en Logística > Furniture).
+    platform: "Shopify",
     orderNumber: order.order_number,
     orderDate: order.created_at || "",
     name: customerName,
     address: addressStr,
+    furnitureAddress,
+    postalCode: address.zip || "",
+    city: address.city || "",
+    province: (address.province || "").replace(/\s*Province$/i, "").trim(),
+    email: order.email || order.customer?.email || "",
     phone: order.phone || address.phone || order.customer?.phone || "",
     product: uniqueProducts.join(", "),
     services: serviceParts.join(" · "),
@@ -348,6 +376,15 @@ function renderPage() {
     border-left: 3px solid transparent;
   }
   .sidebar .nav-link:hover { background: var(--sidebar-hover); }
+  .sidebar .nav-link.sublink { padding-left: 2.25rem; font-size: 13px; }
+  .sidebar .sublista-header {
+    padding: 8px 1.25rem 4px 1.25rem;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--sidebar-text);
+    opacity: 0.65;
+  }
   .sidebar .nav-link.active {
     background: var(--sidebar-active);
     color: white;
@@ -435,7 +472,27 @@ function renderPage() {
   .badge.agencia-seur { background: #e0e7ff; color: #3730a3; }
   .badge.agencia-furniture { background: #fce7f3; color: #9d174d; }
   .badge.agencia-pendiente { background: #fef3c7; color: #92400e; margin-top: 4px; }
-  .bell-cell { text-align: center; width: 1%; }
+  .bell-cell { text-align: center; width: 1%; white-space: nowrap; }
+  .cancel-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    cursor: pointer;
+    color: #991b1b;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+  .cancel-btn svg { width: 12px; height: 12px; display: block; }
+  .cancel-btn:hover { background: #fee2e2; }
+  .cancel-btn.cancelado { background: #991b1b; color: white; border-color: #991b1b; }
+  tr.fila-cancelada, tr.fila-cancelada:hover { background: #fee2e2 !important; color: #7f1d1d; }
+  tr.fila-cancelada td { text-decoration: line-through; text-decoration-color: #99181866; }
   .review-bell {
     background: none;
     border: none;
@@ -622,8 +679,26 @@ function renderPage() {
   .resolver-btn { padding: 6px 12px; font-size: 12.5px; }
   .fabricacion-input { width: 100%; min-width: 220px; min-height: 54px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical; }
   .ocultar-recibidos-label { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--brand-dark); cursor: pointer; }
-  #pendientes-filter-row th { padding: 4px 8px; background: var(--panel); position: sticky; top: 34px; }
-  #pendientes-filter-row input { width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12.5px; font-weight: 400; text-transform: none; border: 1px solid var(--border); border-radius: 4px; }
+  .carga-abierta-box { margin: 0 2rem 1.5rem; border: 2px solid var(--brand); border-radius: 12px; overflow: hidden; background: var(--brand-light); }
+  .carga-abierta-box.tener-en-cuenta-box { border-color: #b45309; background: #fef3c7; }
+  .carga-abierta-box.tener-en-cuenta-box h3 { color: #92400e; }
+  .quitar-tener-en-cuenta-btn { padding: 5px 10px; font-size: 12px; background: transparent; color: #92400e; border: 1px solid #92400e; }
+  .furniture-items-cell { min-width: 220px; }
+  .furniture-item-check { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; margin-bottom: 4px; cursor: pointer; }
+  .furniture-item-check:last-child { margin-bottom: 0; }
+  .furniture-item-check input { margin-top: 2px; }
+  .furniture-item-fpk { color: #92400e; }
+  .fpk-tag { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #fef3c7; color: #92400e; }
+  .furniture-ya-salio-tag { display: block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #fee2e2; color: #991b1b; }
+  .carga-abierta-box .toolbar { padding: 1rem 1rem 0.25rem; }
+  .carga-abierta-box .table-wrap { max-height: 320px; }
+  #furniture-pendientes-toolbar { padding-top: 1.5rem; }
+  .carga-historial-card { margin: 0 2rem 1.25rem; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .carga-historial-card summary { padding: 0.75rem 1rem; cursor: pointer; font-weight: 600; color: var(--brand-dark); background: var(--panel); list-style: none; }
+  .carga-historial-card summary::-webkit-details-marker { display: none; }
+  .sacar-carga-btn { padding: 5px 10px; font-size: 12px; background: transparent; color: #991b1b; border: 1px solid #991b1b; }
+  #pendientes-filter-row th, #furniture-filter-row th { padding: 4px 8px; background: var(--panel); position: sticky; top: 34px; }
+  #pendientes-filter-row input, #furniture-filter-row input { width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12.5px; font-weight: 400; text-transform: none; border: 1px solid var(--border); border-radius: 4px; }
   .pedido-generado-tag { display: block; font-size: 13px; font-weight: 600; color: #146138; margin-top: 4px; }
   tr.fila-pedido-generado { background: #eafaf0; }
   tr.fila-pedido-generado:hover { background: #d9f5e3; }
@@ -667,6 +742,17 @@ function renderPage() {
     <li><a href="#" class="nav-link" data-proveedores="new">New</a></li>
     <li><a href="#" class="nav-link" data-proveedores="decision">Pendiente de decisión</a></li>
     <li><a href="#" class="nav-link" data-proveedores="revisar">Sin proveedor</a></li>
+  </ul>
+  <button class="section-title" id="logistica-toggle">
+    <span>Logística</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="logistica-list">
+    <li class="sublista-header">FURNITURE</li>
+    <li><a href="#" class="nav-link sublink" data-logistica="furniture">Pedidos pendientes</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas">Historial de cargas</a></li>
+    <li class="sublista-header">SEUR</li>
+    <li><a href="#" class="nav-link sublink" data-logistica="seur">Pedidos pendientes</a></li>
   </ul>
 </nav>
 <div class="main">
@@ -756,7 +842,7 @@ function renderPage() {
 
 <div id="view-pendientes" style="display:none">
   <div class="toolbar">
-    <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-ocultar-recibidos" checked> Ocultar ya recibidos de fábrica</label>
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-ocultar-recibidos"> Ocultar ya recibidos de fábrica</label>
   </div>
   <div class="toolbar" id="pendientes-toolbar" style="display:none">
     <button type="button" id="generar-pedido-btn" disabled>Generar pedido a fábrica (PDF)</button>
@@ -790,6 +876,63 @@ function renderPage() {
   </div>
 </div>
 
+<div id="view-furniture" style="display:none">
+  <div class="carga-abierta-box">
+    <div class="toolbar">
+      <h3 id="carga-abierta-titulo" style="margin:0">Carga</h3>
+      <button type="button" id="descargar-carga-btn" class="secondary" disabled>Descargar Excel Furniture</button>
+      <button type="button" id="cerrar-carga-btn" disabled>Cerrar carga</button>
+    </div>
+    <div id="carga-abierta-count" class="inventario-count"></div>
+    <div class="table-wrap">
+      <table id="carga-abierta-table">
+        <thead><tr><th>Pedido</th><th>Plataforma</th><th>Nombre</th><th>Producto comprado</th><th>Servicios adicionales</th><th>Artículos / Llegada</th><th>Notas</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="carga-abierta-box tener-en-cuenta-box">
+    <div class="toolbar">
+      <h3 style="margin:0">Pedidos para tener en cuenta</h3>
+    </div>
+    <div id="tener-en-cuenta-count" class="inventario-count"></div>
+    <div class="table-wrap">
+      <table id="tener-en-cuenta-table">
+        <thead><tr><th>Pedido</th><th>Plataforma</th><th>Nombre</th><th>Producto comprado</th><th>Servicios adicionales</th><th>Artículos / Llegada</th><th>Notas</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="toolbar" id="furniture-pendientes-toolbar">
+    <button type="button" id="anadir-carga-btn" disabled>Añadir a la carga</button>
+    <button type="button" id="anadir-tener-en-cuenta-btn" disabled>Añadir a "tener en cuenta"</button>
+    <span id="furniture-seleccion-count" class="inventario-count" style="padding:0"></span>
+  </div>
+  <div id="furniture-pendientes-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="furniture-pendientes-table">
+      <thead>
+        <tr><th></th><th>Pedido</th><th>Plataforma</th><th>Nombre</th><th>Producto comprado</th><th>Servicios adicionales</th><th>Artículos / Llegada</th><th>Notas</th></tr>
+        <tr id="furniture-filter-row">
+          <th></th>
+          <th><input id="furniture-pedido-search" type="text" placeholder="Filtrar..." /></th>
+          <th></th><th></th><th></th><th></th>
+          <th><input id="furniture-referencia-search" type="text" placeholder="Filtrar..." /></th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-historial-cargas" style="display:none">
+  <div id="historial-cargas-count" class="inventario-count"></div>
+  <div id="historial-cargas-list"></div>
+</div>
+
 
 <div class="modal-overlay" id="review-modal-overlay">
   <div class="modal-box">
@@ -809,7 +952,7 @@ const platforms = ${JSON.stringify(PLATFORMS)};
 const USERS = ${JSON.stringify(USERS)};
 const COLOR_ACCESS_USERS = ${JSON.stringify(COLOR_ACCESS_USERS)};
 const COLOR_META = ${JSON.stringify(COLOR_META)};
-const BASE_HEAD = ["","Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Estado de pago","Situación de envío","Agencia","Precio"];
+const BASE_HEAD = ["","Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Estado de pago","Situación de envío","Agencia","Precio","Notas"];
 
 let currentUser = localStorage.getItem("hd_user");
 let editing = false;
@@ -857,6 +1000,16 @@ function reviewBell(order) {
   return \`<button type="button" class="\${cls}" data-review-id="\${order.id}" title="\${escapeAttr(title)}">\${icon}</button>\`;
 }
 
+const CANCEL_ICON_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+const CANCEL_ICON_UNDO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11a8 8 0 1 1 2.6 5.9"/><path d="M3 5v6h6"/></svg>';
+
+function cancelButton(order) {
+  const cls = order.cancelado ? "cancel-btn cancelado" : "cancel-btn";
+  const icon = order.cancelado ? CANCEL_ICON_UNDO : CANCEL_ICON_X;
+  const title = order.cancelado ? "Reactivar pedido" : "Cancelar pedido";
+  return \`<button type="button" class="\${cls}" data-cancel-id="\${order.id}" title="\${title}">\${icon}</button>\`;
+}
+
 function agenciaBadge(order) {
   if (!order.agencia) return "";
   const cls = order.agencia === "FURNITURE" ? "agencia-furniture" : "agencia-seur";
@@ -877,7 +1030,7 @@ function render(orders) {
   const tbody = document.querySelector("#orders tbody");
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
-      <td class="bell-cell">\${reviewBell(o)}</td>
+      <td class="bell-cell">\${reviewBell(o)}\${cancelButton(o)}</td>
       <td>BEZEN\${o.orderNumber}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
@@ -890,11 +1043,12 @@ function render(orders) {
       <td>\${statusBadge(o.shippingStatus)}</td>
       <td>\${agenciaBadge(o)}</td>
       <td class="price">\${o.price} \${o.currency || ""}</td>
+      <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
     \`;
-    if (!access) return \`<tr>\${baseCells}</tr>\`;
+    if (!access) return \`<tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>\${baseCells}</tr>\`;
 
     const meta = COLOR_META[o.colorTag];
-    const rowStyle = meta ? \`border-left: 5px solid \${meta.dot}; background-color: \${meta.bg};\` : "";
+    const rowStyle = !o.cancelado && meta ? \`border-left: 5px solid \${meta.dot}; background-color: \${meta.bg};\` : "";
     const chip = meta ? \`<span class="estado-chip" style="background:\${meta.bg};color:\${meta.text}">\${meta.label}</span>\` : "";
     const options = Object.entries(COLOR_META).map(([key, m]) =>
       \`<option value="\${key}"\${o.colorTag === key ? " selected" : ""}>\${m.label}</option>\`
@@ -909,7 +1063,7 @@ function render(orders) {
       </td>\`;
     const obsCell = \`<td><input type="text" class="obs-input" data-id="\${o.id}" value="\${escapeAttr(o.observaciones)}" placeholder="Observaciones Sergio..."></td>\`;
 
-    return \`<tr style="\${rowStyle}">\${estadoCell}\${baseCells}\${obsCell}</tr>\`;
+    return \`<tr\${o.cancelado ? ' class="fila-cancelada"' : ""} style="\${rowStyle}">\${estadoCell}\${baseCells}\${obsCell}</tr>\`;
   }).join("");
   document.getElementById("count").textContent = orders.length + " pedidos";
 
@@ -933,6 +1087,17 @@ function render(orders) {
       });
     });
   }
+
+  tbody.querySelectorAll(".notas-input").forEach(inp => {
+    inp.addEventListener("focus", () => { editing = true; });
+    inp.addEventListener("blur", () => {
+      editing = false;
+      const order = allOrders.find(o => String(o.id) === inp.dataset.id);
+      if (order) order.notas = inp.value;
+      saveMeta(inp.dataset.id, { notas: inp.value });
+      if (pendingRefresh) { pendingRefresh = false; loadOrders(); }
+    });
+  });
 }
 
 let reviewModalOrderId = null;
@@ -982,6 +1147,17 @@ document.querySelector("#orders tbody").addEventListener("click", (e) => {
   const order = allOrders.find(o => String(o.id) === btn.dataset.reviewId);
   if (order) openReviewModal(order);
 });
+document.querySelector("#orders tbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-cancel-id]");
+  if (!btn) return;
+  const order = allOrders.find(o => String(o.id) === btn.dataset.cancelId);
+  if (!order) return;
+  const nuevoEstado = !order.cancelado;
+  if (nuevoEstado && !confirm("¿Cancelar el pedido BEZEN" + order.orderNumber + "?")) return;
+  order.cancelado = nuevoEstado;
+  await saveMeta(order.id, { cancelado: nuevoEstado });
+  render(currentFiltered());
+});
 
 async function saveMeta(id, patch) {
   try {
@@ -1022,6 +1198,8 @@ document.getElementById("search").addEventListener("input", applyFilter);
 document.getElementById("pendientes-referencia-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-pedido-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-ocultar-recibidos").addEventListener("change", renderPendientes);
+document.getElementById("furniture-pedido-search").addEventListener("input", renderFurniture);
+document.getElementById("furniture-referencia-search").addEventListener("input", renderFurniture);
 document.getElementById("color-filter").addEventListener("change", applyFilter);
 
 function updateUserBadge() {
@@ -1038,6 +1216,7 @@ function onUserReady() {
   document.getElementById("color-filter-wrap").style.display = hasColorAccess() ? "flex" : "none";
   updateUserBadge();
   loadOrders();
+  loadCargas();
   connectWS();
 }
 
@@ -1063,7 +1242,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes", "view-historial"];
+const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -1105,12 +1284,29 @@ function selectProveedores(id) {
   loadPendientes();
 }
 
+const LOGISTICA_LABELS = { furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", seur: "SEUR · Pedidos pendientes" };
+function selectLogistica(id) {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.logistica === id));
+  document.getElementById("view-title").textContent = "Logística · " + LOGISTICA_LABELS[id];
+  hideAllViews();
+  if (id === "seur") {
+    const ph = document.getElementById("view-placeholder");
+    ph.style.display = "block";
+    ph.textContent = "SEUR todavía no está conectado. Lo añadiremos próximamente.";
+    return;
+  }
+  document.getElementById("view-" + id).style.display = "block";
+  if (id === "furniture") loadFurniture();
+  if (id === "historial-cargas") loadHistorialCargas();
+}
+
 document.querySelectorAll(".nav-link").forEach(a => {
   a.addEventListener("click", (e) => {
     e.preventDefault();
     if (a.dataset.platform) selectPlatform(a.dataset.platform);
     else if (a.dataset.inventario) selectInventario(a.dataset.inventario);
     else if (a.dataset.proveedores) selectProveedores(a.dataset.proveedores);
+    else if (a.dataset.logistica) selectLogistica(a.dataset.logistica);
   });
 });
 
@@ -1133,6 +1329,13 @@ const proveedoresListEl = document.getElementById("proveedores-list");
 proveedoresToggle.addEventListener("click", () => {
   proveedoresToggle.classList.toggle("open");
   proveedoresListEl.classList.toggle("open");
+});
+
+const logisticaToggle = document.getElementById("logistica-toggle");
+const logisticaListEl = document.getElementById("logistica-list");
+logisticaToggle.addEventListener("click", () => {
+  logisticaToggle.classList.toggle("open");
+  logisticaListEl.classList.toggle("open");
 });
 
 let catalogoProducts = [];
@@ -1348,6 +1551,7 @@ let backorders = [];
 async function loadPendientes() {
   const res = await fetch("/api/inventario/pendientes");
   backorders = await res.json();
+  loadCargas();
   renderPendientes();
 }
 
@@ -1407,19 +1611,32 @@ function renderPendientes() {
            <option value="FUR"\${b.tipoEnvio === "FUR" ? " selected" : ""}>FURBEZEN\${b.orderNumber} (junto)</option>
          </select>\`
       : "";
+    // Aviso si la tapicería de este mismo pedido ya salió por Furniture
+    // (Jennifer, 2026-08-27): si el colchón sigue marcado FPK aquí pero la
+    // carga de su pedido ya está cerrada, hay que revisarlo — o se manda
+    // ya independiente o se ha quedado descolgado.
+    const pedidoDelColchon = esPackColchon ? allOrders.find(o => o.orderNumber === b.orderNumber) : null;
+    const cargaDelColchon = pedidoDelColchon?.cargaId ? allCargas.find(c => c.id === pedidoDelColchon.cargaId) : null;
+    const furnitureYaSalioTag = cargaDelColchon?.estado === "cerrada"
+      ? \`<span class="furniture-ya-salio-tag">⚠ Furniture de este pedido ya salió (\${new Date(cargaDelColchon.fechaCierre).toLocaleDateString("es-ES")})</span>\`
+      : "";
     // En "Pendiente de decisión" se puede corregir directamente lo que
     // aplique (FUR/FPK si es un colchón de pack) y además responder a la
     // pregunta de texto (ej. confirmar qué artículo era del catálogo).
     const referenciaCell = isDecisionTab
-      ? \`\${tipoEnvioSelect}<button type="button" class="responder-btn" data-order="\${b.orderNumber}">Responder dudas</button>\`
-      : (tipoEnvioSelect || "—");
+      ? \`\${tipoEnvioSelect}\${furnitureYaSalioTag}<button type="button" class="responder-btn" data-order="\${b.orderNumber}">Responder dudas</button>\`
+      : (tipoEnvioSelect ? tipoEnvioSelect + furnitureYaSalioTag : "—");
     const fechaCell = !showCamionCol
       ? ""
       : esPackColchon
       ? \`<td><input type="date" class="fecha-camion-input" data-id="\${b.id}" value="\${b.fechaEstimadaLlegada ? b.fechaEstimadaLlegada.slice(0, 10) : ""}"></td>\`
       : "<td>—</td>";
+    // Un pedido cancelado (Jennifer, 2026-08-26) se queda visible en rojo
+    // para no perder el rastro, pero no se puede seleccionar para pedir a
+    // fábrica.
+    const pedidoCancelado = !!allOrders.find(o => o.orderNumber === b.orderNumber)?.cancelado;
     const checkCell = showCheckbox
-      ? \`<td><input type="checkbox" class="pendiente-check" data-id="\${b.id}"\${pedidoFabricaSeleccion.has(b.id) ? " checked" : ""}></td>\`
+      ? \`<td><input type="checkbox" class="pendiente-check" data-id="\${b.id}"\${pedidoFabricaSeleccion.has(b.id) ? " checked" : ""}\${pedidoCancelado ? " disabled" : ""}></td>\`
       : "<td></td>";
     const pedidoTag = b.pedidoGenerado
       ? \`<span class="pedido-generado-tag">✓ Pedido a fábrica \${new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES")}</span>\`
@@ -1428,7 +1645,7 @@ function renderPendientes() {
       ? \`<td><input type="text" class="referencia-input" data-id="\${b.id}" value="\${escapeAttr(b.referencia || "")}" placeholder="ref."></td>\`
       : "";
     return \`
-    <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", grupoClass].filter(Boolean).join(" ")}">
+    <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado ? "fila-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${checkCell}
       <td>BEZEN\${b.orderNumber}</td>
       <td>\${b.stockModel}\${pedidoTag}</td>
@@ -1440,7 +1657,7 @@ function renderPendientes() {
       <td>\${new Date(b.fecha).toLocaleDateString("es-ES")}</td>
       \${showFurFpkCol ? \`<td>\${referenciaCell}</td>\` : ""}
       \${fechaCell}
-      <td><button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" : "Marcar recibido"}</button></td>
+      <td><button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button></td>
     </tr>
   \`;
   }).join("");
@@ -1592,6 +1809,315 @@ function renderHistorial() {
   document.getElementById("historial-count").textContent = historialMovimientos.length + " movimientos (los últimos 1000)";
 }
 
+// ---- Logística > Furniture ----
+// Todo pedido con agencia FURNITURE (calculado ya en Pedidos/Proveedores)
+// tiene que aparecer aquí, esté o no también esperando fabricarse en
+// Polival/Luso/New — son dos listas independientes (qué hay que pedir a
+// fábrica vs qué sale por esta agencia).
+let cargaAbierta = null;
+let furnitureSeleccion = new Set();
+// Todas las cargas (abiertas y cerradas) — se necesita también fuera de
+// Furniture, para avisar en Proveedores si el pedido de un colchón FPK ya
+// salió por Furniture (Jennifer, 2026-08-27).
+let allCargas = [];
+async function loadCargas() {
+  allCargas = await fetch("/api/cargas").then(r => r.json());
+}
+
+function referenciasPorPedido(orderId) {
+  return backorders
+    .filter(b => b.orderId === orderId && b.referencia)
+    .map(b => b.referencia)
+    .join(" / ");
+}
+
+function formatCargaTitulo(carga) {
+  if (!carga) return "No hay carga abierta todavía";
+  const fecha = new Date(carga.fecha + "T00:00:00");
+  return "Carga " + carga.dia + " · " + fecha.toLocaleDateString("es-ES");
+}
+
+async function loadFurniture() {
+  const [pendRes, cargasRes] = await Promise.all([
+    fetch("/api/inventario/pendientes"),
+    fetch("/api/cargas"),
+  ]);
+  backorders = await pendRes.json();
+  allCargas = await cargasRes.json();
+  cargaAbierta = allCargas.find(c => c.estado === "abierta") || null;
+  renderFurniture();
+}
+
+// Un pedido de Furniture puede tener varios artículos (ej. BEZEN12117:
+// almohada + colchón + canapé de madera) que no llegan todos al almacén el
+// mismo día — Jennifer necesita ir marcando cada uno según va llegando, sin
+// salir de Furniture. Reutiliza el mismo "recibidoFabrica" que ya existe en
+// Proveedores (mismo dato, dos sitios donde marcarlo).
+function backordersPorPedido(orderId) {
+  return backorders.filter(b => b.orderId === orderId && (b.estado === "pendiente" || b.estado === "cubierto"));
+}
+
+function furnitureRowCells(o) {
+  const items = backordersPorPedido(o.id);
+  const itemsHtml = items.length
+    ? items.map(b => {
+        // Colchón de pack marcado FPK (Jennifer, 2026-08-27): por defecto
+        // sale independiente por SEUR, sin esperar a la tapicería — pero
+        // se sigue mostrando aquí (en vez de ocultarlo) para que quede
+        // claro que ese pedido lo tiene, por si al final coincide con la
+        // tapicería y le interesa mandarlo junto en la carga.
+        const esFpk = b.esPack && b.tipo === "colchon" && b.tipoEnvio === "FPK";
+        return \`
+        <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
+          <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
+          \${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}
+        </label>
+      \`;
+      }).join("")
+    : "<em>Todo en stock</em>";
+  return \`
+    <td>BEZEN\${o.orderNumber}</td>
+    <td>\${o.platform || "Shopify"}</td>
+    <td>\${o.name}</td>
+    <td>\${o.product}</td>
+    <td class="services">\${o.services}</td>
+    <td class="furniture-items-cell">\${itemsHtml}</td>
+    <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
+  \`;
+}
+
+function renderFurniture() {
+  document.getElementById("carga-abierta-titulo").textContent = formatCargaTitulo(cargaAbierta);
+  document.getElementById("cerrar-carga-btn").disabled = !cargaAbierta;
+  document.getElementById("descargar-carga-btn").disabled = !cargaAbierta;
+
+  const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && o.shippingStatus !== "fulfilled");
+  const enCarga = cargaAbierta ? todasFurniture.filter(o => o.cargaId === cargaAbierta.id) : [];
+  const busquedaPedido = document.getElementById("furniture-pedido-search").value.trim().toLowerCase();
+  const busquedaReferencia = document.getElementById("furniture-referencia-search").value.trim().toLowerCase();
+  const pendientes = todasFurniture.filter(o => {
+    if (o.cargaId) return false;
+    if (busquedaPedido && !("bezen" + o.orderNumber).includes(busquedaPedido)) return false;
+    if (busquedaReferencia && !referenciasPorPedido(o.id).toLowerCase().includes(busquedaReferencia)) return false;
+    return true;
+  });
+
+  document.getElementById("carga-abierta-count").textContent = enCarga.length + " pedidos en esta carga";
+  document.querySelector("#carga-abierta-table tbody").innerHTML = enCarga.map(o => \`
+    <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
+      \${furnitureRowCells(o)}
+      <td><button type="button" class="sacar-carga-btn" data-id="\${o.id}">Sacar de la carga</button></td>
+    </tr>
+  \`).join("");
+  document.querySelectorAll(".sacar-carga-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      await fetch("/api/cargas/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderId: Number(btn.dataset.id) }),
+      });
+      const order = allOrders.find(o => String(o.id) === btn.dataset.id);
+      if (order) order.cargaId = null;
+      renderFurniture();
+    });
+  });
+
+  const paraTenerEnCuenta = allOrders.filter(o => o.paraTenerEnCuenta);
+  document.getElementById("tener-en-cuenta-count").textContent = paraTenerEnCuenta.length + " pedidos marcados";
+  document.querySelector("#tener-en-cuenta-table tbody").innerHTML = paraTenerEnCuenta.map(o => \`
+    <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
+      \${furnitureRowCells(o)}
+      <td><button type="button" class="quitar-tener-en-cuenta-btn" data-id="\${o.id}">Quitar</button></td>
+    </tr>
+  \`).join("");
+  document.querySelectorAll(".quitar-tener-en-cuenta-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      await fetch("/api/pedidos/shopify/meta", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: Number(btn.dataset.id), paraTenerEnCuenta: false }),
+      });
+      const order = allOrders.find(o => String(o.id) === btn.dataset.id);
+      if (order) order.paraTenerEnCuenta = false;
+      renderFurniture();
+    });
+  });
+
+  document.getElementById("furniture-pendientes-count").textContent = pendientes.length + " pedidos pendientes de envío por Furniture";
+  document.querySelector("#furniture-pendientes-table tbody").innerHTML = pendientes.map(o => \`
+    <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
+      <td><input type="checkbox" class="furniture-check" data-id="\${o.id}"\${furnitureSeleccion.has(o.id) ? " checked" : ""}\${o.cancelado ? " disabled" : ""}></td>
+      \${furnitureRowCells(o)}
+    </tr>
+  \`).join("");
+  document.querySelectorAll(".furniture-check").forEach(chk => {
+    chk.addEventListener("change", () => {
+      const id = Number(chk.dataset.id);
+      if (chk.checked) furnitureSeleccion.add(id);
+      else furnitureSeleccion.delete(id);
+      actualizarFurnitureSeleccionUI();
+    });
+  });
+  actualizarFurnitureSeleccionUI();
+
+  document.querySelectorAll(".item-recibido-check").forEach(chk => {
+    chk.addEventListener("change", async () => {
+      await fetch("/api/inventario/pendientes/" + encodeURIComponent(chk.dataset.id) + "/resolver", { method: "POST" });
+      const b = backorders.find(x => x.id === chk.dataset.id);
+      if (b) b.recibidoFabrica = chk.checked;
+
+      // Subida automática a la carga (Jennifer, 2026-08-26): en cuanto
+      // TODOS los artículos del pedido (uno o varios) están marcados como
+      // recibidos, sube solo a la próxima carga — salvo que el pedido
+      // tenga una nota, en cuyo caso se pregunta primero (la nota puede
+      // indicar una fecha de entrega concreta que no encaje con la
+      // próxima carga).
+      if (chk.checked && b) {
+        const order = allOrders.find(o => o.id === b.orderId);
+        const items = backordersPorPedido(b.orderId);
+        const todosRecibidos = items.length > 0 && items.every(i => i.recibidoFabrica);
+        if (order && !order.cargaId && !order.cancelado && todosRecibidos) {
+          const notaTexto = (order.notas || "").trim();
+          const confirmar = notaTexto
+            ? confirm('BEZEN' + order.orderNumber + ' tiene una nota: "' + notaTexto + '". ¿Añadirlo a la próxima carga igualmente?')
+            : true;
+          if (confirmar) await anadirPedidosACarga([order.id]);
+        }
+      }
+      renderFurniture();
+    });
+  });
+
+  document.querySelectorAll("#view-furniture .notas-input").forEach(inp => {
+    inp.addEventListener("focus", () => { editing = true; });
+    inp.addEventListener("blur", () => {
+      editing = false;
+      const order = allOrders.find(o => o.id === Number(inp.dataset.id));
+      if (order) order.notas = inp.value;
+      saveMeta(inp.dataset.id, { notas: inp.value });
+    });
+  });
+}
+
+function actualizarFurnitureSeleccionUI() {
+  const n = furnitureSeleccion.size;
+  document.getElementById("anadir-carga-btn").disabled = n === 0;
+  document.getElementById("anadir-tener-en-cuenta-btn").disabled = n === 0;
+  document.getElementById("furniture-seleccion-count").textContent = n > 0 ? n + " seleccionados" : "";
+}
+
+document.getElementById("anadir-tener-en-cuenta-btn").addEventListener("click", async () => {
+  const orderIds = [...furnitureSeleccion];
+  if (!orderIds.length) return;
+  await Promise.all(orderIds.map(id => fetch("/api/pedidos/shopify/meta", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id, paraTenerEnCuenta: true }),
+  })));
+  orderIds.forEach(id => {
+    const order = allOrders.find(o => o.id === id);
+    if (order) order.paraTenerEnCuenta = true;
+  });
+  furnitureSeleccion.clear();
+  renderFurniture();
+});
+
+async function anadirPedidosACarga(orderIds) {
+  const res = await fetch("/api/cargas/add", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderIds }),
+  });
+  const { carga } = await res.json();
+  orderIds.forEach(id => {
+    const order = allOrders.find(o => o.id === id);
+    if (order) order.cargaId = carga.id;
+  });
+  cargaAbierta = carga;
+}
+
+document.getElementById("anadir-carga-btn").addEventListener("click", async () => {
+  const orderIds = [...furnitureSeleccion];
+  if (!orderIds.length) return;
+  await anadirPedidosACarga(orderIds);
+  furnitureSeleccion.clear();
+  renderFurniture();
+});
+
+document.getElementById("descargar-carga-btn").addEventListener("click", () => {
+  if (!cargaAbierta) return;
+  window.location.href = "/api/cargas/export?cargaId=" + encodeURIComponent(cargaAbierta.id);
+});
+
+document.getElementById("cerrar-carga-btn").addEventListener("click", async () => {
+  if (!cargaAbierta) return;
+  if (!confirm("¿Cerrar " + formatCargaTitulo(cargaAbierta) + "? Pasará al historial de cargas.")) return;
+  await fetch("/api/cargas/close", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cargaId: cargaAbierta.id }),
+  });
+  cargaAbierta = null;
+  renderFurniture();
+});
+
+// ---- Logística > Historial de cargas ----
+async function loadHistorialCargas() {
+  const [pendRes, cargasRes] = await Promise.all([
+    fetch("/api/inventario/pendientes"),
+    fetch("/api/cargas"),
+  ]);
+  backorders = await pendRes.json();
+  const cargas = (await cargasRes.json()).filter(c => c.estado === "cerrada");
+  cargas.sort((a, b) => new Date(b.fechaCierre) - new Date(a.fechaCierre));
+  renderHistorialCargas(cargas);
+}
+
+function renderHistorialCargas(cargas) {
+  document.getElementById("historial-cargas-count").textContent = cargas.length + " cargas cerradas";
+  const cont = document.getElementById("historial-cargas-list");
+  if (!cargas.length) {
+    cont.innerHTML = '<p style="margin:0 2rem;color:var(--muted)">Todavía no se ha cerrado ninguna carga.</p>';
+    return;
+  }
+  cont.innerHTML = cargas.map(c => {
+    const pedidos = allOrders.filter(o => o.cargaId === c.id);
+    const filas = pedidos.map(o => \`<tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>\${furnitureRowCells(o)}</tr>\`).join("");
+    return \`
+    <details class="carga-historial-card">
+      <summary>\${formatCargaTitulo(c)} — \${pedidos.length} pedidos — cerrada el \${new Date(c.fechaCierre).toLocaleDateString("es-ES")}</summary>
+      <div class="toolbar" style="padding:0 1rem 0.5rem">
+        <a class="secondary" href="/api/cargas/export?cargaId=\${encodeURIComponent(c.id)}" style="text-decoration:none">Descargar Excel Furniture</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Pedido</th><th>Plataforma</th><th>Nombre</th><th>Producto comprado</th><th>Servicios adicionales</th><th>Artículos / Llegada</th><th>Notas</th></tr></thead>
+          <tbody>\${filas}</tbody>
+        </table>
+      </div>
+    </details>
+  \`;
+  }).join("");
+
+  document.querySelectorAll("#historial-cargas-list .item-recibido-check").forEach(chk => {
+    chk.addEventListener("change", async () => {
+      await fetch("/api/inventario/pendientes/" + encodeURIComponent(chk.dataset.id) + "/resolver", { method: "POST" });
+      const b = backorders.find(x => x.id === chk.dataset.id);
+      if (b) b.recibidoFabrica = chk.checked;
+    });
+  });
+
+  document.querySelectorAll("#historial-cargas-list .notas-input").forEach(inp => {
+    inp.addEventListener("focus", () => { editing = true; });
+    inp.addEventListener("blur", () => {
+      editing = false;
+      const order = allOrders.find(o => o.id === Number(inp.dataset.id));
+      if (order) order.notas = inp.value;
+      saveMeta(inp.dataset.id, { notas: inp.value });
+    });
+  });
+}
+
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(proto + "//" + location.host + "/pedidos/shopify/ws");
@@ -1605,6 +2131,285 @@ initUser();
 </script>
 </body>
 </html>`;
+}
+
+// === Fichero de etiquetas de Furniture (Jennifer, 2026-08-27): CSV
+// compatible con Excel que se sube a la plataforma de Furniture el día
+// antes de cada carga. Cada fila es un "bulto" (una pieza física a
+// entregar), no un pedido — un canapé puede generar varias filas (tapa,
+// cajón, fondo...). Se construye a partir de los "pendientes" (backorders)
+// ya decompuestos por producto/talla/color, en vez de reinterpretar los
+// packs desde cero.
+
+const FURNITURE_CSV_HEADERS = [
+  "FECHA", "A COBRAR", "DOC. VENTA", "NOM. CLIENTE", "DIRECCIÓN", "C. POSTAL", "POBLACIÓN",
+  "DESCRIP.", "CANTIDAD", "CENTRO", "TELÉFONO1", "TELÉFONO 2", "OBSERVACIONES", "USADO", "RAEE",
+  "ARRASTRE", "VERIFICADO", "PLANIFICADO", "LLAMADO", "CAMIÓN", "CARGADO", "HORA INICIO", "HORA FIN",
+  "EAN", "PROCEDENCIA", "TIPOSERVICIO", "BULTOS", "VOLUM", "KILOS", "NUMERO_RESERVA", "EMAIL", "PROVINCIA", "VALOR MERCANCÍA",
+];
+
+function limpiarTelefonoFurniture(phone) {
+  return (phone || "").replace(/^\+34\s*/, "").trim();
+}
+
+function tieneMontajeFurniture(services) {
+  const m = /Montaje:\s*([^·]+)/i.exec(services || "");
+  return !!(m && m[1].trim().toLowerCase().startsWith("con montaje"));
+}
+
+// "Tapa de Canapé: Tapa Entera" / "Tapa Reforzada | €25.00" / "Tapa Partida
+// | €59.00" (valores reales comprobados en pedidos — Jennifer, 2026-08-27).
+function tapaPartidaFurniture(services) {
+  const m = /Tapa de Canapé:\s*([^·]+)/i.exec(services || "");
+  return !!(m && m[1].trim().toLowerCase().startsWith("tapa partida"));
+}
+
+// Mapeo de "Servicios adicionales" (retirada) a OBSERVACIONES (Jennifer,
+// 2026-08-27) — por palabras clave porque el texto real de Shopify difiere
+// un poco del que se dictó de palabra (confirmado con pedidos reales).
+function observacionesRetiradaFurniture(services) {
+  const matches = [...(services || "").matchAll(/Servicios adicionales:\s*([^·]+)/gi)].map((m) => m[1].trim());
+  const relevante = matches.find((v) => v.toLowerCase() !== "ninguno");
+  if (!relevante) return "";
+  const v = relevante.toLowerCase();
+  const colchon = v.includes("colch");
+  const cama = v.includes("cama") || v.includes("canap") || v.includes("base");
+  const conDesmontaje = v.includes("desmontaje") && !v.includes("sin desmontaje");
+  if (colchon && cama && conDesmontaje) return "Desmontaje; Retirada de colchón y cama punto limpio";
+  if (colchon && cama) return "Retirada de colchón y cama punto limpio";
+  if (cama && conDesmontaje) return "Desmontaje cama, retirada punto limpio";
+  if (cama) return "Retirada de cama para desechar";
+  if (colchon) return "Retirada colchón punto limpio";
+  return "";
+}
+
+function parseMedidaFurniture(talla) {
+  const m = /(\d{2,3})\s*[xX]\s*(\d{2,3})/.exec(talla || "");
+  if (!m) return null;
+  return { ancho: Number(m[1]), largo: Number(m[2]), text: `${m[1]}X${m[2]}` };
+}
+
+// 160x190/160x200: Gemelo solo si el cliente lo elige (variante trae
+// "Gemelos"). 180x190/180x200: siempre Gemelo (Jennifer, 2026-08-27).
+function esGemeloFurniture(medida, productoTexto) {
+  if (!medida) return false;
+  if (medida.ancho >= 180) return true;
+  if (medida.ancho === 160) return /gemelo/i.test(productoTexto || "");
+  return false;
+}
+
+// PROVINCIA por código postal (Jennifer, 2026-08-27) — los dos primeros
+// dígitos del CP marcan la provincia; algunas van con el nombre tradicional
+// castellano en vez del oficial actual, según pidió (Girona->GERONA,
+// Lleida->LÉRIDA, A Coruña->LA CORUÑA, pero Gipuzkoa/Bizkaia/Illes
+// Balears/Ourense se quedan tal cual, no se castellanizan más).
+const PROVINCIA_POR_CP = {
+  "01": "ÁLAVA", "02": "ALBACETE", "03": "ALICANTE", "04": "ALMERÍA", "05": "ÁVILA",
+  "06": "BADAJOZ", "07": "BALEARES", "08": "BARCELONA", "09": "BURGOS", "10": "CÁCERES",
+  "11": "CÁDIZ", "12": "CASTELLÓN", "13": "CIUDAD REAL", "14": "CÓRDOBA", "15": "LA CORUÑA",
+  "16": "CUENCA", "17": "GERONA", "18": "GRANADA", "19": "GUADALAJARA", "20": "GUIPUZCOA",
+  "21": "HUELVA", "22": "HUESCA", "23": "JAÉN", "24": "LEÓN", "25": "LÉRIDA",
+  "26": "LA RIOJA", "27": "LUGO", "28": "MADRID", "29": "MÁLAGA", "30": "MURCIA",
+  "31": "NAVARRA", "32": "ORENSE", "33": "ASTURIAS", "34": "PALENCIA", "35": "LAS PALMAS",
+  "36": "PONTEVEDRA", "37": "SALAMANCA", "38": "SANTA CRUZ DE TENERIFE", "39": "CANTABRIA", "40": "SEGOVIA",
+  "41": "SEVILLA", "42": "SORIA", "43": "TARRAGONA", "44": "TERUEL", "45": "TOLEDO",
+  "46": "VALENCIA", "47": "VALLADOLID", "48": "VIZCAYA", "49": "ZAMORA", "50": "ZARAGOZA",
+  "51": "CEUTA", "52": "MELILLA",
+};
+function provinciaPorCp(postalCode) {
+  return PROVINCIA_POR_CP[(postalCode || "").slice(0, 2)] || "";
+}
+
+function nombreCortoProducto(stockModel) {
+  const partes = (stockModel || "").split("|");
+  return partes[partes.length - 1].trim()
+    .replace(/^almohada\s+/i, "")
+    .replace(/^colch[oó]n\s+/i, "")
+    .replace(/\s+gran hotel$/i, "");
+}
+
+// --- Generadores de bultos por familia de canapé (Jennifer, 2026-08-26/27) ---
+
+function bultosCanapeMadera(modelo, medida, color, referencia, tapaPartida) {
+  const linea = (parte) => [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ");
+  if (medida.ancho >= 160) {
+    return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2"), linea("FONDO"), linea("JUEGO BISAGRAS E HIDRÁULICOS ½"), linea("JUEGO BISAGRAS E HIDRÁULICOS 2/2")];
+  }
+  if (tapaPartida) {
+    return [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), linea("CAJÓN"), linea("FONDO"), linea("JUEGO BISAGRAS E HIDRÁULICOS")];
+  }
+  return [linea("TAPA"), linea("CAJÓN"), linea("FONDO"), linea("JUEGO BISAGRAS E HIDRÁULICOS")];
+}
+
+function bultosCanapeGranCapacidad(modelo, medida, color, referencia, tapaPartida, gemelo) {
+  const linea = (parte) => [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ");
+  if (gemelo) return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2")];
+  if (tapaPartida) return [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+  return [linea("TAPA"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+}
+
+function bultosCanapeMagnum(modelo, medida, color, referencia, tapaPartida, gemelo) {
+  const linea = (parte) => [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ");
+  if (gemelo) return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2")];
+  const rows = tapaPartida
+    ? [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")]
+    : [linea("TAPA"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+  if (medida.ancho >= 135) rows.push(linea("FONDO"));
+  return rows;
+}
+
+function bultosCanapeInitial(modelo, medida, color, referencia, tapaPartida, gemelo) {
+  const linea = (parte) => [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ");
+  if (gemelo) return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2"), linea("JUEGO DE PATAS")];
+  const rows = tapaPartida
+    ? [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")]
+    : [linea("TAPA"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+  if (medida.ancho >= 135) rows.push(linea("FONDO"));
+  rows.push(linea("JUEGO DE PATAS"));
+  return rows;
+}
+
+function bultosBase(medida, color, referencia) {
+  const patas = medida.ancho < 135 || (medida.ancho === 135 && medida.largo <= 190) ? 4 : 6;
+  return [
+    [referencia, "BASE", medida.text, color].filter(Boolean).join(" "),
+    `JUEGO DE ${patas} PATAS`,
+  ];
+}
+
+// Reglas de qué familia/MODELO corresponde a cada canapé del catálogo — el
+// orden importa: las reglas más específicas van primero para no confundir
+// "esquinas curvas/rectas" (madera) con "alta capacidad y resistencia"
+// (polipiel), que comparten ese texto en el título.
+const CANAPE_MODELO_RULES = [
+  { test: (t) => /esquinas curvas/i.test(t), gen: bultosCanapeMadera, modelo: "CANAPÉ MADERA" },
+  { test: (t) => /esquinas rectas/i.test(t), gen: bultosCanapeMadera, modelo: "CANAPÉ MADERA ASTRA" },
+  { test: (t) => /extra capacidad/i.test(t), gen: bultosCanapeGranCapacidad, modelo: "CANAPÉ GRAN CAPACIDAD" },
+  { test: (t) => /apertura lateral/i.test(t), gen: bultosCanapeGranCapacidad, modelo: "CANAPÉ POLIPIEL APERTURA LATERAL" },
+  { test: (t) => /borde polipiel/i.test(t), gen: bultosCanapeGranCapacidad, modelo: "CANAPÉ POLIPIEL BORDE DELUXE" },
+  { test: (t) => /tapizado en tela.*alta capacidad/i.test(t), gen: bultosCanapeGranCapacidad, modelo: "CANAPÉ TELA" },
+  { test: (t) => /con ruedas/i.test(t), gen: bultosCanapeMagnum, modelo: "CANAPÉ MAGNUM" },
+  { test: (t) => /tapizado en tela premium/i.test(t), gen: bultosCanapeInitial, modelo: "CANAPÉ SOUL" },
+  { test: (t) => /con patas/i.test(t), gen: bultosCanapeInitial, modelo: "CANAPÉ INITIAL" },
+  { test: (t) => /alta capacidad y resistencia/i.test(t) && !/esquinas/i.test(t), gen: bultosCanapeGranCapacidad, modelo: "CANAPÉ POLIPIEL" },
+];
+
+function matchCanapeRule(title) {
+  return CANAPE_MODELO_RULES.find((r) => r.test(title || "")) || null;
+}
+
+function extraerMedidaDeMercancia(mercanciaFabrica) {
+  const m = /MEDIDA:\s*([^·]+)/i.exec(mercanciaFabrica || "");
+  return m ? m[1].trim().replace(/cm/gi, "").trim() : "";
+}
+
+// A partir del backorder de un pedido de Furniture, genera 1+ líneas de
+// DESCRIP. (una por bulto). "productoTexto" es el "product" ya concatenado
+// del pedido, usado solo para detectar "- Gemelos" en la variante elegida.
+function descripcionesBackorder(b, productoTexto, tapaPartida) {
+  const stockModel = b.stockModel || "";
+  const t = stockModel.toLowerCase();
+  const referencia = b.referencia || "";
+  // El color puede venir con el prefijo de tejido ("Tela - Cacao", "Polipiel
+  // - Beige") — en las etiquetas de Furniture solo se pone el color limpio
+  // (Jennifer, 2026-08-27).
+  const color = (b.color || "").replace(/^(tela|polipiel)\s*-\s*/i, "");
+
+  if (t.includes("canap")) {
+    const medida = parseMedidaFurniture(b.talla);
+    const rule = matchCanapeRule(stockModel);
+    if (!rule || !medida) return [`REVISAR (sin regla de bultos): ${stockModel} ${b.talla}`];
+    const gemelo = esGemeloFurniture(medida, productoTexto);
+    return rule.gen(rule.modelo, medida, color, referencia, tapaPartida, gemelo);
+  }
+  if (t.includes("cabecero")) {
+    const medidaTxt = extraerMedidaDeMercancia(b.mercanciaFabrica) || b.talla || "";
+    const key = matchCabeceroRecipeKey(stockModel);
+    const modeloWeb = key ? key.charAt(0).toUpperCase() + key.slice(1) : stockModel;
+    return [[referencia, "CABECERO", modeloWeb, medidaTxt, color].filter(Boolean).join(" ")];
+  }
+  if (t.includes("base")) {
+    const medida = parseMedidaFurniture(b.talla);
+    if (!medida) return [`REVISAR (sin medida): ${stockModel} ${b.talla}`];
+    return bultosBase(medida, color, referencia);
+  }
+  // Colchón / almohada / topper / protector: sin referencia, formato
+  // "{PREFIJO} {n}/{total} {MODELO CORTO} {MEDIDA}" cuando hay 2+ iguales.
+  const prefijo = b.tipo === "almohada" ? "ALMOHADA" : "COLCHÓN";
+  const corto = nombreCortoProducto(stockModel);
+  const base = `${corto} ${b.talla || ""}`.trim();
+  const cantidad = b.cantidad || 1;
+  if (cantidad <= 1) return [`${prefijo} ${base}`.trim()];
+  const rows = [];
+  for (let i = 1; i <= cantidad; i++) rows.push(`${prefijo} ${i}/${cantidad} ${base}`.trim());
+  return rows;
+}
+
+function csvEscapeFurniture(value) {
+  const s = String(value ?? "");
+  if (/[;"\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+function buildFurnitureCsv(rows) {
+  const lines = [FURNITURE_CSV_HEADERS.map(csvEscapeFurniture).join(";")];
+  for (const row of rows) lines.push(row.map(csvEscapeFurniture).join(";"));
+  return "﻿" + lines.join("\r\n");
+}
+
+async function buildFurnitureExport(env, cargaId) {
+  const ordersId = env.ORDERS_STORE.idFromName("shopify");
+  const ordersStub = env.ORDERS_STORE.get(ordersId);
+  const invStub = inventoryStub(env);
+  const [orders, cargas, backorders] = await Promise.all([
+    ordersStub.fetch("https://do/orders").then((r) => r.json()),
+    ordersStub.fetch("https://do/cargas").then((r) => r.json()),
+    invStub.fetch("https://do/backorders").then((r) => r.json()),
+  ]);
+
+  const carga = cargaId ? cargas.find((c) => c.id === cargaId) : cargas.find((c) => c.estado === "abierta");
+  if (!carga) return { error: "No hay carga abierta." };
+
+  const pedidos = orders.filter((o) => o.cargaId === carga.id);
+
+  // Se sube el día antes de la carga (Jennifer, 2026-08-26): carga viernes
+  // 28/08 -> fecha en el fichero 27/08/2026.
+  const cargaFecha = new Date(carga.fecha + "T00:00:00Z");
+  const fechaSubida = new Date(cargaFecha);
+  fechaSubida.setUTCDate(fechaSubida.getUTCDate() - 1);
+  const fechaTexto = [fechaSubida.getUTCDate(), fechaSubida.getUTCMonth() + 1, fechaSubida.getUTCFullYear()]
+    .map((n, i) => (i < 2 ? String(n).padStart(2, "0") : n))
+    .join("/");
+
+  const rows = [];
+  for (const o of pedidos) {
+    const montaje = tieneMontajeFurniture(o.services);
+    const tapaPartida = tapaPartidaFurniture(o.services);
+    const observaciones = observacionesRetiradaFurniture(o.services);
+    const telefono = limpiarTelefonoFurniture(o.phone);
+    // Igual que en el desglose de Furniture: un colchón de pack marcado
+    // "FPK" sale independiente por SEUR, no entra en esta etiqueta.
+    const backordersPedido = backorders.filter((b) => b.orderId === o.id
+      && (b.estado === "pendiente" || b.estado === "cubierto")
+      && !(b.esPack && b.tipo === "colchon" && b.tipoEnvio === "FPK"));
+
+    let descripciones = [];
+    for (const b of backordersPedido) {
+      descripciones.push(...descripcionesBackorder(b, o.product, tapaPartida));
+    }
+    if (!descripciones.length) descripciones = [o.product || ""];
+
+    for (const descrip of descripciones) {
+      rows.push([
+        fechaTexto, "", "BEZEN" + o.orderNumber, o.name, o.furnitureAddress || o.address || "",
+        o.postalCode || "", o.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
+        "", "", "", "", "", "", "", "", "", "", "", "",
+        montaje ? "Subida a piso y montaje" : "Subida a piso", "1", "", "", "",
+        o.email || "", provinciaPorCp(o.postalCode), "",
+      ]);
+    }
+  }
+  return { rows, carga };
 }
 
 // Es una app interna con datos que cambian a cada momento (pedidos, stock);
@@ -1766,6 +2571,48 @@ async function handleFetch(request, env) {
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/orders/unprocess", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/cargas" && request.method === "GET") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/cargas");
+      return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/cargas/add" && request.method === "POST") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/cargas/add", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/cargas/remove" && request.method === "POST") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/cargas/remove", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/cargas/close" && request.method === "POST") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/cargas/close", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/cargas/export" && request.method === "GET") {
+      const cargaId = url.searchParams.get("cargaId") || null;
+      const result = await buildFurnitureExport(env, cargaId);
+      if (result.error) return new Response(result.error, { status: 400 });
+      const csv = buildFurnitureCsv(result.rows);
+      const filename = `Furniture_${result.carga.fecha}.csv`;
+      return new Response(csv, {
+        headers: {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": `attachment; filename="${filename}"`,
+        },
+      });
     }
 
     return new Response("not found", { status: 404 });

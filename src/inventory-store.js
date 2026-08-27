@@ -357,7 +357,7 @@ function buildCanapeMercancia(title, colorRaw, talla, servicesText) {
 // directamente el "Medida final" que da Shopify en vez de calcular el
 // +30cm a mano — así vale igual aunque el margen sea distinto por modelo
 // (ej. Aura es +30cm, Atenea/Iris son +10cm, visto en pedidos reales).
-function parseCabeceroVariant(variantTitle) {
+export function parseCabeceroVariant(variantTitle) {
   const partes = (variantTitle || "").split("/").map((s) => s.trim()).filter(Boolean);
   let medida = null;
   let color = null;
@@ -392,7 +392,7 @@ const CABECERO_ACABADOS_COMUNES = {
 // (aunque ahí Shopify ya trae la medida final calculada y se usa esa
 // directamente) como si va dentro de un pack (donde no hay "medida final"
 // en el SKU, solo el ancho del colchón/canapé — ver buildCabeceroMercancia).
-const CABECERO_RECIPES = {
+export const CABECERO_RECIPES = {
   aura: {
     modelo: "SIENNA",
     offset: 30,
@@ -411,7 +411,7 @@ const CABECERO_RECIPES = {
   gaia: { modelo: "GRETA", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
 };
 
-function matchCabeceroRecipeKey(title) {
+export function matchCabeceroRecipeKey(title) {
   const t = normalizeKey(title);
   if (t.includes("aura")) return "aura";
   if (t.includes("aria")) return "aria";
@@ -520,7 +520,7 @@ function stockKey(stockModel, talla) {
 // Empuja un pendiente nuevo (idempotente por id) — compartido entre la
 // venta normal (applyStockUsage) y los productos "no llevamos stock"
 // (addNoStockBackorder).
-function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, color, tipo, cantidad, orderDate, esPack, proveedor, needsDecision, referencia, mercanciaFabrica }) {
+function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, color, tipo, cantidad, orderDate, esPack, proveedor, needsDecision, referencia, mercanciaFabrica, estado, recibidoFabrica }) {
   if (backorders.some((b) => b.id === id)) return;
   backorders.push({
     id,
@@ -536,8 +536,13 @@ function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla
     // Fecha del pedido original (no la de hoy), para saber cuánto lleva
     // esperando el cliente de verdad.
     fecha: orderDate || new Date().toISOString(),
-    estado: "pendiente",
-    recibidoFabrica: false,
+    // "pendiente" = hace falta pedirlo a proveedor (aparece en Polival/
+    // Luso/New). "cubierto" = ya había stock real cuando se procesó el
+    // pedido, no hace falta pedir nada — solo existe para que Furniture
+    // pueda ver el artículo completo del pedido y su llegada ya marcada
+    // (ver applyStockUsage). "servido" = el pedido del cliente ya se envió.
+    estado: estado || "pendiente",
+    recibidoFabrica: !!recibidoFabrica,
     // Solo tiene sentido para colchones dentro de un pack con tapicería:
     // referencia FURBEZEN (tiene que salir junto con la tapicería) o
     // FPKBEZEN (puede salir independiente), por defecto FPK hasta que se
@@ -953,7 +958,7 @@ export class InventoryStore {
   // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
   // columna. El excedente de vendidoPendiente se libera cuando el pedido
   // que lo generó se marca como enviado (ver settleShipment).
-  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision) {
+  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, trackFurniture) {
     const key = stockKey(item.product.stockModel, item.talla);
     const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
     const covered = Math.min(row.cantidad, item.qty);
@@ -968,6 +973,27 @@ export class InventoryStore {
         origen: "venta",
         orderNumber,
       });
+      // El pedido va a salir por Furniture (Jennifer, 2026-08-26): lo que
+      // ya había en stock se descuenta y se da directamente por "en
+      // almacén" — Furniture necesita ver también estos artículos, no solo
+      // los que faltan pedir a fábrica, para tener el pedido completo.
+      if (trackFurniture) {
+        pushBackorder(backorders, {
+          id: `${orderId}-${key}-cubierto`,
+          orderId,
+          orderNumber,
+          stockModel: item.product.stockModel,
+          talla: item.talla,
+          color: item.color,
+          tipo: item.tipo,
+          cantidad: covered,
+          orderDate,
+          esPack,
+          proveedor,
+          estado: "cubierto",
+          recibidoFabrica: true,
+        });
+      }
     }
     const falta = item.qty - covered;
     const reviewNotes = [];
@@ -1219,6 +1245,10 @@ export class InventoryStore {
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
     entry.recibidoFabrica = !entry.recibidoFabrica;
+    // Fecha del cambio a recibido (Jennifer, 2026-08-26): la fila ya no
+    // desaparece de Proveedores al marcarla, así que necesita mostrar
+    // cuándo se marcó. Se borra si se desmarca por error.
+    entry.fechaRecibido = entry.recibidoFabrica ? new Date().toISOString() : null;
     await this.state.storage.put("backorders", backorders);
     return Response.json(entry);
   }
@@ -1470,7 +1500,7 @@ export class InventoryStore {
       }
 
       if (!proveedor) needsReview = true;
-      const { falta, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision);
+      const { falta, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, agencia === "FURNITURE");
       if (reviewNotes.length) {
         needsReview = true;
         reviewReasons.push(...reviewNotes);
