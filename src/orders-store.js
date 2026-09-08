@@ -23,6 +23,56 @@ function cargaFechaKey(d) {
   return d.toISOString().slice(0, 10);
 }
 
+// Cargas de SEUR (Jennifer, 2026-09-08): a diferencia de Furniture (una sola
+// carga abierta a la vez, miércoles/viernes), SEUR carga de lunes a viernes
+// y puede haber varias cargas abiertas a la vez (la de hoy y la de mañana),
+// así que se buscan/crean por fecha exacta en vez de "la abierta".
+const DIAS_SEMANA = ["DOMINGO", "LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO"];
+function skipWeekend(d) {
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d;
+}
+// Corte a las 15:00 (Jennifer, 2026-09-08): un pedido con stock que entra
+// antes de las 15:00 va a la carga de SEUR de mañana; después de las 15:00,
+// a la de pasado mañana. Salta fines de semana en ambos casos.
+function nextSeurCargaDate(from) {
+  const d = new Date(from);
+  const cutoffPassed = d.getHours() >= 15;
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + (cutoffPassed ? 2 : 1));
+  return skipWeekend(d);
+}
+// Elección manual de "hoy" o "mañana" al marcar un pendiente como recibido
+// para SEUR (Jennifer, 2026-09-08) — pedidos atrasados pueden necesitar
+// salir el mismo día en que se marcan, así que aquí no se aplica el corte
+// de las 15:00 ni se saltan fines de semana (es una elección explícita).
+function seurCargaDateFromChoice(choice) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  if (choice === "manana") d.setDate(d.getDate() + 1);
+  return d;
+}
+
+async function getOrCreateCargaByFecha(storage, tipo, dateObj) {
+  const cargas = (await storage.get("cargas")) || [];
+  const fecha = cargaFechaKey(dateObj);
+  let carga = cargas.find((c) => (c.tipo || "furniture") === tipo && c.fecha === fecha && c.estado === "abierta");
+  if (!carga) {
+    carga = {
+      id: crypto.randomUUID(),
+      tipo,
+      fecha,
+      dia: DIAS_SEMANA[dateObj.getDay()],
+      estado: "abierta",
+      fechaCreacion: new Date().toISOString(),
+      fechaCierre: null,
+    };
+    cargas.push(carga);
+    await storage.put("cargas", cargas);
+  }
+  return carga;
+}
+
 function mergeCustomFields(existing, incoming) {
   if (!existing) return incoming;
   const merged = { ...incoming };
@@ -241,11 +291,12 @@ export class OrdersStore {
     if (url.pathname === "/cargas/add" && request.method === "POST") {
       const { orderIds } = await request.json();
       const cargas = (await this.state.storage.get("cargas")) || [];
-      let abierta = cargas.find((c) => c.estado === "abierta");
+      let abierta = cargas.find((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta");
       if (!abierta) {
         const fecha = nextCargaDate(new Date());
         abierta = {
           id: crypto.randomUUID(),
+          tipo: "furniture",
           fecha: cargaFechaKey(fecha),
           dia: DIAS_CARGA[fecha.getDay()],
           estado: "abierta",
@@ -291,6 +342,33 @@ export class OrdersStore {
       return Response.json({ ok: true, carga });
     }
 
+    // Llamado por InventoryStore (Jennifer, 2026-09-08) al marcar un
+    // pendiente de colchón como "listo para SEUR" — hoy o mañana, elegido a
+    // mano porque puede ser un pedido atrasado que quiere que salga ya.
+    if (url.pathname === "/cargas/seur/get-or-create" && request.method === "POST") {
+      const { fecha } = await request.json();
+      const dateObj = seurCargaDateFromChoice(fecha);
+      const carga = await getOrCreateCargaByFecha(this.state.storage, "seur", dateObj);
+      this.broadcast();
+      return Response.json(carga);
+    }
+
+    // El pedido con 2+ colchones de disponibilidad mixta ya tiene decisión
+    // (Jennifer, 2026-09-08, ver InventoryStore.processSale): reprocesa con
+    // el stock de ahora mismo repartiendo lo que hay y dejando el resto
+    // pendiente en Luso/New con referencia "2".
+    if (url.pathname === "/orders/seur-dividir" && request.method === "POST") {
+      const { id } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const existing = orders[id];
+      if (!existing) return new Response("not found", { status: 404 });
+      await this.processInventory(existing, true, true);
+      orders[id] = existing;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json(existing);
+    }
+
     if (url.pathname === "/ws") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -303,14 +381,25 @@ export class OrdersStore {
     return new Response("not found", { status: 404 });
   }
 
-  async processInventory(order, force) {
+  async processInventory(order, force, seurSplitDecision) {
     const id = this.env.INVENTORY_STORE.idFromName("main");
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force, orderDate: order.orderDate, services: order.services || "", paymentStatus: order.paymentStatus }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force, orderDate: order.orderDate, services: order.services || "", paymentStatus: order.paymentStatus, seurSplitDecision }),
     });
-    const { agencia, pendingManufacture, needsReview, reviewReasons, paused } = await res.json();
+    const { agencia, pendingManufacture, needsReview, reviewReasons, paused, seurMixedPending, seurMixedInfo, seurReady } = await res.json();
+    // Pedido de 2+ colchones SEUR con disponibilidad mixta (Jennifer,
+    // 2026-09-08): se para sin marcar inventoryProcessed (se reintenta solo
+    // en el próximo sync/webhook, por si con el tiempo queda todo cubierto)
+    // hasta que ella decida dividir desde /orders/seur-dividir.
+    if (seurMixedPending) {
+      order.seurMixedPending = true;
+      order.seurMixedInfo = seurMixedInfo;
+      return;
+    }
+    order.seurMixedPending = false;
+    order.seurMixedInfo = null;
     // `paused` cubre dos casos (InventoryStore.processSale): la pausa
     // general, o que el pedido todavía no esté PAGADO (financiación/
     // transferencia sin confirmar — regla de seguridad, no se salta ni con
@@ -322,6 +411,14 @@ export class OrdersStore {
     order.needsReview = needsReview;
     order.reviewReasons = reviewReasons || [];
     order.inventoryProcessed = true;
+    // Carga automática de SEUR (Jennifer, 2026-09-08): en cuanto hay algo
+    // de este pedido con stock real disponible, se prepara solo para la
+    // próxima carga — sin que nadie tenga que seleccionarlo a mano, a
+    // diferencia de Furniture. Corte a las 15:00 (ver nextSeurCargaDate).
+    if (seurReady && !order.cargaId) {
+      const carga = await getOrCreateCargaByFecha(this.state.storage, "seur", nextSeurCargaDate(new Date()));
+      order.cargaId = carga.id;
+    }
   }
 
   // Suelta (o vuelve a bloquear) los pendientes de este pedido que estaban

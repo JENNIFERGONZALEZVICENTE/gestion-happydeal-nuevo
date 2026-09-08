@@ -517,10 +517,40 @@ function stockKey(stockModel, talla) {
   return `${stockModel}|${talla}`;
 }
 
+// Pedido de 2+ colchones sueltos (agencia SEUR) donde unos sí hay en stock y
+// otros no (Jennifer, 2026-09-08): en vez de decidirlo solo, se para y se le
+// pregunta si quiere dividir el envío o esperar a tenerlo completo. Este
+// "dry run" mira la disponibilidad sin tocar el stock real — varios artículos
+// del mismo pedido pueden compartir modelo+talla, así que se lleva una copia
+// local para no contar el mismo stock dos veces.
+function checkColchonesCoverage(stock, colchones) {
+  const consumido = {};
+  const detalle = colchones.map((item) => {
+    const key = stockKey(item.product.stockModel, item.talla);
+    const disponible = (stock[key]?.cantidad || 0) - (consumido[key] || 0);
+    const covered = Math.max(0, Math.min(disponible, item.qty));
+    consumido[key] = (consumido[key] || 0) + covered;
+    return { stockModel: item.product.stockModel, talla: item.talla, cantidad: item.qty, disponible: covered };
+  });
+  const algunoCubierto = detalle.some((d) => d.disponible > 0);
+  const algunoFalta = detalle.some((d) => d.disponible < d.cantidad);
+  return { mixto: algunoCubierto && algunoFalta, detalle };
+}
+
+// Referencia "quemada" (Jennifer, 2026-09-08): cada vez que se deshace un
+// "listo para SEUR" porque el camión no traía de verdad ese colchón, la
+// referencia usada hasta ahora puede que ya se haya dado de alta en la
+// plataforma de Seur — la siguiente vez que salga tiene que ser distinta
+// para no chocar. "" -> "2" -> "3" -> ...
+function nextRefSuffix(current) {
+  const n = parseInt(current, 10);
+  return Number.isFinite(n) ? String(n + 1) : "2";
+}
+
 // Empuja un pendiente nuevo (idempotente por id) — compartido entre la
 // venta normal (applyStockUsage) y los productos "no llevamos stock"
 // (addNoStockBackorder).
-function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, color, tipo, cantidad, orderDate, esPack, proveedor, needsDecision, referencia, mercanciaFabrica, estado, recibidoFabrica }) {
+function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, color, tipo, cantidad, orderDate, esPack, proveedor, needsDecision, referencia, mercanciaFabrica, estado, recibidoFabrica, refSuffix }) {
   if (backorders.some((b) => b.id === id)) return;
   backorders.push({
     id,
@@ -575,6 +605,15 @@ function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla
     // usando el nombre manual por modelo (nombreFabricacion). Siempre
     // editable a mano (ver /backorders/:id/mercancia).
     mercanciaFabrica: mercanciaFabrica || null,
+    // Pedido de 2+ colchones dividido a petición de Jennifer (SEUR,
+    // 2026-09-08): la parte que se queda pendiente en Luso/New se marca con
+    // "2" para que, cuando salga en su propia carga de SEUR más adelante,
+    // use una referencia distinta (BEZEN{numero}2) y no choque con la del
+    // envío que ya salió con la referencia normal. "" para todo lo demás.
+    refSuffix: refSuffix || "",
+    // Carga de SEUR a la que se ha asignado este pendiente al marcarlo
+    // "listo para SEUR" (ver resolveSeurBackorder) — null hasta entonces.
+    cargaId: null,
   });
 }
 
@@ -788,6 +827,15 @@ export class InventoryStore {
     if (resolveMatch && method === "POST") {
       return this.resolveBackorder(decodeURIComponent(resolveMatch[1]));
     }
+    const resolveSeurMatch = url.pathname.match(/^\/backorders\/([^/]+)\/resolver-seur$/);
+    if (resolveSeurMatch && method === "POST") {
+      const { fecha } = await request.json();
+      return this.resolveSeurBackorder(decodeURIComponent(resolveSeurMatch[1]), fecha);
+    }
+    const undoSeurMatch = url.pathname.match(/^\/backorders\/([^/]+)\/deshacer-seur$/);
+    if (undoSeurMatch && method === "POST") {
+      return this.undoSeurBackorder(decodeURIComponent(undoSeurMatch[1]));
+    }
     const planMatch = url.pathname.match(/^\/backorders\/([^/]+)\/plan$/);
     if (planMatch && method === "POST") {
       return this.updateBackorderPlan(decodeURIComponent(planMatch[1]), await request.json());
@@ -958,7 +1006,7 @@ export class InventoryStore {
   // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
   // columna. El excedente de vendidoPendiente se libera cuando el pedido
   // que lo generó se marca como enviado (ver settleShipment).
-  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, trackFurniture) {
+  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, trackFurniture, refSuffix) {
     const key = stockKey(item.product.stockModel, item.talla);
     const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
     const covered = Math.min(row.cantidad, item.qty);
@@ -1028,7 +1076,7 @@ export class InventoryStore {
         }
       }
       pushBackorder(backorders, {
-        id: `${orderId}-${key}`,
+        id: refSuffix ? `${orderId}-${key}-${refSuffix}` : `${orderId}-${key}`,
         orderId,
         orderNumber,
         stockModel: item.product.stockModel,
@@ -1042,10 +1090,11 @@ export class InventoryStore {
         needsDecision,
         referencia,
         mercanciaFabrica,
+        refSuffix,
       });
     }
     stock[key] = row;
-    return { falta, reviewNotes };
+    return { falta, covered, reviewNotes };
   }
 
   // Para productos "no llevamos stock" (fabricación bajo pedido siempre,
@@ -1253,6 +1302,114 @@ export class InventoryStore {
     return Response.json(entry);
   }
 
+  // Llega el camión con el colchón que faltaba para un pedido SEUR
+  // (Jennifer, 2026-09-08): NO comprueba "stock real" — ya sabíamos que no
+  // había cuando se generó este pendiente, así que exigirlo obligaría a
+  // darlo de alta a mano en Stock primero (y de paso lo metería en el fondo
+  // común, donde un pedido nuevo podría llevárselo antes que a este cliente,
+  // que lleva más tiempo esperando). Se fía de que ella lo confirma con el
+  // albarán delante: descuenta directo de "vendido pendiente" (nunca de
+  // "cantidad", que sigue siendo el fondo común de verdad disponible), y
+  // mete el pedido en la carga de SEUR de la fecha que elija (hoy o mañana,
+  // por si es un pedido atrasado que quiere que salga ya). Solo tiene
+  // sentido para colchones sueltos con proveedor Luso/New (esPack:false) —
+  // los de Furniture usan el flujo de "recibido de fábrica" normal.
+  async resolveSeurBackorder(id, fecha) {
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
+    if (entry.estado !== "pendiente") {
+      return Response.json({ ok: false, error: "Este pendiente ya no está pendiente." }, { status: 409 });
+    }
+
+    const carga = await this.getOrCreateSeurCarga(fecha);
+    if (!carga) return Response.json({ ok: false, error: "Fecha de carga no válida." }, { status: 400 });
+
+    const stock = await this.load("stock", {});
+    const key = stockKey(entry.stockModel, entry.talla);
+    const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
+    const antes = row.vendidoPendiente || 0;
+    row.vendidoPendiente = Math.max(0, antes - entry.cantidad);
+    stock[key] = row;
+    await this.logMovement({
+      stockModel: entry.stockModel,
+      talla: entry.talla,
+      campo: "vendidoPendiente",
+      delta: row.vendidoPendiente - antes,
+      resultante: row.vendidoPendiente,
+      origen: "camion",
+      orderNumber: entry.orderNumber,
+    });
+
+    entry.estado = "listo-seur";
+    entry.recibidoFabrica = true;
+    entry.fechaRecibido = new Date().toISOString();
+    entry.cargaId = carga.id;
+
+    await this.state.storage.put("stock", stock);
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, entry, carga });
+  }
+
+  // El albarán decía que venía, pero al descargar el camión falta ese
+  // colchón (Jennifer, 2026-09-08): deshace "Preparar para SEUR" — vuelve a
+  // "pendiente" en Luso/New (se le suma de nuevo a "vendido pendiente", sin
+  // tocar la cantidad real, que nunca se llegó a tocar) y sale de la carga.
+  // Si ya se había dado de alta este envío en la plataforma de Seur con la
+  // referencia anterior, la próxima vez que salga de verdad no puede repetir
+  // la misma referencia (choca en Seur) — se avanza a la siguiente (ver
+  // nextRefSuffix).
+  async undoSeurBackorder(id) {
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
+    if (entry.estado !== "listo-seur") {
+      return Response.json({ ok: false, error: "Este pendiente no está preparado para SEUR." }, { status: 409 });
+    }
+
+    const stock = await this.load("stock", {});
+    const key = stockKey(entry.stockModel, entry.talla);
+    const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
+    const antes = row.vendidoPendiente || 0;
+    row.vendidoPendiente = antes + entry.cantidad;
+    stock[key] = row;
+    await this.logMovement({
+      stockModel: entry.stockModel,
+      talla: entry.talla,
+      campo: "vendidoPendiente",
+      delta: entry.cantidad,
+      resultante: row.vendidoPendiente,
+      origen: "camion",
+      orderNumber: entry.orderNumber,
+    });
+
+    entry.estado = "pendiente";
+    entry.cargaId = null;
+    entry.recibidoFabrica = false;
+    entry.fechaRecibido = null;
+    entry.refSuffix = nextRefSuffix(entry.refSuffix);
+
+    await this.state.storage.put("stock", stock);
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, entry });
+  }
+
+  // Pide a OrdersStore (el dueño de las cargas) la carga de SEUR abierta
+  // para esa fecha exacta, creándola si no existe todavía — puede haber
+  // varias cargas de SEUR abiertas a la vez (hoy y mañana), a diferencia de
+  // Furniture que solo tiene una.
+  async getOrCreateSeurCarga(fecha) {
+    if (fecha !== "hoy" && fecha !== "manana") return null;
+    const id = this.env.ORDERS_STORE.idFromName("shopify");
+    const stub = this.env.ORDERS_STORE.get(id);
+    const res = await stub.fetch("https://do/cargas/seur/get-or-create", {
+      method: "POST",
+      body: JSON.stringify({ fecha }),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  }
+
   // Corrección manual de la referencia de Polival (Jennifer, 2026-08-25):
   // siempre editable, por si la letra de color o el tipo automático no
   // encajan para un caso concreto.
@@ -1360,7 +1517,7 @@ export class InventoryStore {
     return Response.json(entry);
   }
 
-  async processSale({ orderId, orderNumber, items, force, orderDate, services, paymentStatus }) {
+  async processSale({ orderId, orderNumber, items, force, orderDate, services, paymentStatus, seurSplitDecision }) {
     // Mientras el catálogo/stock no esté configurado del todo, Jennifer
     // pidió no tocar los pedidos que van entrando (ni agencia ni stock).
     // Cuando esté todo listo, un POST a /admin/resume lo reactiva y los
@@ -1412,14 +1569,15 @@ export class InventoryStore {
     let agencia;
     let pendingManufacture = null;
 
+    let colchonesSueltos = [];
     if (flat.length === 0) {
       agencia = "FURNITURE";
       needsReview = true;
     } else if (hasTapiceria) {
       agencia = "FURNITURE";
     } else {
-      const colchones = flat.filter((c) => c.tipo === "colchon");
-      agencia = colchones.some((c) => c.product.exceptionFurniture) ? "FURNITURE" : "SEUR";
+      colchonesSueltos = flat.filter((c) => c.tipo === "colchon");
+      agencia = colchonesSueltos.some((c) => c.product.exceptionFurniture) ? "FURNITURE" : "SEUR";
     }
 
     // Caso sin regla fija posible (Jennifer, 2026-08-25): un colchón suelto
@@ -1430,6 +1588,38 @@ export class InventoryStore {
       needsReview = true;
       reviewReasons.push("Hay un colchón suelto (no es parte del pack) en un pedido que también lleva tapicería. Decide si debe ir en el mismo envío que la tapicería o aparte.");
     }
+
+    // Pedido de 2+ colchones sueltos por SEUR donde unos hay en stock y otros
+    // no (Jennifer, 2026-09-08): "cada pedido es un mundo" — en vez de
+    // decidir sola, se para sin tocar stock/pendientes y se le pregunta si
+    // quiere dividir el envío ya o esperar a tenerlo completo. No aplica con
+    // un solo colchón (ahí no hay nada que dividir) ni cuando ya ha
+    // decidido dividir (seurSplitDecision, ver /orders/seur-dividir).
+    if (agencia === "SEUR" && colchonesSueltos.length >= 2 && !seurSplitDecision) {
+      const { mixto, detalle } = checkColchonesCoverage(stock, colchonesSueltos);
+      if (mixto) {
+        return Response.json({
+          agencia: null, pendingManufacture: null, needsReview: false, reviewReasons: [],
+          seurMixedPending: true, seurMixedInfo: { colchones: detalle },
+        });
+      }
+    }
+
+    // Colchones sueltos de un pedido SEUR (Jennifer, 2026-09-08): si ya se
+    // decidió dividir, la parte que se queda pendiente en Luso/New necesita
+    // una referencia distinta ("2" al final) para no chocar con la del
+    // envío que ya sale ahora con lo que sí había en stock — pero solo si
+    // de verdad hay una parte que sale ya (si al final no queda nada en
+    // stock, no hay división real, todo va con la referencia normal).
+    let seurRefSuffix = "";
+    if (agencia === "SEUR" && seurSplitDecision && colchonesSueltos.length >= 2) {
+      const { detalle } = checkColchonesCoverage(stock, colchonesSueltos);
+      if (detalle.some((d) => d.disponible > 0) && detalle.some((d) => d.disponible < d.cantidad)) {
+        seurRefSuffix = "2";
+      }
+    }
+
+    let seurColchonCubierto = 0;
 
     for (const item of flat) {
       const isStockTracked = STOCK_TYPES.has(item.tipo);
@@ -1500,7 +1690,9 @@ export class InventoryStore {
       }
 
       if (!proveedor) needsReview = true;
-      const { falta, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, agencia === "FURNITURE");
+      const refSuffix = agencia === "SEUR" && item.tipo === "colchon" ? seurRefSuffix : "";
+      const { falta, covered, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, agencia === "FURNITURE", refSuffix);
+      if (agencia === "SEUR" && item.tipo === "colchon") seurColchonCubierto += covered;
       if (reviewNotes.length) {
         needsReview = true;
         reviewReasons.push(...reviewNotes);
@@ -1515,6 +1707,12 @@ export class InventoryStore {
     await this.state.storage.put("stock", stock);
     await this.state.storage.put("backorders", backorders);
 
-    return Response.json({ agencia, pendingManufacture, needsReview, reviewReasons });
+    // Listo para SEUR ahora mismo (Jennifer, 2026-09-08): hay algo de este
+    // pedido que ya tenía stock real y puede prepararse para la próxima
+    // carga — se decide aquí porque solo InventoryStore sabe si de verdad se
+    // ha descontado stock (OrdersStore es quien asigna la carga en sí).
+    const seurReady = agencia === "SEUR" && seurColchonCubierto > 0;
+
+    return Response.json({ agencia, pendingManufacture, needsReview, reviewReasons, seurReady });
   }
 }

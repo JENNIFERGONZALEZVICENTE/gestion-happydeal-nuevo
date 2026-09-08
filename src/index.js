@@ -693,6 +693,9 @@ function renderPage() {
   .carga-abierta-box .toolbar { padding: 1rem 1rem 0.25rem; }
   .carga-abierta-box .table-wrap { max-height: 320px; }
   #furniture-pendientes-toolbar { padding-top: 1.5rem; }
+  .seur-decision-card { margin: 0 1rem 0.75rem; padding: 0.75rem 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .seur-decision-card ul { margin: 0.4rem 0; padding-left: 1.2rem; font-size: 13px; color: var(--muted); }
+  .seur-decision-card button { margin-top: 0.4rem; }
   .carga-historial-card { margin: 0 2rem 1.25rem; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .carga-historial-card summary { padding: 0.75rem 1rem; cursor: pointer; font-weight: 600; color: var(--brand-dark); background: var(--panel); list-style: none; }
   .carga-historial-card summary::-webkit-details-marker { display: none; }
@@ -753,6 +756,7 @@ function renderPage() {
     <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas">Historial de cargas</a></li>
     <li class="sublista-header">SEUR</li>
     <li><a href="#" class="nav-link sublink" data-logistica="seur">Pedidos pendientes</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas-seur">Historial de cargas</a></li>
   </ul>
 </nav>
 <div class="main">
@@ -933,6 +937,34 @@ function renderPage() {
   <div id="historial-cargas-list"></div>
 </div>
 
+<div id="view-seur" style="display:none">
+  <div id="seur-decision-box" class="carga-abierta-box" style="display:none">
+    <div class="toolbar">
+      <h3 style="margin:0">Pedidos con disponibilidad mixta — pendientes de decidir</h3>
+    </div>
+    <p style="margin:0 1rem 0.75rem;color:var(--muted);font-size:13px">Tienen 2 o más colchones sueltos y solo hay stock real de alguno. Si no decides nada, se quedan esperando a que haya stock de todos.</p>
+    <div id="seur-decision-list"></div>
+  </div>
+
+  <div id="seur-cargas-list"></div>
+</div>
+
+<div id="view-historial-cargas-seur" style="display:none">
+  <div id="historial-cargas-seur-count" class="inventario-count"></div>
+  <div id="historial-cargas-seur-list"></div>
+</div>
+
+<div class="modal-overlay" id="seur-fecha-modal-overlay">
+  <div class="modal-box">
+    <h3>¿Carga de hoy o de mañana?</h3>
+    <p id="seur-fecha-modal-texto" style="color:var(--muted);font-size:13px"></p>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="seur-fecha-modal-cancel">Cancelar</button>
+      <button type="button" class="secondary" id="seur-fecha-hoy-btn">Carga de hoy</button>
+      <button type="button" id="seur-fecha-manana-btn">Carga de mañana</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal-overlay" id="review-modal-overlay">
   <div class="modal-box">
@@ -1011,6 +1043,9 @@ function cancelButton(order) {
 }
 
 function agenciaBadge(order) {
+  if (order.seurMixedPending) {
+    return '<span class="badge agencia-pendiente" title="Tiene 2+ colchones sueltos, solo hay stock de alguno — decide en Logística · SEUR">Elegir SEUR</span>';
+  }
   if (!order.agencia) return "";
   const cls = order.agencia === "FURNITURE" ? "agencia-furniture" : "agencia-seur";
   let html = \`<span class="badge \${cls}">\${order.agencia}</span>\`;
@@ -1242,7 +1277,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas"];
+const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-seur", "view-historial-cargas-seur"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -1284,20 +1319,16 @@ function selectProveedores(id) {
   loadPendientes();
 }
 
-const LOGISTICA_LABELS = { furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", seur: "SEUR · Pedidos pendientes" };
+const LOGISTICA_LABELS = { furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas" };
 function selectLogistica(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.logistica === id));
   document.getElementById("view-title").textContent = "Logística · " + LOGISTICA_LABELS[id];
   hideAllViews();
-  if (id === "seur") {
-    const ph = document.getElementById("view-placeholder");
-    ph.style.display = "block";
-    ph.textContent = "SEUR todavía no está conectado. Lo añadiremos próximamente.";
-    return;
-  }
   document.getElementById("view-" + id).style.display = "block";
   if (id === "furniture") loadFurniture();
   if (id === "historial-cargas") loadHistorialCargas();
+  if (id === "seur") loadSeur();
+  if (id === "historial-cargas-seur") loadHistorialCargasSeur();
 }
 
 document.querySelectorAll(".nav-link").forEach(a => {
@@ -1644,10 +1675,18 @@ function renderPendientes() {
     const refPolivalCell = showRefPolivalCol
       ? \`<td><input type="text" class="referencia-input" data-id="\${b.id}" value="\${escapeAttr(b.referencia || "")}" placeholder="ref."></td>\`
       : "";
+    // Colchón suelto (sin pack) con proveedor Luso/New = pista de SEUR: al
+    // llegar el camión no basta con marcarlo informativo (como hace
+    // Furniture) — hay que descontar stock de verdad y meterlo en una carga
+    // de SEUR con fecha (Jennifer, 2026-09-08). Ver resolveSeurBackorder.
+    const esColchonSeur = b.tipo === "colchon" && !b.esPack;
+    const resolverCell = esColchonSeur
+      ? \`<button type="button" class="resolver-seur-btn" data-id="\${b.id}">Preparar para SEUR</button>\`
+      : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\`;
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado ? "fila-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${checkCell}
-      <td>BEZEN\${b.orderNumber}</td>
+      <td>BEZEN\${b.orderNumber}\${b.refSuffix || ""}</td>
       <td>\${b.stockModel}\${pedidoTag}</td>
       <td>\${b.color || "—"}</td>
       <td>\${b.talla}</td>
@@ -1657,7 +1696,7 @@ function renderPendientes() {
       <td>\${new Date(b.fecha).toLocaleDateString("es-ES")}</td>
       \${showFurFpkCol ? \`<td>\${referenciaCell}</td>\` : ""}
       \${fechaCell}
-      <td><button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button></td>
+      <td>\${resolverCell}</td>
     </tr>
   \`;
   }).join("");
@@ -1679,6 +1718,9 @@ function renderPendientes() {
   });
   tbody.querySelectorAll(".resolver-btn").forEach(btn => {
     btn.addEventListener("click", () => resolverPendiente(btn.dataset.id));
+  });
+  tbody.querySelectorAll(".resolver-seur-btn").forEach(btn => {
+    btn.addEventListener("click", () => abrirModalFechaSeur(btn.dataset.id));
   });
   tbody.querySelectorAll(".tipo-envio-select").forEach(sel => {
     sel.addEventListener("change", () => updateBackorderPlan(sel.dataset.id, { tipoEnvio: sel.value }));
@@ -1778,7 +1820,7 @@ async function updateBackorderPlan(id, patch) {
   loadPendientes();
 }
 
-const HISTORIAL_ORIGEN_LABELS = { manual: "Manual", venta: "Venta", envio: "Envío" };
+const HISTORIAL_ORIGEN_LABELS = { manual: "Manual", venta: "Venta", envio: "Envío", camion: "Camión (proveedor)" };
 const HISTORIAL_CAMPO_LABELS = { cantidad: "Stock real", vendidoPendiente: "Vendido pendiente", pedidoProveedor: "Pedido a proveedor" };
 
 let historialMovimientos = [];
@@ -2117,6 +2159,223 @@ function renderHistorialCargas(cargas) {
     });
   });
 }
+
+// ---- Logística > SEUR ----
+// A diferencia de Furniture (selección manual), aquí el sistema mete el
+// pedido solo en cuanto detecta stock real (ver processInventory en
+// orders-store.js) — esta pantalla es solo para ver las cargas ya formadas,
+// cerrarlas, y resolver los pocos casos que sí necesitan una decisión
+// manual (pedidos de 2+ colchones con disponibilidad mixta).
+function formatSeurCargaTitulo(carga) {
+  const fecha = new Date(carga.fecha + "T00:00:00");
+  return "Carga " + carga.dia + " · " + fecha.toLocaleDateString("es-ES");
+}
+
+function seurOrderRowCells(o, refSuffix) {
+  return \`
+    <td>BEZEN\${o.orderNumber}\${refSuffix || ""}</td>
+    <td>\${o.name}</td>
+    <td>\${o.furnitureAddress || o.address || ""}</td>
+    <td>\${o.phone}</td>
+    <td>\${o.product}</td>
+  \`;
+}
+
+async function loadSeur() {
+  const [cargasRes, backRes] = await Promise.all([
+    fetch("/api/cargas"),
+    fetch("/api/inventario/pendientes"),
+  ]);
+  allCargas = await cargasRes.json();
+  backorders = await backRes.json();
+  renderSeur();
+}
+
+function renderSeurDecisionBox() {
+  const pendientes = allOrders.filter(o => o.seurMixedPending);
+  const box = document.getElementById("seur-decision-box");
+  box.style.display = pendientes.length ? "block" : "none";
+  document.getElementById("seur-decision-list").innerHTML = pendientes.map(o => {
+    const detalle = (o.seurMixedInfo?.colchones || []).map(c =>
+      \`<li>\${c.stockModel} (\${c.talla}): \${c.disponible} de \${c.cantidad} en stock</li>\`
+    ).join("");
+    return \`
+      <div class="seur-decision-card">
+        <strong>BEZEN\${o.orderNumber}</strong> — \${o.name}
+        <ul>\${detalle}</ul>
+        <button type="button" class="seur-dividir-btn" data-id="\${o.id}">Dividir ahora (sale ya lo que hay en stock)</button>
+      </div>
+    \`;
+  }).join("");
+  document.querySelectorAll(".seur-dividir-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const order = allOrders.find(o => String(o.id) === btn.dataset.id);
+      if (!order) return;
+      if (!confirm('¿Dividir BEZEN' + order.orderNumber + '? Lo que hay en stock sale ya por SEUR; el resto se queda pendiente en Luso/New con referencia "2".')) return;
+      const res = await fetch("/api/pedidos/shopify/seur-dividir", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: order.id }),
+      });
+      const updated = await res.json();
+      Object.assign(order, updated);
+      loadSeur();
+      if (document.getElementById("view-shopify").style.display !== "none") render(currentFiltered());
+    });
+  });
+}
+
+function renderSeurCargas() {
+  const cargasAbiertas = allCargas.filter(c => c.tipo === "seur" && c.estado === "abierta").sort((a, b) => a.fecha.localeCompare(b.fecha));
+  const cont = document.getElementById("seur-cargas-list");
+  if (!cargasAbiertas.length) {
+    cont.innerHTML = '<p style="margin:1rem 2rem;color:var(--muted)">No hay ninguna carga de SEUR abierta todavía.</p>';
+    return;
+  }
+  cont.innerHTML = cargasAbiertas.map(carga => {
+    const filas = seurEnviosDeCarga(carga.id);
+    const filasHtml = filas.map(({ o, refSuffix, backorderId }) => \`
+      <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
+        \${seurOrderRowCells(o, refSuffix)}
+        <td>\${backorderId ? \`<button type="button" class="quitar-seur-btn" data-id="\${backorderId}">El colchón no vino: quitar</button>\` : ""}</td>
+      </tr>
+    \`).join("");
+    return \`
+      <div class="carga-abierta-box">
+        <div class="toolbar">
+          <h3 style="margin:0">\${formatSeurCargaTitulo(carga)}</h3>
+          <button type="button" class="cerrar-carga-seur-btn" data-id="\${carga.id}">Cerrar carga</button>
+        </div>
+        <div class="inventario-count">\${filas.length} pedidos en esta carga</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th><th></th></tr></thead>
+            <tbody>\${filasHtml}</tbody>
+          </table>
+        </div>
+      </div>
+    \`;
+  }).join("");
+  document.querySelectorAll(".cerrar-carga-seur-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const carga = allCargas.find(c => c.id === btn.dataset.id);
+      if (!carga) return;
+      if (!confirm("¿Cerrar " + formatSeurCargaTitulo(carga) + "? Pasará al historial.")) return;
+      await fetch("/api/cargas/close", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cargaId: carga.id }),
+      });
+      loadSeur();
+    });
+  });
+  document.querySelectorAll(".quitar-seur-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("¿El colchón no vino en el camión? Se saca de esta carga y vuelve a pendiente en Luso/New, con referencia nueva para cuando salga de verdad.")) return;
+      const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(btn.dataset.id) + "/deshacer-seur", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data.ok === false) {
+        alert(data.error || "No se pudo deshacer.");
+        return;
+      }
+      loadSeur();
+    });
+  });
+}
+
+// Une los dos orígenes de envío de una carga de SEUR: pedidos que se
+// asignaron solos al procesarse (order.cargaId) y colchones que se quedaron
+// pendientes en Luso/New y se asignaron al marcarlos "listo para SEUR"
+// (backorder.cargaId) — un pedido dividido puede aparecer en ambos, con
+// referencias distintas (ver refSuffix).
+function seurEnviosDeCarga(cargaId) {
+  const directos = allOrders.filter(o => o.agencia === "SEUR" && o.cargaId === cargaId)
+    .map(o => ({ o, refSuffix: "", backorderId: null }));
+  const divididos = backorders.filter(b => b.tipo === "colchon" && b.cargaId === cargaId)
+    .map(b => {
+      const o = allOrders.find(x => x.orderNumber === b.orderNumber);
+      return o ? { o, refSuffix: b.refSuffix || "", backorderId: b.id } : null;
+    }).filter(Boolean);
+  return [...directos, ...divididos];
+}
+
+function renderSeur() {
+  renderSeurDecisionBox();
+  renderSeurCargas();
+}
+
+async function loadHistorialCargasSeur() {
+  const [backRes, cargasRes] = await Promise.all([
+    fetch("/api/inventario/pendientes"),
+    fetch("/api/cargas"),
+  ]);
+  backorders = await backRes.json();
+  const cargas = (await cargasRes.json()).filter(c => c.tipo === "seur" && c.estado === "cerrada");
+  cargas.sort((a, b) => new Date(b.fechaCierre) - new Date(a.fechaCierre));
+  renderHistorialCargasSeur(cargas);
+}
+
+function renderHistorialCargasSeur(cargas) {
+  document.getElementById("historial-cargas-seur-count").textContent = cargas.length + " cargas cerradas";
+  const cont = document.getElementById("historial-cargas-seur-list");
+  if (!cargas.length) {
+    cont.innerHTML = '<p style="margin:0 2rem;color:var(--muted)">Todavía no se ha cerrado ninguna carga de SEUR.</p>';
+    return;
+  }
+  cont.innerHTML = cargas.map(c => {
+    const filas = seurEnviosDeCarga(c.id);
+    const filasHtml = filas.map(({ o, refSuffix }) => \`<tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>\${seurOrderRowCells(o, refSuffix)}</tr>\`).join("");
+    return \`
+    <details class="carga-historial-card">
+      <summary>\${formatSeurCargaTitulo(c)} — \${filas.length} pedidos — cerrada el \${new Date(c.fechaCierre).toLocaleDateString("es-ES")}</summary>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th></tr></thead>
+          <tbody>\${filasHtml}</tbody>
+        </table>
+      </div>
+    </details>
+    \`;
+  }).join("");
+}
+
+// Modal "¿Carga de hoy o de mañana?" al marcar un pendiente de colchón
+// (Luso/New, sin pack) como "listo para SEUR" — ver resolveSeurBackorder en
+// inventory-store.js.
+let seurFechaModalBackorderId = null;
+function abrirModalFechaSeur(id) {
+  const b = backorders.find(x => x.id === id);
+  if (!b) return;
+  seurFechaModalBackorderId = id;
+  document.getElementById("seur-fecha-modal-texto").textContent = "BEZEN" + b.orderNumber + " — " + b.cantidad + "x " + b.stockModel + " (" + b.talla + ")";
+  document.getElementById("seur-fecha-modal-overlay").classList.add("open");
+}
+function cerrarModalFechaSeur() {
+  document.getElementById("seur-fecha-modal-overlay").classList.remove("open");
+  seurFechaModalBackorderId = null;
+}
+document.getElementById("seur-fecha-modal-cancel").addEventListener("click", cerrarModalFechaSeur);
+document.getElementById("seur-fecha-modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "seur-fecha-modal-overlay") cerrarModalFechaSeur();
+});
+async function confirmarFechaSeur(fecha) {
+  if (!seurFechaModalBackorderId) return;
+  const id = seurFechaModalBackorderId;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver-seur", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ fecha }),
+  });
+  const data = await res.json();
+  cerrarModalFechaSeur();
+  if (!res.ok || data.ok === false) {
+    alert(data.error || "No se pudo preparar para SEUR.");
+    return;
+  }
+  loadPendientes();
+}
+document.getElementById("seur-fecha-hoy-btn").addEventListener("click", () => confirmarFechaSeur("hoy"));
+document.getElementById("seur-fecha-manana-btn").addEventListener("click", () => confirmarFechaSeur("manana"));
 
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -2500,6 +2759,16 @@ async function handleFetch(request, env) {
       return proxyInventory(env, `/backorders/${resolvePendingMatch[1]}/resolver`, request);
     }
 
+    const resolveSeurPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/resolver-seur$/);
+    if (resolveSeurPendingMatch && request.method === "POST") {
+      return proxyInventory(env, `/backorders/${resolveSeurPendingMatch[1]}/resolver-seur`, request);
+    }
+
+    const undoSeurPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/deshacer-seur$/);
+    if (undoSeurPendingMatch && request.method === "POST") {
+      return proxyInventory(env, `/backorders/${undoSeurPendingMatch[1]}/deshacer-seur`, request);
+    }
+
     const planPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/plan$/);
     if (planPendingMatch && request.method === "POST") {
       return proxyInventory(env, `/backorders/${planPendingMatch[1]}/plan`, request);
@@ -2556,6 +2825,13 @@ async function handleFetch(request, env) {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/orders/force-process", { method: "POST", body });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/pedidos/shopify/seur-dividir" && request.method === "POST") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/orders/seur-dividir", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
