@@ -89,9 +89,15 @@ function mapOrder(order) {
     name: customerName,
     address: addressStr,
     furnitureAddress,
+    // Dirección completa sin mezclar CP/población (Jennifer, 2026-09-08,
+    // fichero de SEUR): a veces Shopify trae la calle en address1 y el
+    // piso/puerta en address2 por separado — hay que juntar los dos, no
+    // coger solo el primero.
+    streetAddress: [address.address1, address.address2].filter(Boolean).join(", "),
     postalCode: address.zip || "",
     city: address.city || "",
     province: (address.province || "").replace(/\s*Province$/i, "").trim(),
+    countryCode: (address.country_code || "").toUpperCase(),
     email: order.email || order.customer?.email || "",
     phone: order.phone || address.phone || order.customer?.phone || "",
     product: uniqueProducts.join(", "),
@@ -734,6 +740,7 @@ function renderPage() {
     <li><a href="#" class="nav-link" data-inventario="catalogo">Catálogo</a></li>
     <li><a href="#" class="nav-link" data-inventario="stock">Stock</a></li>
     <li><a href="#" class="nav-link" data-inventario="historial">Historial de stock</a></li>
+    <li><a href="#" class="nav-link" data-inventario="pesos">Pesos SEUR</a></li>
   </ul>
   <button class="section-title" id="proveedores-toggle">
     <span>Proveedores</span>
@@ -875,6 +882,19 @@ function renderPage() {
   <div class="table-wrap">
     <table id="historial-table">
       <thead><tr><th>Fecha</th><th>Modelo</th><th>Talla</th><th>Campo</th><th>Cambio</th><th>Resultado</th><th>Origen</th><th>Detalle</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-pesos" style="display:none">
+  <div class="toolbar">
+    <input id="pesos-search" type="text" placeholder="Buscar SKU (ej. COLZNIR150X190)..." />
+  </div>
+  <div id="pesos-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="pesos-table">
+      <thead><tr><th>SKU</th><th>Peso (kg)</th><th>Origen</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -1277,7 +1297,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-seur", "view-historial-cargas-seur"];
+const ALL_VIEWS = ["view-shopify", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-seur", "view-historial-cargas-seur", "view-pesos"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -1297,7 +1317,7 @@ function selectPlatform(id) {
   }
 }
 
-const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", historial: "Historial de stock" };
+const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", historial: "Historial de stock", pesos: "Pesos SEUR" };
 function selectInventario(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.inventario === id));
   document.getElementById("view-title").textContent = "Inventario · " + INVENTARIO_LABELS[id];
@@ -1306,6 +1326,7 @@ function selectInventario(id) {
   if (id === "catalogo") loadCatalogo();
   if (id === "stock") loadStock();
   if (id === "historial") loadHistorial();
+  if (id === "pesos") loadPesos();
 }
 
 const PROVEEDORES_LABELS = { polival: "Polival", luso: "Luso", new: "New", decision: "Pendiente de decisión", revisar: "Sin proveedor asignado" };
@@ -1851,6 +1872,39 @@ function renderHistorial() {
   document.getElementById("historial-count").textContent = historialMovimientos.length + " movimientos (los últimos 1000)";
 }
 
+// ---- Inventario > Pesos SEUR ----
+let pesosSeur = [];
+async function loadPesos() {
+  const res = await fetch("/api/inventario/pesos");
+  pesosSeur = await res.json();
+  renderPesos();
+}
+function renderPesos() {
+  const q = document.getElementById("pesos-search").value.trim().toUpperCase();
+  const filtrados = q ? pesosSeur.filter(p => p.sku.includes(q)) : pesosSeur.slice(0, 100);
+  document.getElementById("pesos-count").textContent = q
+    ? filtrados.length + " resultados"
+    : pesosSeur.length + " SKU en total (escribe para buscar; se muestran los primeros 100)";
+  document.querySelector("#pesos-table tbody").innerHTML = filtrados.map(p => \`
+    <tr>
+      <td>\${p.sku}</td>
+      <td><input type="number" step="0.1" min="0" class="peso-input" data-sku="\${escapeAttr(p.sku)}" value="\${p.peso != null ? p.peso : ""}"></td>
+      <td>\${p.esManual ? "Manual" : "Por defecto (histórico)"}</td>
+    </tr>
+  \`).join("");
+  document.querySelectorAll(".peso-input").forEach(inp => {
+    inp.addEventListener("change", async () => {
+      await fetch("/api/inventario/pesos", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sku: inp.dataset.sku, peso: inp.value }),
+      });
+      loadPesos();
+    });
+  });
+}
+document.getElementById("pesos-search").addEventListener("input", renderPesos);
+
 // ---- Logística > Furniture ----
 // Todo pedido con agencia FURNITURE (calculado ya en Pedidos/Proveedores)
 // tiene que aparecer aquí, esté o no también esperando fabricarse en
@@ -2244,6 +2298,7 @@ function renderSeurCargas() {
       <div class="carga-abierta-box">
         <div class="toolbar">
           <h3 style="margin:0">\${formatSeurCargaTitulo(carga)}</h3>
+          <button type="button" class="secondary descargar-seur-btn" data-id="\${carga.id}">Descargar fichero SEUR</button>
           <button type="button" class="cerrar-carga-seur-btn" data-id="\${carga.id}">Cerrar carga</button>
         </div>
         <div class="inventario-count">\${filas.length} pedidos en esta carga</div>
@@ -2281,6 +2336,22 @@ function renderSeurCargas() {
       loadSeur();
     });
   });
+  document.querySelectorAll(".descargar-seur-btn").forEach(btn => {
+    btn.addEventListener("click", () => descargarFicheroSeur(btn.dataset.id));
+  });
+}
+
+// Antes de descargar avisa si algún artículo no tiene un peso conocido
+// (tabla de Pesos SEUR) — el fichero se genera igualmente con esa casilla
+// en blanco, pero mejor saberlo antes de subirlo a Seur.
+async function descargarFicheroSeur(cargaId) {
+  const res = await fetch("/api/cargas/seur/export-avisos?cargaId=" + encodeURIComponent(cargaId));
+  const data = await res.json();
+  if (data.avisos && data.avisos.length) {
+    const seguir = confirm(data.avisos.length + " aviso(s):\\n\\n" + data.avisos.join("\\n") + "\\n\\n¿Descargar igualmente?");
+    if (!seguir) return;
+  }
+  window.location.href = "/api/cargas/seur/export?cargaId=" + encodeURIComponent(cargaId);
 }
 
 // Une los dos orígenes de envío de una carga de SEUR: pedidos que se
@@ -2328,6 +2399,9 @@ function renderHistorialCargasSeur(cargas) {
     return \`
     <details class="carga-historial-card">
       <summary>\${formatSeurCargaTitulo(c)} — \${filas.length} pedidos — cerrada el \${new Date(c.fechaCierre).toLocaleDateString("es-ES")}</summary>
+      <div class="toolbar" style="padding:0 1rem 0.5rem">
+        <button type="button" class="secondary descargar-seur-historial-btn" data-id="\${c.id}">Descargar fichero SEUR</button>
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th></tr></thead>
@@ -2337,6 +2411,9 @@ function renderHistorialCargasSeur(cargas) {
     </details>
     \`;
   }).join("");
+  document.querySelectorAll(".descargar-seur-historial-btn").forEach(btn => {
+    btn.addEventListener("click", () => descargarFicheroSeur(btn.dataset.id));
+  });
 }
 
 // Modal "¿Carga de hoy o de mañana?" al marcar un pendiente de colchón
@@ -2671,6 +2748,211 @@ async function buildFurnitureExport(env, cargaId) {
   return { rows, carga };
 }
 
+// === Fichero de envíos a SEUR (Jennifer, 2026-09-08) ===
+// Dictado columna por columna contra dos ficheros reales que subió
+// (63235.xlsx nacional, 48297.xlsx internacional): A REF · B NOMBRE ·
+// C DIRECCION · D CP · E POBLACION · F/G TLF (duplicado) · H BULTOS ·
+// I KILOS · J CODREMITENTE (sin cabecera visible pero con dato) · K PAIS ·
+// L OBSERVACIONES · M/N/O sin usar · P EMAIL · Q SERVICIO · R PRODUCTO.
+const SEUR_CSV_HEADERS = [
+  "REF", "NOMBRE", "DIRECCION", "CP", "POBLACION", "TLF CONTACTO", "",
+  "BULTOS", "KILOS", "", "PAIS", "OBSERVACIONES", "", "", "", "EMAIL", "SERVICIO", "PRODUCTO",
+];
+
+// Modelos de almohada con casuística propia de bultos (Jennifer,
+// 2026-09-08): Sea Foam nunca comparte bulto con otra unidad aunque el peso
+// lo permita; el resto (incluidas Nordic/Zen Relax) sigue la regla general
+// de kilos.
+const ALMOHADA_NUNCA_COMBINA_KEYWORDS_EXPORT = ["sea foam", "seafoam"];
+
+function limpiarTelefonoSeur(phone) {
+  return (phone || "").replace(/^\+34\s*/, "").trim();
+}
+
+// 15 caracteres máximo admite Seur en la referencia (Jennifer, 2026-09-08):
+// si no cabe, se recorta por delante, quedándose con los dígitos finales.
+function truncarReferenciaSeur(ref) {
+  return ref.length > 15 ? ref.slice(ref.length - 15) : ref;
+}
+
+function referenciaSeur(orderNumber, refSuffix) {
+  return truncarReferenciaSeur(`BEZEN${orderNumber}${refSuffix || ""}`);
+}
+
+// Reparte las unidades de un pedido en líneas del fichero según las reglas
+// de bultos (Jennifer, 2026-09-08): internacional siempre 1 bulto por
+// línea; nacional puede combinar varias unidades en una misma línea
+// mientras no se pasen los 40kg — salvo Sea Foam, que nunca comparte bulto.
+// Cada línea resultante lleva sus propias "piezas" (para construir
+// Observaciones) y su peso/bultos ya sumados.
+function agruparLineasSeur(piezas, esNacional) {
+  if (!esNacional) {
+    return piezas.map((p) => ({ piezas: [p], bultos: 1, kilos: p.pesoUnidad }));
+  }
+  const lineas = [];
+  for (const p of piezas) {
+    const nuncaCombina = p.tipo === "almohada" && matchesKeywordSeur(p.title, ALMOHADA_NUNCA_COMBINA_KEYWORDS_EXPORT);
+    const ultima = lineas[lineas.length - 1];
+    if (!nuncaCombina && ultima && Math.round((ultima.kilos + p.pesoUnidad) * 100) / 100 <= 40) {
+      ultima.piezas.push(p);
+      ultima.bultos += 1;
+      ultima.kilos = Math.round((ultima.kilos + p.pesoUnidad) * 100) / 100;
+    } else {
+      lineas.push({ piezas: [p], bultos: 1, kilos: p.pesoUnidad });
+    }
+  }
+  return lineas;
+}
+
+function matchesKeywordSeur(title, keywords) {
+  const t = (title || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  return keywords.some((k) => t.includes(k));
+}
+
+// "COLZNIR150X190 (2UD)" si son 2+ piezas del mismo SKU en la línea; varios
+// SKU distintos en la misma línea (nacional combinado) van con "+" entre
+// medias (Jennifer, 2026-09-08).
+function observacionesSeur(linea) {
+  const porSku = new Map();
+  for (const p of linea.piezas) {
+    if (!porSku.has(p.sku)) porSku.set(p.sku, 0);
+    porSku.set(p.sku, porSku.get(p.sku) + 1);
+  }
+  return [...porSku.entries()].map(([sku, n]) => (n > 1 ? `${sku} (${n}UD)` : sku)).join(" + ");
+}
+
+async function buildSeurExport(env, cargaId) {
+  const ordersId = env.ORDERS_STORE.idFromName("shopify");
+  const ordersStub = env.ORDERS_STORE.get(ordersId);
+  const invStub = inventoryStub(env);
+  const [orders, cargas, backorders, catalog, pesosList] = await Promise.all([
+    ordersStub.fetch("https://do/orders").then((r) => r.json()),
+    ordersStub.fetch("https://do/cargas").then((r) => r.json()),
+    invStub.fetch("https://do/backorders").then((r) => r.json()),
+    invStub.fetch("https://do/catalog").then((r) => r.json()),
+    invStub.fetch("https://do/pesos").then((r) => r.json()),
+  ]);
+
+  const carga = cargas.find((c) => c.id === cargaId && c.tipo === "seur");
+  if (!carga) return { error: "No se encuentra esa carga de SEUR." };
+
+  const pesos = Object.fromEntries(pesosList.map((p) => [p.sku, p.peso]));
+  // Varios productos del Catálogo pueden compartir el mismo "modelo de
+  // stock" (para agrupar SKU de distintas plataformas) — cualquiera de
+  // ellos vale para leer el SKU/título con el que se calificó NetExpress.
+  const productoPorStockModel = new Map();
+  for (const p of catalog) if (!productoPorStockModel.has(p.stockModel)) productoPorStockModel.set(p.stockModel, p);
+
+  // Un envío de SEUR puede venir de dos sitios (Jennifer, 2026-09-08): el
+  // pedido se asignó solo a la carga al procesarse con stock real
+  // ("cubierto", ligado por orderId a un pedido con agencia SEUR y ese
+  // cargaId), o un colchón se preparó a mano desde Luso/New al llegar el
+  // camión ("listo-seur", ligado directo por su propio cargaId).
+  const ordersById = new Map(orders.map((o) => [o.id, o]));
+  const itemsPorPedido = new Map(); // orderId -> [{sku, title, talla, tipo, pesoUnidad, refSuffix}]
+
+  function agregarItem(orderId, b) {
+    const product = productoPorStockModel.get(b.stockModel);
+    const sku = product ? seurSkuExport(product, b.talla) : `${b.stockModel}${b.talla}`.toUpperCase();
+    const pesoUnidad = pesos[sku] != null ? pesos[sku] : null;
+    if (!itemsPorPedido.has(orderId)) itemsPorPedido.set(orderId, []);
+    const lista = itemsPorPedido.get(orderId);
+    for (let i = 0; i < b.cantidad; i++) {
+      lista.push({ sku, title: product?.title || b.stockModel, talla: b.talla, tipo: b.tipo, pesoUnidad, refSuffix: b.refSuffix || "" });
+    }
+  }
+
+  for (const o of orders) {
+    if (o.agencia !== "SEUR" || o.cargaId !== carga.id) continue;
+    for (const b of backorders) {
+      if (b.orderId === o.id && b.estado === "cubierto") agregarItem(o.id, b);
+    }
+  }
+  for (const b of backorders) {
+    if (b.estado === "listo-seur" && b.cargaId === carga.id) agregarItem(b.orderId, b);
+  }
+
+  const rows = [];
+  const avisos = [];
+  for (const [orderId, piezas] of itemsPorPedido) {
+    const o = ordersById.get(orderId);
+    if (!o) continue;
+    const esNacional = o.countryCode === "ES" || o.countryCode === "PT";
+    const codRemitente = esNacional ? "63235" : "48297";
+    const telefono = limpiarTelefonoSeur(o.phone);
+    const direccion = o.streetAddress || o.address || "";
+
+    // Cada refSuffix ya asignado (por división manual o por deshacer un
+    // "listo-seur") forma su propio grupo — nunca se combinan piezas con
+    // sufijo distinto en la misma línea, son envíos distintos de verdad.
+    const porSufijo = new Map();
+    for (const p of piezas) {
+      if (!porSufijo.has(p.refSuffix)) porSufijo.set(p.refSuffix, []);
+      porSufijo.get(p.refSuffix).push(p);
+    }
+
+    for (const [sufijoBase, piezasGrupo] of porSufijo) {
+      const lineas = agruparLineasSeur(piezasGrupo, esNacional);
+      lineas.forEach((linea, idx) => {
+        // La primera línea de un grupo usa el sufijo ya asignado; si hace
+        // falta dividir en más líneas (varios bultos internacional, o
+        // nacional pasándose de 40kg), las siguientes avanzan el sufijo
+        // para no repetir referencia.
+        let sufijo = sufijoBase;
+        for (let i = 0; i < idx; i++) sufijo = nextRefSuffixExport(sufijo);
+        const ref = referenciaSeur(o.orderNumber, sufijo);
+
+        const netExpress = linea.piezas.some((p) => p.tipo === "colchon" && calificaNetExpressExport(p.title, p.talla));
+        const servicio = !esNacional ? (netExpress ? "19" : "77") : "31";
+        const producto = !esNacional ? (netExpress ? "10" : "70") : "2";
+
+        const sinPeso = linea.piezas.filter((p) => p.pesoUnidad == null);
+        if (sinPeso.length) avisos.push(`BEZEN${o.orderNumber}: sin peso conocido para ${[...new Set(sinPeso.map((p) => p.sku))].join(", ")} — revisa Pesos SEUR.`);
+
+        rows.push([
+          ref, o.name, direccion, o.postalCode || "", o.city || "",
+          telefono, telefono, String(linea.bultos), String(linea.kilos),
+          codRemitente, o.countryCode || "", observacionesSeur(linea),
+          "", "", "", o.email || "", servicio, producto,
+        ]);
+      });
+    }
+  }
+
+  return { rows, carga, avisos };
+}
+
+function seurSkuExport(product, talla) {
+  return `${(product.skuPrefix || "").toUpperCase()}${talla}`;
+}
+function nextRefSuffixExport(current) {
+  const n = parseInt(current, 10);
+  return Number.isFinite(n) ? String(n + 1) : "2";
+}
+const NETEXPRESS_ANCHO_135_KEYWORDS_EXPORT = [
+  "generacion z", "generacion zen", "paris", "zen mandala", "zen nirvana",
+  "zen natural", "natural zen", "supreme zen", "origin zen",
+];
+const NETEXPRESS_ANCHO_180_KEYWORDS_EXPORT = [
+  "pharmatherapy", "pharma-therapy", "bamboo deluxe", "bambu deluxe",
+  "bellagio deluxe", "4d", "fitness", "latex gel", "ergo-relax",
+  "ergo relax", "louvre", "murano", "toscana deluxe",
+];
+function calificaNetExpressExport(title, talla) {
+  const m = /^(\d{2,3})X\d{2,3}$/.exec(talla || "");
+  if (!m) return false;
+  const ancho = Number(m[1]);
+  if (matchesKeywordSeur(title, NETEXPRESS_ANCHO_135_KEYWORDS_EXPORT)) return ancho >= 135;
+  if (matchesKeywordSeur(title, NETEXPRESS_ANCHO_180_KEYWORDS_EXPORT)) return ancho >= 180;
+  return false;
+}
+
+function buildSeurCsv(rows) {
+  const lines = [SEUR_CSV_HEADERS.map(csvEscapeFurniture).join(";")];
+  for (const row of rows) lines.push(row.map(csvEscapeFurniture).join(";"));
+  return "﻿" + lines.join("\r\n");
+}
+
 // Es una app interna con datos que cambian a cada momento (pedidos, stock);
 // dejar que Cloudflare cachee las respuestas en el borde causó una vez que
 // una ruta nueva siguiera devolviendo un 404 viejo en producción. Todas las
@@ -2889,6 +3171,38 @@ async function handleFetch(request, env) {
           "content-disposition": `attachment; filename="${filename}"`,
         },
       });
+    }
+
+    if (url.pathname === "/api/cargas/seur/export" && request.method === "GET") {
+      const cargaId = url.searchParams.get("cargaId") || null;
+      if (!cargaId) return new Response("Falta cargaId", { status: 400 });
+      const result = await buildSeurExport(env, cargaId);
+      if (result.error) return new Response(result.error, { status: 400 });
+      const csv = buildSeurCsv(result.rows);
+      const filename = `SEUR_${result.carga.fecha}.csv`;
+      return new Response(csv, {
+        headers: {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": `attachment; filename="${filename}"`,
+          "x-seur-avisos": String(result.avisos.length),
+        },
+      });
+    }
+
+    if (url.pathname === "/api/cargas/seur/export-avisos" && request.method === "GET") {
+      const cargaId = url.searchParams.get("cargaId") || null;
+      if (!cargaId) return new Response("Falta cargaId", { status: 400 });
+      const result = await buildSeurExport(env, cargaId);
+      if (result.error) return new Response(result.error, { status: 400 });
+      return Response.json({ avisos: result.avisos, filas: result.rows.length });
+    }
+
+    if (url.pathname === "/api/inventario/pesos" && request.method === "GET") {
+      return proxyInventory(env, "/pesos", request);
+    }
+
+    if (url.pathname === "/api/inventario/pesos" && request.method === "POST") {
+      return proxyInventory(env, "/pesos/set", request);
     }
 
     return new Response("not found", { status: 404 });

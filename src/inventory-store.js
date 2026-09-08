@@ -36,6 +36,481 @@ const PROVEEDOR_NEW_KEYWORDS = [
 ];
 const PROVEEDOR_POLIVAL_COLCHON_KEYWORDS = ["latex natura", "siberian zen"];
 
+// Fichero de envíos a SEUR (Jennifer, 2026-09-08): tabla de pesos por SKU
+// (kilos por unidad), generada a partir de 9097 envíos reales de 2026 (peso
+// de la línea del histórico ÷ bultos de esa línea = peso por unidad; se
+// descartaron líneas con varios modelos juntos con "+" y filas con peso 0 o
+// no numérico). El SKU es el mismo formato que ya usa Catálogo/Proveedores
+// (skuPrefix + talla pegados, ej. "COLZNIR150X190"). Jennifer puede corregir
+// cualquiera a mano — ver PESOS_SEUR_OVERRIDES en almacenamiento, que
+// siempre gana sobre este valor por defecto.
+const PESOS_SEUR_DEFAULT = {
+  "1 PATA DE CANMONBLA135X200": 1,
+  "ALMANT135": 2,
+  "ALMANT150": 2,
+  "ALMANT67,5 (2UN)": 2,
+  "ALMANT70": 2,
+  "ALMANT75": 2,
+  "ALMANT80": 1,
+  "ALMANT90": 1,
+  "ALMANTI135": 2,
+  "ALMANTI150": 2,
+  "ALMANTI67,5 (2UN)": 2,
+  "ALMANTI70 (2UN)": 2,
+  "ALMANTI75": 2,
+  "ALMANTI75 (2UN)": 2,
+  "ALMANTI90 (2UN)": 2,
+  "ALMLATEX135": 2,
+  "ALMLATEX90": 2,
+  "ALMNOR105": 1,
+  "ALMNOR135": 2,
+  "ALMNOR150": 2,
+  "ALMNOR67,5": 2,
+  "ALMNOR67,5 (2UN)": 2,
+  "ALMNOR675": 2,
+  "ALMNOR70": 1,
+  "ALMNOR75": 2,
+  "ALMNOR75 (2UN)": 2,
+  "ALMNOR80": 2,
+  "ALMNOR90": 2,
+  "ALMNORD 90": 2,
+  "ALMNORD80": 2,
+  "ALMSEA75": 1,
+  "ALMSEAFOAM 75": 1,
+  "ALMSEAFOAM67,5": 1,
+  "ALMSEAFOAM75": 1,
+  "ALMZENR120": 2,
+  "ALMZENR150": 2,
+  "ALMZENR70": 2,
+  "ALMZENR75": 2,
+  "ALMZENR80": 1,
+  "ALMZENR90": 1,
+  "COLBAMDL105X190": 10,
+  "COLBAMDL135X180": 15,
+  "COLBAMDL135X190": 15,
+  "COLBAMDL135X200": 15,
+  "COLBAMDL140X190": 15,
+  "COLBAMDL140X200": 15,
+  "COLBAMDL150X190": 17,
+  "COLBAMDL150X200": 17,
+  "COLBAMDL160X190": 17,
+  "COLBAMDL160X200": 17,
+  "COLBAMDL180X200": 20,
+  "COLBAMDL80X180": 8,
+  "COLBAMDL80X190": 8,
+  "COLBAMDL80X200": 8,
+  "COLBAMDL90X180": 8,
+  "COLBAMDL90X190": 8,
+  "COLBAMDL90X200": 8,
+  "COLBEL105X180": 10,
+  "COLBEL105X190": 10,
+  "COLBEL120X180": 12,
+  "COLBEL120X190": 12,
+  "COLBEL120X200": 12,
+  "COLBEL135X180": 15,
+  "COLBEL135X190": 15,
+  "COLBEL135X200": 15,
+  "COLBEL140X190": 15,
+  "COLBEL140X200": 15,
+  "COLBEL150X190": 17,
+  "COLBEL150X200": 17,
+  "COLBEL160X200": 17,
+  "COLBEL180X200": 20,
+  "COLBEL80X180": 8,
+  "COLBEL80X190": 8,
+  "COLBEL80X200": 8,
+  "COLBEL90X180": 8,
+  "COLBEL90X190": 8,
+  "COLBEL90X200": 8,
+  "COLBELD135X190": 15,
+  "COLBELD150X190": 17,
+  "COLDELUXE4D105X190": 10,
+  "COLDELUXE4D105X200": 10,
+  "COLDELUXE4D120X180": 12,
+  "COLDELUXE4D135X180": 15,
+  "COLDELUXE4D135X190": 15,
+  "COLDELUXE4D135X200": 15,
+  "COLDELUXE4D140X190": 15,
+  "COLDELUXE4D140X200": 15,
+  "COLDELUXE4D150X190": 17,
+  "COLDELUXE4D150X200": 17,
+  "COLDELUXE4D160X190": 17,
+  "COLDELUXE4D160X200": 17,
+  "COLDELUXE4D180X190": 20,
+  "COLDELUXE4D180X200": 20,
+  "COLDELUXE4D80X180": 8,
+  "COLDELUXE4D80X190": 8,
+  "COLDELUXE4D80X200": 8,
+  "COLDELUXE4D90X180": 8,
+  "COLDELUXE4D90X190": 8,
+  "COLDELUXE4D90X200": 8,
+  "COLFITSPORT105X180": 10,
+  "COLFITSPORT105X190": 10,
+  "COLFITSPORT105X200": 10,
+  "COLFITSPORT135X180": 15,
+  "COLFITSPORT135X190": 15,
+  "COLFITSPORT140X190": 15,
+  "COLFITSPORT140X200": 15,
+  "COLFITSPORT150X190": 17,
+  "COLFITSPORT150X200": 17,
+  "COLFITSPORT160X190": 17,
+  "COLFITSPORT160X200": 17,
+  "COLFITSPORT180X190": 20,
+  "COLFITSPORT180X200": 20,
+  "COLFITSPORT80X180": 8,
+  "COLFITSPORT80X190": 8,
+  "COLFITSPORT80X200": 8,
+  "COLFITSPORT90X180": 4,
+  "COLFITSPORT90X190": 8,
+  "COLFITSPORT90X200": 8,
+  "COLGEZ105X180": 17,
+  "COLGEZ105X190": 17,
+  "COLGEZ105X200": 17,
+  "COLGEZ120X190": 20,
+  "COLGEZ120X200": 20,
+  "COLGEZ135X180": 27,
+  "COLGEZ135X190": 25,
+  "COLGEZ135X200": 27,
+  "COLGEZ140X190": 25,
+  "COLGEZ140X200": 30,
+  "COLGEZ150X180": 30,
+  "COLGEZ150X190": 37,
+  "COLGEZ150X200": 30,
+  "COLGEZ160X200": 35,
+  "COLGEZ180X190": 40,
+  "COLGEZ180X200": 40,
+  "COLGEZ80X180": 15,
+  "COLGEZ80X190": 15,
+  "COLGEZ80X200": 15,
+  "COLGEZ90X180": 15,
+  "COLGEZ90X190": 15,
+  "COLGEZ90X200": 15,
+  "COLGRA120X190": 12,
+  "COLLAT105X190": 10,
+  "COLLAT105X200": 10,
+  "COLLAT120X190": 12,
+  "COLLAT120X200": 12,
+  "COLLAT135X180": 15,
+  "COLLAT135X190": 15,
+  "COLLAT135X200": 15,
+  "COLLAT140X180": 15,
+  "COLLAT140X190": 15,
+  "COLLAT140X200": 15,
+  "COLLAT150X180": 17,
+  "COLLAT150X190": 17,
+  "COLLAT150X200": 17,
+  "COLLAT160X200": 17,
+  "COLLAT180X200": 20,
+  "COLLAT80X180": 8,
+  "COLLAT80X190": 8,
+  "COLLAT80X200": 8,
+  "COLLAT90X180": 8,
+  "COLLAT90X190": 8,
+  "COLLAT90X200": 8,
+  "COLLOU105X180": 8,
+  "COLLOU105X190": 10,
+  "COLLOU105X200": 10,
+  "COLLOU120X180": 12,
+  "COLLOU135X180": 15,
+  "COLLOU135X190": 15,
+  "COLLOU135X200": 15,
+  "COLLOU140X190": 15,
+  "COLLOU140X200": 15,
+  "COLLOU150X190": 17,
+  "COLLOU150X200": 17,
+  "COLLOU160X190": 17,
+  "COLLOU160X200": 17,
+  "COLLOU180X190": 20,
+  "COLLOU180X200": 20,
+  "COLLOU80X200": 8,
+  "COLLOU90X190": 8,
+  "COLLOU90X200": 8,
+  "COLMUR105X180": 10,
+  "COLMUR105X190": 10,
+  "COLMUR120X200": 12,
+  "COLMUR135X190": 15,
+  "COLMUR135X200": 15,
+  "COLMUR140X190": 15,
+  "COLMUR150X190": 17,
+  "COLMUR160X190": 18,
+  "COLMUR160X200": 17,
+  "COLMUR80X190": 8,
+  "COLMUR80X200": 8,
+  "COLMUR90X180": 8,
+  "COLMUR90X190": 8,
+  "COLMUR90X200": 8,
+  "COLMURANO180X200": 20,
+  "COLMURN105X190": 10,
+  "COLMURN135X180": 25,
+  "COLNIR120X200": 22,
+  "COLNIR140X190": 29,
+  "COLNIR150X190": 32,
+  "COLORIGIN105X190": 17,
+  "COLORIGIN135X190": 27,
+  "COLORIGIN140X200": 30,
+  "COLORIGIN150X190": 27,
+  "COLORIGIN150X200": 40,
+  "COLORIGIN180X200": 50,
+  "COLORIGIN80X180": 17,
+  "COLORIGIN90X190": 17,
+  "COLORIGIN90X200": 17,
+  "COLPAR120X190": 20,
+  "COLPAR90X200": 15,
+  "COLPARIS105X180": 17,
+  "COLPARIS105X190": 17,
+  "COLPARIS105X200": 17,
+  "COLPARIS120X180": 20,
+  "COLPARIS120X190": 20,
+  "COLPARIS120X200": 20,
+  "COLPARIS135X180": 25,
+  "COLPARIS135X190": 25,
+  "COLPARIS135X200": 25,
+  "COLPARIS140X180": 27,
+  "COLPARIS140X190": 27,
+  "COLPARIS140X200": 25,
+  "COLPARIS150X180": 35,
+  "COLPARIS150X190": 30,
+  "COLPARIS150X200": 30,
+  "COLPARIS160X190": 35,
+  "COLPARIS160X200": 35,
+  "COLPARIS180X180": 40,
+  "COLPARIS180X190": 40,
+  "COLPARIS180X200": 40,
+  "COLPARIS200X200": 40,
+  "COLPARIS80X190": 15,
+  "COLPARIS80X200": 15,
+  "COLPARIS90X180": 15,
+  "COLPARIS90X190": 15,
+  "COLPARIS90X200": 15,
+  "COLPHARM135X190": 15,
+  "COLSUPREME105X190": 18,
+  "COLSUPREME105X200": 20,
+  "COLSUPREME135X190": 27,
+  "COLSUPREME140X190": 30,
+  "COLSUPREME150X190": 35,
+  "COLSUPREME150X200": 35,
+  "COLSUPREMEZEN160X200": 47,
+  "COLTOSD105X180": 10,
+  "COLTOSD105X190": 10,
+  "COLTOSD105X200": 10,
+  "COLTOSD120X180": 12,
+  "COLTOSD120X190": 12,
+  "COLTOSD120X200": 12,
+  "COLTOSD135X180": 15,
+  "COLTOSD135X190": 15,
+  "COLTOSD135X200": 15,
+  "COLTOSD140X190": 15,
+  "COLTOSD140X200": 15,
+  "COLTOSD150X180": 17,
+  "COLTOSD150X190": 17,
+  "COLTOSD150X200": 17,
+  "COLTOSD160X190": 17,
+  "COLTOSD160X200": 17,
+  "COLTOSD180X190": 20,
+  "COLTOSD180X200": 20,
+  "COLTOSD80X180": 8,
+  "COLTOSD80X190": 8,
+  "COLTOSD80X200": 8,
+  "COLTOSD90X180": 8,
+  "COLTOSD90X190": 8,
+  "COLTOSD90X200": 8,
+  "COLZMAN105X190": 19,
+  "COLZMAN105X200": 17,
+  "COLZMAN120X190": 20,
+  "COLZMAN135X180": 27,
+  "COLZMAN135X190": 27,
+  "COLZMAN135X200": 27,
+  "COLZMAN140X190": 25,
+  "COLZMAN140X200": 29,
+  "COLZMAN150X190": 35,
+  "COLZMAN150X200": 32,
+  "COLZMAN160X190": 40,
+  "COLZMAN160X200": 37,
+  "COLZMAN180X190": 40,
+  "COLZMAN180X200": 40,
+  "COLZMAN200X200": 45,
+  "COLZMAN80X190": 15,
+  "COLZMAN90X180": 15,
+  "COLZMAN90X190": 17,
+  "COLZMAN90X200": 17,
+  "COLZNAT105X180": 20,
+  "COLZNAT105X190": 18,
+  "COLZNAT105X200": 17,
+  "COLZNAT120X190": 22,
+  "COLZNAT120X200": 22,
+  "COLZNAT135X180": 27,
+  "COLZNAT135X190": 27,
+  "COLZNAT135X200": 30,
+  "COLZNAT140X180": 29,
+  "COLZNAT140X190": 29,
+  "COLZNAT140X200": 29,
+  "COLZNAT150X190": 37,
+  "COLZNAT150X200": 32,
+  "COLZNAT160X190": 37,
+  "COLZNAT160X200": 37,
+  "COLZNAT180X190": 50,
+  "COLZNAT180X200": 50,
+  "COLZNAT200X200": 50,
+  "COLZNAT80X190": 17,
+  "COLZNAT90X190": 17,
+  "COLZNAT90X200": 20,
+  "COLZNIR105X180": 18,
+  "COLZNIR105X190": 17,
+  "COLZNIR105X200": 17,
+  "COLZNIR120X180": 25,
+  "COLZNIR120X190": 20,
+  "COLZNIR120X200": 22,
+  "COLZNIR135X180": 27,
+  "COLZNIR135X190": 27,
+  "COLZNIR135X200": 27,
+  "COLZNIR140X190": 30,
+  "COLZNIR140X200": 30,
+  "COLZNIR150X190": 40,
+  "COLZNIR150X200": 32,
+  "COLZNIR160X190": 40,
+  "COLZNIR160X200": 37,
+  "COLZNIR180X190": 50,
+  "COLZNIR180X200": 40,
+  "COLZNIR200X200": 45,
+  "COLZNIR80X190": 17,
+  "COLZNIR80X200": 17,
+  "COLZNIR90X190": 17,
+  "COLZNIR90X200": 17,
+  "COLZSENSEI105X190": 17,
+  "COLZSENSEI120X200": 22,
+  "COLZSENSEI135X190": 27,
+  "COLZSENSEI150X190": 35,
+  "COLZSENSEI150X200": 37,
+  "COLZSENSEI160X190": 40,
+  "COLZSENSEI160X200": 40,
+  "COLZSENSEI180X190": 40,
+  "COLZSPRING105X190": 17,
+  "COLZSPRING135X180": 27,
+  "COLZSPRING140X200": 40,
+  "COLZSPRING150X190": 40,
+  "COLZSPRING150X200": 35,
+  "COLZSPRING160X200": 40,
+  "COLZSPRING180X190": 42,
+  "COLZSPRING180X200": 40,
+  "COLZSPRING200X200": 50,
+  "COLZSPRING90X180": 17,
+  "COLZSPRING90X200": 18,
+  "COLZSUPREME105X200": 15,
+  "COLZSUPREME120X190": 22,
+  "COLZSUPREME135X180": 27,
+  "COLZSUPREME135X200": 27,
+  "COLZSUPREME140X190": 29,
+  "COLZSUPREME150X180": 32,
+  "COLZSUPREME150X190": 32,
+  "COLZSUPREME150X200": 37,
+  "COLZSUPREME160X200": 40,
+  "COLZSUPREME180X200": 42,
+  "COLZSUPREME200X200": 60,
+  "COLZSUPREME90X190": 17,
+  "COLZSUPREME90X200": 3,
+  "COLZSUPREMET200X200": 60,
+  "ORBIT 80X180": 8,
+  "PHARM105X190": 10,
+  "PHARM105X200": 10,
+  "PHARM120X180": 12,
+  "PHARM120X200": 12,
+  "PHARM135X180": 15,
+  "PHARM135X190": 15,
+  "PHARM135X200": 15,
+  "PHARM140X190": 15,
+  "PHARM140X200": 15,
+  "PHARM150X190": 17,
+  "PHARM150X200": 17,
+  "PHARM160X190": 17,
+  "PHARM160X200": 17,
+  "PHARM180X190": 20,
+  "PHARM180X200": 20,
+  "PHARM80X180": 8,
+  "PHARM80X200": 8,
+  "PHARM90X180": 8,
+  "PHARM90X190": 8,
+  "PHARM90X200": 8,
+  "PHARMA SLIM105X190": 10,
+  "PHARMA SLIM80X180": 8,
+  "PHARMA SLIM80X190": 8,
+  "PHARMA SLIM80X200": 8,
+  "PHARMA SLIM90X180": 8,
+  "PHARMA SLIM90X190": 8,
+  "PHARMA SLIM90X200": 8,
+  "PROBRU135X190": 2,
+  "PROBRU150X190": 5,
+  "PROBRU150X200": 2,
+  "PROBRU180X200": 2,
+  "PROPOL105X190": 2,
+  "PROPOL105X200": 2,
+  "PROPOL150X200": 5,
+  "PROPOL90X190": 2,
+  "TOPPER VISCO135X190": 5,
+  "TOPPER VISCO160X200": 5,
+  "TOPPERV5_105X200": 5,
+  "TOPPERV5_135X190": 5,
+  "TOPPERV5_150X190": 5,
+  "TOPPERV5_180X200": 5,
+  "TOPPERV5_80X190": 5,
+  "TOPPERV5_90X190": 5,
+  "TOPPERV5_90X200": 2,
+};
+
+// Modelos con servicio NetExpress disponible en envíos internacionales
+// (CODREMITENTE 48297) a partir de cierto ANCHO de la talla, inclusive
+// (Jennifer, 2026-09-08) — por debajo del umbral, o si el modelo no está en
+// ninguna de las dos listas, siempre International Classic. Coincide por
+// palabra clave contra el título/stockModel del producto, igual que el
+// reparto de proveedores (PROVEEDOR_LUSO_KEYWORDS etc.).
+const NETEXPRESS_ANCHO_135_KEYWORDS = [
+  "generacion z", "generacion zen", "paris", "zen mandala", "zen nirvana",
+  "zen natural", "natural zen", "supreme zen", "origin zen",
+];
+const NETEXPRESS_ANCHO_180_KEYWORDS = [
+  "pharmatherapy", "pharma-therapy", "bamboo deluxe", "bambu deluxe",
+  "bellagio deluxe", "4d", "fitness", "latex gel", "ergo-relax",
+  "ergo relax", "louvre", "murano", "toscana deluxe",
+];
+
+// Almohadas: si se compran 2 del mismo modelo, ¿cuentan como 1 bulto (van
+// juntas en el mismo paquete) o 2 (Jennifer, 2026-09-08)? Nordic y Zen Relax
+// se combinan; Sea Foam nunca. Cualquier otra almohada no listada aquí no
+// tiene esta casuística (normalmente se compran de una en una).
+const ALMOHADA_COMBINABLE_KEYWORDS = ["nordic", "zen relax"];
+const ALMOHADA_NUNCA_COMBINA_KEYWORDS = ["sea foam", "seafoam"];
+
+function matchesAnyKeyword(title, keywords) {
+  const t = normalizeKey(title);
+  return keywords.some((k) => t.includes(normalizeKey(k)));
+}
+
+// SKU tal y como debe aparecer en el fichero de SEUR (Observaciones/Producto,
+// Jennifer, 2026-09-08): skuPrefix + talla pegados, ej. "COLZNIR150X190" —
+// el mismo formato que ya usa el histórico de envíos, no el nombre completo
+// del producto (no cabe bien en la etiqueta).
+function seurSku(product, talla) {
+  return `${(product.skuPrefix || "").toUpperCase()}${talla}`;
+}
+
+function pesoSeurPorUnidad(sku, overrides) {
+  if (overrides && overrides[sku] != null) return overrides[sku];
+  return PESOS_SEUR_DEFAULT[sku] != null ? PESOS_SEUR_DEFAULT[sku] : null;
+}
+
+// Ancho de una talla "150X190" -> 150. Devuelve null si no se puede leer.
+function anchoDeTalla(talla) {
+  const m = /^(\d{2,3})X\d{2,3}$/.exec(talla || "");
+  return m ? Number(m[1]) : null;
+}
+
+function calificaNetExpress(productTitle, talla) {
+  const ancho = anchoDeTalla(talla);
+  if (ancho == null) return false;
+  if (matchesAnyKeyword(productTitle, NETEXPRESS_ANCHO_135_KEYWORDS)) return ancho >= 135;
+  if (matchesAnyKeyword(productTitle, NETEXPRESS_ANCHO_180_KEYWORDS)) return ancho >= 180;
+  return false;
+}
+
 function normalizeKey(text) {
   return (text || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
 }
@@ -854,6 +1329,28 @@ export class InventoryStore {
       return this.processSale(await request.json());
     }
 
+    // Pesos por SKU para el fichero de SEUR (Jennifer, 2026-09-08): valor
+    // por defecto calculado del histórico (PESOS_SEUR_DEFAULT), corregible
+    // a mano por SKU — la corrección manual siempre gana.
+    if (url.pathname === "/pesos" && method === "GET") {
+      const overrides = await this.load("pesosSeurOverrides", {});
+      const skus = new Set([...Object.keys(PESOS_SEUR_DEFAULT), ...Object.keys(overrides)]);
+      const lista = [...skus].sort().map((sku) => ({
+        sku,
+        peso: pesoSeurPorUnidad(sku, overrides),
+        esManual: overrides[sku] != null,
+      }));
+      return Response.json(lista);
+    }
+    if (url.pathname === "/pesos/set" && method === "POST") {
+      const { sku, peso } = await request.json();
+      const overrides = await this.load("pesosSeurOverrides", {});
+      if (peso == null || peso === "") delete overrides[sku];
+      else overrides[sku] = Number(peso);
+      await this.state.storage.put("pesosSeurOverrides", overrides);
+      return Response.json({ ok: true, sku, peso: pesoSeurPorUnidad(sku, overrides) });
+    }
+
     if (url.pathname === "/settle-shipment" && method === "POST") {
       return this.settleShipment(await request.json());
     }
@@ -1006,7 +1503,7 @@ export class InventoryStore {
   // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
   // columna. El excedente de vendidoPendiente se libera cuando el pedido
   // que lo generó se marca como enviado (ver settleShipment).
-  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, trackFurniture, refSuffix) {
+  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, refSuffix) {
     const key = stockKey(item.product.stockModel, item.talla);
     const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
     const covered = Math.min(row.cantidad, item.qty);
@@ -1021,27 +1518,26 @@ export class InventoryStore {
         origen: "venta",
         orderNumber,
       });
-      // El pedido va a salir por Furniture (Jennifer, 2026-08-26): lo que
-      // ya había en stock se descuenta y se da directamente por "en
-      // almacén" — Furniture necesita ver también estos artículos, no solo
-      // los que faltan pedir a fábrica, para tener el pedido completo.
-      if (trackFurniture) {
-        pushBackorder(backorders, {
-          id: `${orderId}-${key}-cubierto`,
-          orderId,
-          orderNumber,
-          stockModel: item.product.stockModel,
-          talla: item.talla,
-          color: item.color,
-          tipo: item.tipo,
-          cantidad: covered,
-          orderDate,
-          esPack,
-          proveedor,
-          estado: "cubierto",
-          recibidoFabrica: true,
-        });
-      }
+      // Se registra siempre el desglose de lo que ya había en stock (no
+      // solo para Furniture, ver Jennifer 2026-08-26) — Furniture lo
+      // necesita para ver el pedido completo, y desde 2026-09-08 el fichero
+      // de exportación de SEUR también lo usa para saber qué colchones
+      // concretos (SKU/talla/cantidad) van en cada carga.
+      pushBackorder(backorders, {
+        id: `${orderId}-${key}-cubierto`,
+        orderId,
+        orderNumber,
+        stockModel: item.product.stockModel,
+        talla: item.talla,
+        color: item.color,
+        tipo: item.tipo,
+        cantidad: covered,
+        orderDate,
+        esPack,
+        proveedor,
+        estado: "cubierto",
+        recibidoFabrica: true,
+      });
     }
     const falta = item.qty - covered;
     const reviewNotes = [];
@@ -1619,7 +2115,13 @@ export class InventoryStore {
       }
     }
 
-    let seurColchonCubierto = 0;
+    // Suma de cualquier artículo con stock tracking (colchón, almohada,
+    // protector, topper) que ya tenía stock real cuando se procesó — no
+    // solo colchones (Jennifer, 2026-09-08: un pedido de solo almohadas
+    // también va por SEUR y también tiene que prepararse solo si hay
+    // stock). El "mixto" que para y pregunta sigue siendo solo de colchones
+    // (colchonesSueltos, más arriba) — eso no cambia.
+    let seurCubierto = 0;
 
     for (const item of flat) {
       const isStockTracked = STOCK_TYPES.has(item.tipo);
@@ -1691,8 +2193,8 @@ export class InventoryStore {
 
       if (!proveedor) needsReview = true;
       const refSuffix = agencia === "SEUR" && item.tipo === "colchon" ? seurRefSuffix : "";
-      const { falta, covered, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, agencia === "FURNITURE", refSuffix);
-      if (agencia === "SEUR" && item.tipo === "colchon") seurColchonCubierto += covered;
+      const { falta, covered, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, refSuffix);
+      if (agencia === "SEUR") seurCubierto += covered;
       if (reviewNotes.length) {
         needsReview = true;
         reviewReasons.push(...reviewNotes);
@@ -1711,7 +2213,7 @@ export class InventoryStore {
     // pedido que ya tenía stock real y puede prepararse para la próxima
     // carga — se decide aquí porque solo InventoryStore sabe si de verdad se
     // ha descontado stock (OrdersStore es quien asigna la carga en sí).
-    const seurReady = agencia === "SEUR" && seurColchonCubierto > 0;
+    const seurReady = agencia === "SEUR" && seurCubierto > 0;
 
     return Response.json({ agencia, pendingManufacture, needsReview, reviewReasons, seurReady });
   }
