@@ -559,6 +559,28 @@ async function nextReferenciaNumero(state) {
   return String(siguiente).padStart(3, "0");
 }
 
+// Contador propio para reposiciones (Jennifer, 2026-09-21): "no tendrán las
+// referencias que venimos trabajando" — nunca usan el correlativo/letra de
+// Polival (MR/ASTRA/...), siempre "I-001", "I-002"... independiente del
+// modelo o del proveedor.
+async function nextReposicionReferencia(state) {
+  const actual = (await state.storage.get("reposicionReferenciaCounter")) || 0;
+  const siguiente = actual + 1;
+  await state.storage.put("reposicionReferenciaCounter", siguiente);
+  return "I-" + String(siguiente).padStart(3, "0");
+}
+
+// Contador propio para gestos comerciales (Jennifer, 2026-09-22): mismo
+// motivo que reposicionReferenciaCounter — nunca usa el correlativo de
+// Polival, siempre "GC-001", "GC-002"... para reconocerlo a simple vista en
+// Proveedores/Furniture y no confundirlo con una venta real de almohada.
+async function nextGestoComercialReferencia(state) {
+  const actual = (await state.storage.get("gestoComercialReferenciaCounter")) || 0;
+  const siguiente = actual + 1;
+  await state.storage.put("gestoComercialReferenciaCounter", siguiente);
+  return "GC-" + String(siguiente).padStart(3, "0");
+}
+
 // Devuelve { referencia, needsReview, reason } — needsReview cuando no se
 // puede formar la referencia completa (tipo sin clasificar, o color sin
 // letra asignada): se asigna igualmente el número (para no dejar huecos en
@@ -709,45 +731,44 @@ const CANAPE_RECIPES = {
       "tela gris niebla": { color: "Duna Koala", rejilla: "Grafito", modelo: "INITIAL DELUXE" },
     },
   },
-  tela_tierra: {
-    modelo: "SPACE DELUXE",
-    tapaBase: "Tapa con borde Deluxe",
-    extra: ["BORDE DELUXE"],
-    tiradorDefault: "Uñero",
-    tiradorTapaPartida: "Normal",
-    colores: {
-      cacao: { color: "Tela Duna Cocoa", rejilla: "Wengué" },
-      beige: { color: "Duna Lino", rejilla: "Tierra" },
-      "gris antracita": { color: "Duna Onix", rejilla: "Grafito" },
-      "gris niebla": { color: "Duna Koala", rejilla: "Grafito" },
-    },
-  },
-  tela_natural: {
-    modelo: "SPACE DELUXE",
-    tapaBase: "Tapa con borde Deluxe",
-    extra: ["BORDE DELUXE"],
-    tiradorDefault: "Uñero",
-    tiradorTapaPartida: "Normal",
-    colores: {
-      oliva: { color: "Duna Oliva", rejilla: "Negra" },
-      menta: { color: "Duna Salvia", rejilla: "Negra" },
-      oceanic: { color: "Duna Tulum", rejilla: "Negra" },
-    },
-  },
-  tela_vivos: {
-    modelo: "SPACE DELUXE",
-    tapaBase: "Tapa con borde Deluxe",
-    extra: ["BORDE DELUXE"],
-    tiradorDefault: "Uñero",
-    tiradorTapaPartida: "Normal",
-    colores: {
-      magenta: { color: "Duna Magenta", rejilla: "Negra" },
-      rosa: { color: "Duna Flamingo", rejilla: "Negra" },
-      lavanda: { color: "Duna Lavanda", rejilla: "Negra" },
-      star: { color: "Duna Dijón", rejilla: "Negra" },
-    },
-  },
 };
+// Las 3 "gamas" del canapé de tela (natural/tierras/vivos) son fichas de
+// catálogo separadas solo para organizar los colores — mismo modelo, misma
+// tapa y mismo tirador para pedir a Polival en las 3 (Jennifer, 2026-09-19:
+// "el canapé de tela siempre es el mismo modelo... lo que varía... es
+// únicamente los colores"). El SKU de un pack (ej. "CANAPETELABEIGE") no
+// trae ninguna pista de a qué gama pertenece — solo el color — así que las
+// 3 listas de colores se unifican en una sola receta para que el color
+// encaje sea cual sea la ficha de catálogo con la que haya coincidido el
+// segmento del pack.
+const TELA_COLORES_UNIFICADOS = {
+  cacao: { color: "Tela Duna Cocoa", rejilla: "Wengué" },
+  beige: { color: "Duna Lino", rejilla: "Tierra" },
+  "gris antracita": { color: "Duna Onix", rejilla: "Grafito" },
+  "gris niebla": { color: "Duna Koala", rejilla: "Grafito" },
+  oliva: { color: "Duna Oliva", rejilla: "Negra" },
+  menta: { color: "Duna Salvia", rejilla: "Negra" },
+  oceanic: { color: "Duna Tulum", rejilla: "Negra" },
+  magenta: { color: "Duna Magenta", rejilla: "Negra" },
+  rosa: { color: "Duna Flamingo", rejilla: "Negra" },
+  lavanda: { color: "Duna Lavanda", rejilla: "Negra" },
+  star: { color: "Duna Dijón", rejilla: "Negra" },
+};
+const TELA_RECIPE_BASE = {
+  modelo: "SPACE DELUXE",
+  tapaBase: "Tapa con borde Deluxe",
+  extra: ["BORDE DELUXE"],
+  tiradorDefault: "Uñero",
+  tiradorTapaPartida: "Normal",
+  colores: TELA_COLORES_UNIFICADOS,
+};
+const CANAPE_RECIPES_TELA = {
+  tela_tierra: TELA_RECIPE_BASE,
+  tela_natural: TELA_RECIPE_BASE,
+  tela_vivos: TELA_RECIPE_BASE,
+};
+Object.assign(CANAPE_RECIPES, CANAPE_RECIPES_TELA);
+
 
 function matchCanapeRecipeKey(title) {
   const t = normalizeKey(title);
@@ -1025,12 +1046,18 @@ function nextRefSuffix(current) {
 // Empuja un pendiente nuevo (idempotente por id) — compartido entre la
 // venta normal (applyStockUsage) y los productos "no llevamos stock"
 // (addNoStockBackorder).
-function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, color, tipo, cantidad, orderDate, esPack, proveedor, needsDecision, referencia, mercanciaFabrica, estado, recibidoFabrica, refSuffix }) {
+function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, color, tipo, cantidad, orderDate, esPack, proveedor, needsDecision, referencia, mercanciaFabrica, estado, recibidoFabrica, refSuffix, platform, orderRef, reposicion, piezaTexto, gestoComercial, agenciaReposicion, recogida, recogidaDestino }) {
   if (backorders.some((b) => b.id === id)) return;
   backorders.push({
     id,
     orderId,
     orderNumber,
+    // Para mostrar la referencia real sin el prefijo "BEZEN" cuando el
+    // pedido no es de Shopify (Jennifer, 2026-09-17, Fase 2 de Carrefour).
+    // platform es undefined para pedidos de Shopify (compatibilidad con
+    // pendientes ya guardados antes de este campo).
+    platform: platform || "Shopify",
+    orderRef: orderRef || null,
     stockModel,
     talla,
     // Color/acabado de la tapicería (ej. "Wengue") — vacío para lo que no
@@ -1089,7 +1116,39 @@ function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla
     // Carga de SEUR a la que se ha asignado este pendiente al marcarlo
     // "listo para SEUR" (ver resolveSeurBackorder) — null hasta entonces.
     cargaId: null,
+    // Reposición de una pieza rota (Jennifer, 2026-09-21, ver
+    // crearReposicion): marca visible aparte en Proveedores/Furniture para
+    // no confundirla con un pendiente de venta normal, con el texto de
+    // qué pieza exacta hay que mandar (para que Polival no reenvíe el
+    // juego completo si solo se rompió una parte).
+    reposicion: !!reposicion,
+    piezaTexto: piezaTexto || "",
+    // Gesto comercial (Jennifer, 2026-09-22, ver crearGestoComercial):
+    // almohada(s) de regalo por un daño/retraso que no compensa gestionar
+    // como cambio de pieza. Misma idea que "reposicion" (línea propia e
+    // independiente en Proveedores/Furniture, referencia GC-XXX propia),
+    // pero SÍ puede cubrirse con stock real si lo hay (a diferencia de una
+    // reposición, que siempre pide nuevo a proveedor).
+    gestoComercial: !!gestoComercial,
+    // Reposición de un COLCHÓN (Jennifer, 2026-09-22): "SEUR" | "FURNITURE"
+    // | null (null para reposiciones que no son de colchón, donde siempre
+    // se ha usado Furniture y no hace falta elegir). `recogida` solo tiene
+    // sentido cuando agenciaReposicion==="FURNITURE" — SEUR nunca puede
+    // hacer recogidas del colchón dañado. `recogidaDestino` distingue si el
+    // colchón recogido vuelve a nuestras instalaciones o es para desechar,
+    // solo relevante cuando recogida===true — se usa al construir el Excel
+    // real de Furniture (ver buildFurnitureExport en index.js).
+    agenciaReposicion: agenciaReposicion || null,
+    recogida: !!recogida,
+    recogidaDestino: recogidaDestino || null,
   });
+}
+
+// Fichas de Catálogo marcadas "excluido" (ver updateFlags) — duplicados de
+// Shopify que no deben participar en ninguna búsqueda por nombre/SKU ni en
+// Tarifas, aunque la ficha siga viva en Shopify.
+function activeProducts(products) {
+  return Object.values(products).filter((p) => !p.excluido);
 }
 
 // Un segmento de SKU de pack (ej. "COLZSUPREME90X190") no siempre trae el
@@ -1099,7 +1158,7 @@ function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla
 // que Jennifer haya añadido a mano (otras plataformas, ej. "AURORA")—, cuál
 // código conocido aparece contenido en el segmento, quedándonos con el más
 // largo (más específico) si hay varios candidatos.
-function findBestPrefixMatch(segmentRaw, products) {
+export function findBestPrefixMatch(segmentRaw, products) {
   const segment = segmentRaw.toUpperCase();
   // Recoge TODOS los productos distintos cuyo código encaja en el
   // segmento, no solo el mejor — dos modelos casi gemelos (ej. un canapé y
@@ -1107,8 +1166,23 @@ function findBestPrefixMatch(segmentRaw, products) {
   // siempre es el correcto. Si hay más de uno, es una duda real: se sigue
   // eligiendo el más largo como mejor apuesta, pero se marca ambiguo para
   // que Jennifer lo confirme (ver resolvePackSku).
+  // La exclusión de "para alojamiento" que vivía aquí (Jennifer, 2026-09-19)
+  // se quitó el 2026-09-23: Paris y Zen Mandala eran fichas DUPLICADAS de
+  // Shopify que compartían prefijo de SKU con su gemelo "normal" — Jennifer
+  // confirmó que el nombre "para alojamiento" es solo un resto mal puesto,
+  // el producto SÍ se vende normal, así que se fusionaron ambas fichas en
+  // una sola (mismo `stockModel`). Ya no hay duplicado que desambiguar, así
+  // que excluirlo aquí solo dejaba estos modelos sin ningún match posible.
+  // 2026-09-24: fusionar bajo el mismo stockModel seguía siendo frágil (la
+  // ficha "para alojamiento" y su gemela normal son DOS entradas de
+  // Catálogo independientes que solo coinciden en texto a mano) y volvió a
+  // dar problemas (precios de Tarifas huérfanos bajo el nombre antiguo tras
+  // la fusión). Ahora la ficha "para alojamiento" se marca `excluido` en
+  // Catálogo en vez de fusionarse — `activeProducts()` la ignora aquí y en
+  // el resto de búsquedas por nombre/SKU/Tarifas, dejando la ficha "normal"
+  // como única fuente real.
   const matches = [];
-  for (const p of Object.values(products)) {
+  for (const p of activeProducts(products)) {
     if (p.product_type === "Pack") continue;
     const candidates = [p.skuPrefix, ...(p.altSkuPrefixes || [])].filter((c) => c && c.length >= 4);
     let bestForProduct = null;
@@ -1134,6 +1208,15 @@ function findBestPrefixMatch(segmentRaw, products) {
   };
 }
 
+// Almohada de regalo "Nordic" pegada al SKU de algunos packs de Canapé +
+// Colchón Paris (Jennifer, 2026-09-19: "solo los packs con el colchón parís
+// son los que pueden llegar a llevar el regalo de la almohada nordic") — va
+// como un segmento suelto "NOR"+talla (ej. "NOR105"), con un posible dígito
+// de cantidad pegado delante si el pack regala más de una (ej. "2NOR100" =
+// 2 unidades talla 100). No coincide con el alias "ALMNOR" del catálogo por
+// prefijo normal (demasiado distinto/corto), así que se reconoce aparte.
+const NOR_PILLOW_RE = /^(\d*)NOR(\d+)$/i;
+
 function resolvePackSku(rawSku, products, packColor, packTalla) {
   if (!rawSku || rawSku.includes("(")) return { componentes: [], needsReview: true, ambiguousNotes: [] };
   const base = rawSku.split("-")[0];
@@ -1142,6 +1225,12 @@ function resolvePackSku(rawSku, products, packColor, packTalla) {
   const ambiguousNotes = [];
   let unresolved = 0;
   for (const seg of segments) {
+    const norMatch = seg.match(NOR_PILLOW_RE);
+    const nordic = norMatch ? Object.values(products).find((p) => p.skuPrefix === "ALMNOR") : null;
+    if (norMatch && nordic) {
+      componentes.push({ tipo: "almohada", product: nordic, talla: normalizeTalla(norMatch[2]), ambiguousMatch: false, color: "", qtyOverride: norMatch[1] ? Number(norMatch[1]) : 1 });
+      continue;
+    }
     const match = findBestPrefixMatch(seg, products);
     if (match) {
       // El color (ej. "Wengue") no está en el segmento de SKU, viene del
@@ -1158,7 +1247,15 @@ function resolvePackSku(rawSku, products, packColor, packTalla) {
         ambiguousNotes.push(`El código "${seg}" del pack coincide con varios artículos del catálogo: ${match.candidates.join(" / ")}. He elegido "${match.product.stockModel}" por defecto — confírmame si es correcto o dime cuál es el que corresponde.`);
       }
     } else {
+      // Antes esto se descartaba en silencio (Jennifer, 2026-09-19, caso
+      // real BEZEN12211: el colchón de un pack "no se ha metido en ningún
+      // sitio" — el segmento "TOSCANA150X200" no coincidía con el alias
+      // "COLTOS" del catálogo, así que se perdía sin dejar rastro alguno,
+      // ni siquiera en Casos a revisar). Ahora, aunque no haya nada que
+      // hacer automáticamente, queda un aviso explícito para que no se
+      // pierda de vista y se añada a mano (ver /api/inventario/admin/add-item-to-order).
       unresolved++;
+      ambiguousNotes.push(`El código "${seg}" del pack no coincide con ningún artículo del catálogo — este componente del pack NO se ha añadido a ningún pendiente. Revísalo a mano y dime qué modelo es (o añade el alias que falta en el Catálogo) para poder incluirlo.`);
     }
   }
   return { componentes, needsReview: unresolved > 0 || componentes.length === 0, ambiguousNotes };
@@ -1194,7 +1291,7 @@ function resolveStockModel(query, mode, products) {
   if (mode === "sku") {
     let best = null;
     let bestLen = 0;
-    for (const p of Object.values(products)) {
+    for (const p of activeProducts(products)) {
       if (p.product_type === "Pack") continue;
       const candidates = [p.skuPrefix, ...(p.altSkuPrefixes || [])].filter((c) => c && c.length >= 3);
       for (const c of candidates) {
@@ -1208,11 +1305,413 @@ function resolveStockModel(query, mode, products) {
     return best ? best.stockModel : null;
   }
 
-  const byName = Object.values(products).filter((p) => p.product_type !== "Pack" && p.stockModel);
+  const byName = activeProducts(products).filter((p) => p.product_type !== "Pack" && p.stockModel);
   const exact = byName.find((p) => p.stockModel.toUpperCase() === q);
   if (exact) return exact.stockModel;
   const partial = byName.find((p) => p.stockModel.toUpperCase().includes(q));
   return partial ? partial.stockModel : null;
+}
+
+// === TARIFAS (Jennifer, 2026-09-22) ===
+// Margen fijo por tramo de ANCHO de talla (el primer número de la talla
+// "AnchoXLargo" que ya usa todo el catálogo) — compartido entre MAISON y
+// RESTO DE PLATAFORMAS, dictado turno a turno: 80/90→12€, 105/120→15€,
+// 135/140/150→18€, 160/180→25€, 200→35€.
+// 67 añadido 2026-09-23 (4D/Ergo-Relax Plus, talla real de Carrefour sin
+// tramo propio) — mismo tramo que 80/90, coherente con que su coste/envío
+// ya se sustituyen por los de 80X180 (ver TARIFA_SUSTITUTOS_GENERALES).
+const TARIFA_MARGEN_TRAMOS = [
+  { anchos: [67, 80, 90], margen: 12 },
+  { anchos: [105, 120], margen: 15 },
+  { anchos: [135, 140, 150], margen: 18 },
+  { anchos: [160, 180], margen: 25 },
+  { anchos: [200], margen: 35 },
+];
+function tarifaMargenPorTalla(talla) {
+  const ancho = Number(String(talla || "").split("X")[0]);
+  const tramo = TARIFA_MARGEN_TRAMOS.find((t) => t.anchos.includes(ancho));
+  return tramo ? tramo.margen : null;
+}
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+// Sustituciones de talla cuando no hay coste real guardado (Jennifer,
+// 2026-09-23) — en vez de dejar la talla sin precio, se usa el de otra
+// talla "equivalente". GENERALES: aplica a cualquier modelo (140X180 nunca
+// trae precio en la tarifa real de New Mattress, se usa el de 140X190).
+// POR_MODELO: solo para ese stockModel exacto — Pharma-Therapy Soja Slim
+// no trae precio de ancho 80 en su tarifa real, se usa el de ancho 90.
+// Ampliado 2026-09-23 (Jennifer, al añadir tallas nuevas por Carrefour y
+// luego Maison): 67X180 es un caso de ANCHURA (coge 80X180, único caso
+// explícito). Cualquier OTRA talla "AnchoX180" que no tenga precio real
+// usa el mismo ancho con largo 190 (Jennifer: "exactamente el mismo
+// precio de la medida superior") — regla programática, no hace falta
+// listar cada ancho a mano según van apareciendo en más ficheros de
+// plataforma. Se usa tanto para el precio de COSTE como para el de ENVÍO.
+const TARIFA_SUSTITUTOS_GENERALES = { "67X180": "80X180" };
+function sustitutoGeneralDeTalla(talla) {
+  if (TARIFA_SUSTITUTOS_GENERALES[talla]) return TARIFA_SUSTITUTOS_GENERALES[talla];
+  const m = /^(\d+)X180$/.exec(talla || "");
+  return m ? m[1] + "X190" : null;
+}
+
+// Modelos descatalogados que mientras tanto usan el precio de OTRO modelo
+// entero (Jennifer, 2026-09-23) — no es solo coste/envío como los
+// sustitutos de arriba, es TODO el cálculo (las 8 columnas) el que se
+// copia del modelo base. Quitar la entrada cuando el modelo se elimine
+// del todo del Catálogo/de las plataformas.
+const TARIFA_MODELO_DESCATALOGADO_USA_PRECIO_DE = {
+  "Colchón Viscoelástico | 20cm | Termorregulable con Grafeno": { modelo: "4D", motivo: "descatalogado, precio temporal" },
+};
+
+// Plazos de entrega > Marketplace (Jennifer, 2026-09-23): días a mostrar
+// según si hay stock real (cantidad > 0) de ese modelo+talla o no —
+// distinto según el tipo de artículo. Topper siempre 7, ignora el stock.
+const PLAZO_DIAS_REGLAS = {
+  colchon: { enStock: 2, sinStock: 12 },
+  almohada: { enStock: 2, sinStock: 7 },
+  spring_zen: { enStock: 8, sinStock: 25 },
+};
+function calcularDiasPlazo(tipo, enStock) {
+  if (tipo === "topper") return 7;
+  const regla = PLAZO_DIAS_REGLAS[tipo] || PLAZO_DIAS_REGLAS.colchon;
+  return enStock ? regla.enStock : regla.sinStock;
+}
+
+// Tallas que NO vienen como variante real de Shopify (por eso no están en
+// `product.tallas`, que se recalcula solo con el sync de Shopify) pero SÍ
+// se venden en otros marketplaces (Jennifer, 2026-09-23) — se añaden SOLO
+// para que la tabla de Tarifas las calcule, sin tocar `product.tallas`
+// (se perdería en el siguiente sync).
+const TARIFA_TALLAS_EXTRA_MODELO = {
+  "Colchón Muelles Ensacados | 24cm | Una Cara | Generación Zen": ["160X180", "180X180"],
+  "Colchón Muelles Ensacados | 27cm | Doble Cara | París Zen": ["67X180", "140X180", "160X180", "180X180"],
+  "Colchón Muelles Ensacados | 30cm | Doble Cara | Zen Mandala Gran Hotel": ["140X180", "150X180", "160X180", "180X180"],
+  "Colchón Muelles Ensacados | 30cm | Doble Cara | Zen Nirvana Gran Hotel": ["140X180", "150X180", "160X180", "180X180"],
+  "Colchón Viscoelástico | 20cm | Látex Gel": ["160X180"],
+  "4D": ["67X180", "140X180"],
+  "Colchón Viscoelástico | 24cm | Doble cara | Ergo-Relax Plus": ["67X180"],
+  "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja": ["67X180", "200X200"],
+  "Colchón Viscoelástico | 21cm | Bellagio Deluxe": ["200X200"],
+  "Colchón Muelles Ensacados | 31cm | Doble Cara | Zen Natural": ["105X180", "120X180", "140X180", "150X180", "160X180", "180X180"],
+  "Colchón Muelles Ensacados | 33cm | Doble Cara | Efecto Nube | Spring Zen": ["105X180", "120X180", "140X180", "150X180", "160X180", "180X180"],
+};
+const TARIFA_SUSTITUTOS_POR_MODELO = {
+  "Colchón Viscoelástico | 15cm | Pharma-Therapy Soja Slim - Cama Nido": {
+    "80X180": "90X180",
+    "80X190": "90X190",
+    "80X200": "90X200",
+  },
+};
+
+// Sustituto de ENVÍO por modelo "hermano" (Jennifer, 2026-09-23): si una
+// talla no tiene envío guardado, se usa el de otro modelo para esa misma
+// talla — Pharma-Therapy Soja Slim no trae 140X190 en la tabla de
+// transporte, se usa el de Pharma-Therapy Soja (normal).
+const TARIFA_ENVIO_SUSTITUTO_MODELO = {
+  "Colchón Viscoelástico | 15cm | Pharma-Therapy Soja Slim - Cama Nido": "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
+};
+
+// Envío FIJO por modelo (Jennifer, 2026-09-23): colchones que solo salen
+// por FURNITURE (nunca por SEUR, ver `exceptionFurniture` en el Catálogo)
+// no tienen precio en la tabla de transporte (esa es de SEUR, por país) —
+// Furniture cobra un fijo por envío, igual para cualquier talla o país.
+// Spring Zen: 42€.
+const TARIFA_ENVIO_FIJO_MODELO = {
+  "Colchón Muelles Ensacados | 33cm | Doble Cara | Efecto Nube | Spring Zen": 42,
+};
+
+// Fórmula BEZEN (Jennifer, 2026-09-22): coste+envío ÷0,70 (30% margen)
+// ÷0,77 (23% publicidad) ×1,21 (IVA) ×1,04 (coste financieras). Cada paso
+// se guarda para que Jennifer pueda comprobar el desglose completo, no
+// solo el resultado final.
+// El último multiplicador subió de 1,02 a 1,04 (Jennifer, 2026-09-23): han
+// adquirido un préstamo y quiere recaudar ese coste también por esta vía —
+// mismo paso de la fórmula, solo cambia el porcentaje (2%→4%).
+// `divisorMargen`/`margenLabel` parametrizan el primer margen (30% para
+// núcleo, ÷0,70) porque los modelos de muelles usan un 32% distinto
+// (÷0,68) — ver TARIFA_MODELOS_MUELLES, Jennifer 2026-09-23.
+function calcularPrecioBezen(coste, envio, divisorMargen = 0.70, margenLabel = "30%") {
+  const pasos = [];
+  // Coste y envío como líneas propias (Jennifer, 2026-09-22: "que también
+  // se pueda revisar" cada uno por separado, no solo la suma).
+  pasos.push({ label: "Precio de coste", valor: round2(coste) });
+  pasos.push({ label: "Precio de envío", valor: round2(envio) });
+  const suma = coste + envio;
+  pasos.push({ label: "Coste + envío", valor: round2(suma) });
+  const conMargen = suma / divisorMargen;
+  pasos.push({ label: `÷ ${divisorMargen} (${margenLabel} margen)`, valor: round2(conMargen) });
+  const conPublicidad = conMargen / 0.77;
+  pasos.push({ label: "÷ 0,77 (23% publicidad)", valor: round2(conPublicidad) });
+  const conIva = conPublicidad * 1.21;
+  pasos.push({ label: "× 1,21 (IVA)", valor: round2(conIva) });
+  const final = conIva * 1.04;
+  pasos.push({ label: "× 1,04 (coste financieras)", valor: round2(final) });
+  // Redondeo BEZEN (Jennifer, 2026-09-22): siempre al alza, al euro entero
+  // (182,54€ → 183€) — nunca decimales en el precio final de BEZEN.
+  const redondeado = Math.ceil(final);
+  pasos.push({ label: "Redondeo (al alza, € entero)", valor: redondeado });
+  return { precio: redondeado, pasos };
+}
+
+// Fórmula MAISON / RESTO DE PLATAFORMAS (Jennifer, 2026-09-22): coste+envío
+// + margen fijo por talla, luego comisión de plataforma (÷0,77 Maison,
+// ÷0,80 resto) + IVA (×1,21). Sin el 30% de margen ni el coste de
+// financieras que sí lleva BEZEN.
+function calcularPrecioPlataforma(coste, envio, talla, divisorComision) {
+  const pasos = [];
+  const margen = tarifaMargenPorTalla(talla);
+  if (margen == null) {
+    return { precio: null, pasos: [], error: "Sin tramo de margen definido para la talla " + talla + "." };
+  }
+  // Coste y envío como líneas propias (Jennifer, 2026-09-22).
+  pasos.push({ label: "Precio de coste", valor: round2(coste) });
+  pasos.push({ label: "Precio de envío", valor: round2(envio) });
+  const suma = coste + envio;
+  pasos.push({ label: "Coste + envío", valor: round2(suma) });
+  const conMargen = suma + margen;
+  pasos.push({ label: `+ ${margen}€ margen`, valor: round2(conMargen) });
+  const conComision = conMargen / divisorComision;
+  pasos.push({ label: `÷ ${divisorComision} (comisión plataforma)`, valor: round2(conComision) });
+  const final = conComision * 1.21;
+  pasos.push({ label: "× 1,21 (IVA)", valor: round2(final) });
+  // Redondeo a ".99" de la escala superior (Jennifer, 2026-09-22): sube al
+  // siguiente euro entero y resta 1 céntimo (136,74€ → 137€ → 136,99€).
+  const redondeado = round2(Math.ceil(final) - 0.01);
+  pasos.push({ label: "Redondeo (.99 escala superior)", valor: redondeado });
+  return { precio: redondeado, pasos };
+}
+
+// Modelos de MUELLES (Jennifer, 2026-09-23): usan un esquema de precios
+// distinto al de los modelos de "núcleo" — los 8 modelos de LUSO activados
+// para cálculo (ver TARIFA_SUSTITUTOS_* y la carga de LUSO más abajo).
+const TARIFA_MODELOS_MUELLES = [
+  "Colchón Muelles Ensacados | 24cm | Una Cara | Generación Zen",
+  "Colchón Viscoelástico | 30cm | Origin Zen",
+  "Colchón Muelles Ensacados | 27cm | Doble Cara | París Zen",
+  "Colchón Muelles Ensacados | 33cm | Doble Cara | Efecto Nube | Spring Zen",
+  "Colchón Muelles Ensacados | 29cm | Doble Cara | Supreme Zen",
+  "Colchón Muelles Ensacados | 30cm | Doble Cara | Zen Mandala Gran Hotel",
+  "Colchón Muelles Ensacados | 31cm | Doble Cara | Zen Natural",
+  "Colchón Muelles Ensacados | 30cm | Doble Cara | Zen Nirvana Gran Hotel",
+];
+
+// PRECIO TACHADO derivado del PRECIO OFERTA (Jennifer, 2026-09-23): "el
+// precio tachado lo vamos a modificar en base al precio de oferta" — el
+// descuento visible depende del ANCHO de la talla: 40% en 80/90/105
+// (y 67, el mismo tramo que ya usa 80 como sustituto en el resto de
+// reglas), 50% en 120/135/140/150, 60% en 160/180/200 ("una medida
+// superior"). Confirmado con número real (Bellagio Deluxe 90X190,
+// oferta 124,99€ → tachado 208,32€, descuento del 40%) antes de
+// implementarlo. tachado = oferta ÷ (1 − descuento).
+function tarifaTachadoDivisor(talla) {
+  const ancho = Number(String(talla || "").split("X")[0]);
+  if ([67, 80, 90, 105].includes(ancho)) return 0.60;
+  if ([120, 135, 140, 150].includes(ancho)) return 0.50;
+  if ([160, 180, 200].includes(ancho)) return 0.40;
+  return null;
+}
+
+// ESPAÑA para modelos de muelles (Jennifer, 2026-09-23): plano, precio de
+// Bezen + 5€, igual para MAISON_ES y RESTO_ES (un único precio de
+// plataforma, no depende de la comisión de cada una).
+function calcularPrecioPlataformaMuellesEs(precioBezen) {
+  const pasos = [];
+  pasos.push({ label: "Precio BEZEN", valor: precioBezen });
+  const final = round2(precioBezen + 5);
+  pasos.push({ label: "+ 5€ (plataformas España)", valor: final });
+  return { precio: final, pasos };
+}
+
+// BEZEN de Zen Nirvana SIEMPRE 15€ por encima de BEZEN de Zen Mandala
+// (Jennifer, 2026-09-23) — aunque su propia fórmula dé otro número, se
+// sobreescribe con el precio de otro modelo + una diferencia fija. El
+// desglose informativo muestra AMBOS: el precio "de fórmula" y el precio
+// final aplicado, para poder comparar.
+const TARIFA_BEZEN_REFERENCIA_MODELO = {
+  "Colchón Muelles Ensacados | 30cm | Doble Cara | Zen Nirvana Gran Hotel": {
+    modeloBase: "Colchón Muelles Ensacados | 30cm | Doble Cara | Zen Mandala Gran Hotel",
+    etiquetaBase: "Zen Mandala",
+    diferencia: 15,
+  },
+};
+
+// RESTO DE PAÍSES para modelos de muelles (Jennifer, 2026-09-23): coste+
+// envío ÷0,7 (30% margen, igual que BEZEN) ÷comisión de la plataforma que
+// corresponda (0,77 Maison / 0,80 Resto) ×1,21 IVA — SIN el margen fijo por
+// ancho de talla que sí llevan los modelos de núcleo.
+function calcularPrecioPlataformaMuellesResto(coste, envio, divisorComision) {
+  const pasos = [];
+  pasos.push({ label: "Precio de coste", valor: round2(coste) });
+  pasos.push({ label: "Precio de envío", valor: round2(envio) });
+  const suma = coste + envio;
+  pasos.push({ label: "Coste + envío", valor: round2(suma) });
+  const conMargen = suma / 0.70;
+  pasos.push({ label: "÷ 0,70 (30% margen)", valor: round2(conMargen) });
+  const conComision = conMargen / divisorComision;
+  pasos.push({ label: `÷ ${divisorComision} (comisión plataforma)`, valor: round2(conComision) });
+  const final = conComision * 1.21;
+  pasos.push({ label: "× 1,21 (IVA)", valor: round2(final) });
+  const redondeado = round2(Math.ceil(final) - 0.01);
+  pasos.push({ label: "Redondeo (.99 escala superior)", valor: redondeado });
+  return { precio: redondeado, pasos };
+}
+
+// --- Generador de .xlsx para exportar precios a plataformas (Jennifer,
+// 2026-09-23): "necesito tener este fichero en el sistema para que si
+// hacemos alguna actualización de precio, ese fichero se actualice, yo me
+// lo descargue de aquí y pueda subirlo al sitio que corresponde" — el
+// Worker no tiene ninguna librería de zip/xlsx, así que se construye el
+// .zip a mano (cabeceras ZIP local/central/EOCD + CRC32 propio) usando
+// solo APIs estándar de Workers (CompressionStream, no hace falta Node).
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC32_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+// CompressionStream("deflate") da el formato zlib (2 bytes de cabecera +
+// datos + 4 bytes de Adler32) — ZIP necesita el deflate "crudo" de en
+// medio, sin esos 6 bytes. "deflate-raw" evitaría este recorte pero no es
+// tan universal como "deflate" en todos los runtimes.
+async function deflateRawBytes(bytes) {
+  const cs = new CompressionStream("deflate");
+  const writer = cs.writable.getWriter();
+  writer.write(bytes);
+  writer.close();
+  const full = new Uint8Array(await new Response(cs.readable).arrayBuffer());
+  return full.slice(2, full.length - 4);
+}
+async function buildZip(entries) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const { name, data } of entries) {
+    const nameBuf = encoder.encode(name);
+    const compressed = await deflateRawBytes(data);
+    const crc = crc32(data);
+
+    const local = new Uint8Array(30);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0, true);
+    lv.setUint16(8, 8, true);
+    lv.setUint16(10, 0, true);
+    lv.setUint16(12, 0x21, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, compressed.length, true);
+    lv.setUint32(22, data.length, true);
+    lv.setUint16(26, nameBuf.length, true);
+    lv.setUint16(28, 0, true);
+    localParts.push(local, nameBuf, compressed);
+
+    const central = new Uint8Array(46);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true);
+    cv.setUint16(10, 8, true);
+    cv.setUint16(12, 0, true);
+    cv.setUint16(14, 0x21, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, compressed.length, true);
+    cv.setUint32(24, data.length, true);
+    cv.setUint16(28, nameBuf.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    centralParts.push(central, nameBuf);
+
+    offset += local.length + nameBuf.length + compressed.length;
+  }
+  const centralDirStart = offset;
+  const centralBuf = concatBytes(centralParts);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, centralBuf.length, true);
+  ev.setUint32(16, centralDirStart, true);
+  ev.setUint16(20, 0, true);
+  return concatBytes([...localParts, centralBuf, eocd]);
+}
+function concatBytes(chunks) {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const c of chunks) {
+    out.set(c, pos);
+    pos += c.length;
+  }
+  return out;
+}
+function xmlEscape(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+// `headers`: array de nombres de columna. `rows`: array de arrays, cada
+// celda un valor plano (texto → inlineStr, número → <v>) o, para marcar
+// una celda en amarillo (Jennifer, 2026-09-23: "necesito que de alguna
+// manera lo señales en el fichero... por ejemplo un color amarillo"),
+// `{ v: valor, highlight: true }` — usado para el precio de oferta cuando
+// NO se ha podido recalcular con Tarifas (sin fórmula para ese artículo,
+// ej. Topper V5, o modelo descatalogado como Sensei Zen) y se mantiene el
+// último precio manual conocido.
+async function buildXlsxBytes(headers, rows) {
+  const encoder = new TextEncoder();
+  const colLetter = (i) => String.fromCharCode(65 + i);
+  let sheetRows = "";
+  const headerCells = headers.map((h, i) => `<c r="${colLetter(i)}1" t="inlineStr"><is><t>${xmlEscape(h)}</t></is></c>`).join("");
+  sheetRows += `<row r="1">${headerCells}</row>`;
+  rows.forEach((row, idx) => {
+    const r = idx + 2;
+    const cells = row.map((raw, i) => {
+      const ref = `${colLetter(i)}${r}`;
+      const highlight = raw != null && typeof raw === "object" && "v" in raw;
+      const cell = highlight ? raw.v : raw;
+      const s = highlight ? ` s="1"` : "";
+      if (cell == null) return `<c r="${ref}" t="n"${s}></c>`;
+      if (typeof cell === "number") return `<c r="${ref}" t="n"${s}><v>${cell}</v></c>`;
+      return `<c r="${ref}" t="inlineStr"${s}><is><t>${xmlEscape(cell)}</t></is></c>`;
+    }).join("");
+    sheetRows += `<row r="${r}">${cells}</row>`;
+  });
+
+  const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
+  const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Precios" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+  // Estilo 0 = por defecto (sin relleno). Estilo 1 = relleno amarillo
+  // (índices de relleno 0/1 son los reservados "none"/"gray125" del
+  // formato, el 2 es el amarillo propio).
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0" applyFill="1"/></cellXfs></styleSheet>`;
+
+  return buildZip([
+    { name: "[Content_Types].xml", data: encoder.encode(contentTypes) },
+    { name: "_rels/.rels", data: encoder.encode(rootRels) },
+    { name: "xl/workbook.xml", data: encoder.encode(workbookXml) },
+    { name: "xl/_rels/workbook.xml.rels", data: encoder.encode(workbookRels) },
+    { name: "xl/worksheets/sheet1.xml", data: encoder.encode(sheetXml) },
+    { name: "xl/styles.xml", data: encoder.encode(stylesXml) },
+  ]);
 }
 
 export class InventoryStore {
@@ -1230,7 +1729,7 @@ export class InventoryStore {
   // descuentos automáticos por venta y las liberaciones al enviar un
   // pedido. Se guarda con lo justo para poder auditar quién/qué lo generó,
   // recortando a los últimos MAX_MOVEMENTS para no crecer sin límite.
-  async logMovement({ stockModel, talla, campo, delta, resultante, origen, usuario, orderNumber }) {
+  async logMovement({ stockModel, talla, campo, delta, resultante, origen, usuario, orderNumber, platform, orderRef }) {
     const movements = await this.load("movements", []);
     movements.push({
       id: crypto.randomUUID(),
@@ -1243,6 +1742,12 @@ export class InventoryStore {
       origen,
       usuario: usuario || null,
       orderNumber: orderNumber || null,
+      // Referencia real del pedido si es de un marketplace (Carrefour/
+      // Maison/Worten) — nunca "BEZEN"+número, eso es solo Shopify
+      // (Jennifer, 2026-09-21: "las referencias... respetan la referencia
+      // con la que trabaja en la propia plataforma").
+      platform: platform || null,
+      orderRef: orderRef || null,
     });
     const MAX_MOVEMENTS = 1000;
     if (movements.length > MAX_MOVEMENTS) movements.splice(0, movements.length - MAX_MOVEMENTS);
@@ -1302,6 +1807,10 @@ export class InventoryStore {
     if (resolveMatch && method === "POST") {
       return this.resolveBackorder(decodeURIComponent(resolveMatch[1]));
     }
+    const cancelarMatch = url.pathname.match(/^\/backorders\/([^/]+)\/cancelar$/);
+    if (cancelarMatch && method === "POST") {
+      return this.cancelBackorder(decodeURIComponent(cancelarMatch[1]));
+    }
     const resolveSeurMatch = url.pathname.match(/^\/backorders\/([^/]+)\/resolver-seur$/);
     if (resolveSeurMatch && method === "POST") {
       const { fecha } = await request.json();
@@ -1310,6 +1819,15 @@ export class InventoryStore {
     const undoSeurMatch = url.pathname.match(/^\/backorders\/([^/]+)\/deshacer-seur$/);
     if (undoSeurMatch && method === "POST") {
       return this.undoSeurBackorder(decodeURIComponent(undoSeurMatch[1]));
+    }
+    const alternativasMatch = url.pathname.match(/^\/backorders\/([^/]+)\/alternativas$/);
+    if (alternativasMatch && method === "GET") {
+      return this.listBackorderAlternatives(decodeURIComponent(alternativasMatch[1]));
+    }
+    const sustituirMatch = url.pathname.match(/^\/backorders\/([^/]+)\/sustituir$/);
+    if (sustituirMatch && method === "POST") {
+      const { query, mode, talla, fecha } = await request.json();
+      return this.substituteBackorder(decodeURIComponent(sustituirMatch[1]), { query, mode, talla, fecha });
     }
     const planMatch = url.pathname.match(/^\/backorders\/([^/]+)\/plan$/);
     if (planMatch && method === "POST") {
@@ -1359,8 +1877,211 @@ export class InventoryStore {
       return this.resetStock();
     }
 
+    if (url.pathname === "/admin/clear-backorders" && method === "POST") {
+      return this.clearBackorders();
+    }
+
+    if (url.pathname === "/admin/crear-pendiente-manual" && method === "POST") {
+      return this.crearPendienteManual(await request.json());
+    }
+
+    // Congelado de stock (Jennifer, 2026-09-23) — ver comentario en
+    // applyStockUsage. No expuesto en UI a propósito, solo por API,
+    // Jennifer avisa cuándo activar/desactivar.
+    if (url.pathname === "/admin/congelar-stock" && method === "POST") {
+      await this.state.storage.put("stockCongelado", true);
+      return Response.json({ ok: true, stockCongelado: true });
+    }
+    if (url.pathname === "/admin/descongelar-stock" && method === "POST") {
+      await this.state.storage.put("stockCongelado", false);
+      return Response.json({ ok: true, stockCongelado: false });
+    }
+    if (url.pathname === "/admin/stock-congelado" && method === "GET") {
+      return Response.json({ stockCongelado: await this.load("stockCongelado", false) });
+    }
+
     if (url.pathname === "/admin/backfill-proveedor" && method === "POST") {
       return this.backfillProveedor();
+    }
+
+    if (url.pathname === "/admin/add-item-to-order" && method === "POST") {
+      return this.addItemToProcessedOrder(await request.json());
+    }
+
+    if (url.pathname === "/admin/reposicion" && method === "POST") {
+      return this.crearReposicion(await request.json());
+    }
+
+    if (url.pathname === "/admin/reposicion/preview" && method === "POST") {
+      return this.resolverItemPreview(await request.json());
+    }
+
+    if (url.pathname === "/admin/reposicion/foto" && method === "POST") {
+      return this.adjuntarFotoReposicion(await request.json());
+    }
+
+    // Carga de Furniture independiente para una reposición (Jennifer,
+    // 2026-09-21: "tengo que poder sacarlo de manera independiente") — usa
+    // backorder.cargaId (ya existía, mismo campo que usa SEUR para sus
+    // propias cargas), NUNCA order.cargaId, para no atarla al estado de
+    // envío del resto del pedido original.
+    if (url.pathname === "/admin/reposicion/carga-add" && method === "POST") {
+      const { id, cargaId } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const b = backorders.find((x) => x.id === id);
+      if (!b) return Response.json({ ok: false, error: "Reposición no encontrada." }, { status: 404 });
+      if (b.cargaId) return Response.json({ ok: false, error: "Ya está en una carga." }, { status: 400 });
+      b.cargaId = cargaId;
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true });
+    }
+
+    if (url.pathname === "/admin/reposicion/carga-remove" && method === "POST") {
+      const { id } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const b = backorders.find((x) => x.id === id);
+      if (!b) return Response.json({ ok: false, error: "Reposición no encontrada." }, { status: 404 });
+      b.cargaId = null;
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true });
+    }
+
+    // El gesto comercial (almohada) sale por SEUR, no por Furniture
+    // (Jennifer, 2026-09-22) — nace "pendiente" en Proveedores > Polival y
+    // usa el mismo /backorders/:id/resolver-seur que ya usan los colchones
+    // sueltos (ver resolveSeurBackorder más abajo), así que no necesita
+    // rutas propias de carga.
+    if (url.pathname === "/admin/gesto-comercial" && method === "POST") {
+      return this.crearGestoComercial(await request.json());
+    }
+
+    // TARIFAS (Jennifer, 2026-09-22) — ver setTarifaCoste/setTarifaEnvio/
+    // setTarifaPeriodoActivo/getTarifaTabla más arriba en la clase.
+    if (url.pathname === "/tarifas/coste" && method === "POST") {
+      return this.setTarifaCoste(await request.json());
+    }
+    if (url.pathname === "/tarifas/envio" && method === "POST") {
+      return this.setTarifaEnvio(await request.json());
+    }
+    if (url.pathname === "/tarifas/periodo-activo" && method === "POST") {
+      return this.setTarifaPeriodoActivo(await request.json());
+    }
+    if (url.pathname === "/tarifas/tabla" && method === "GET") {
+      return this.getTarifaTabla(url.searchParams.get("stockModel"));
+    }
+    // Migración puntual (2026-09-24): al fusionar el 23/09 las dos fichas
+    // duplicadas de Zen Mandala en Shopify bajo un único stockModel nuevo
+    // ("...| para alojamiento"), los precios de coste/envío ya cargados de
+    // Tarifas se quedaron huérfanos bajo el stockModel ANTIGUO (con pipes,
+    // sin "para alojamiento") — Jennifer: "no se muestran los precios del
+    // modelo Zen Mandala". Renombra la clave en tarifasCoste/tarifasEnvio
+    // sin perder los datos ya cargados. No expuesta en la UI.
+    // Corrige el nombre de fichero ya guardado de un plazo (Jennifer,
+    // 2026-09-24: "quiero cambiar el nombre, y que solo aparezca
+    // MARKETPLACE-PLAZOS") — el nuevo nombre por defecto (ver
+    // cargarPlazosMarketplace) solo aplica a la próxima vez que se cargue
+    // el listado; esto corrige el ya guardado sin tener que recargarlo. No
+    // expuesto en la UI.
+    if (url.pathname === "/admin/renombrar-fichero-plazo" && method === "POST") {
+      const { plazo, filename } = await request.json();
+      if (!plazo || !filename) return Response.json({ ok: false, error: "Faltan plazo/filename." }, { status: 400 });
+      const todos = await this.load("plazosExportaciones", {});
+      if (!todos[plazo]) return Response.json({ ok: false, error: "No existe ese plazo." }, { status: 404 });
+      todos[plazo].filename = filename;
+      await this.state.storage.put("plazosExportaciones", todos);
+      return Response.json({ ok: true });
+    }
+
+    if (url.pathname === "/admin/renombrar-stockmodel-tarifa" && method === "POST") {
+      const { desde, hasta } = await request.json();
+      if (!desde || !hasta) return Response.json({ ok: false, error: "Faltan desde/hasta." }, { status: 400 });
+      let cambios = 0;
+      const tarifasCoste = await this.load("tarifasCoste", {});
+      for (const periodos of Object.values(tarifasCoste)) {
+        for (const data of Object.values(periodos)) {
+          if (data.precios && data.precios[desde] && !data.precios[hasta]) {
+            data.precios[hasta] = data.precios[desde];
+            delete data.precios[desde];
+            cambios++;
+          }
+        }
+      }
+      await this.state.storage.put("tarifasCoste", tarifasCoste);
+      const tarifasEnvio = await this.load("tarifasEnvio", {});
+      let envioCambiado = false;
+      if (tarifasEnvio[desde] && !tarifasEnvio[hasta]) {
+        tarifasEnvio[hasta] = tarifasEnvio[desde];
+        delete tarifasEnvio[desde];
+        envioCambiado = true;
+      }
+      await this.state.storage.put("tarifasEnvio", tarifasEnvio);
+      // Las filas ya cargadas de "Ficheros plataformas" y "Plazos de
+      // entrega" guardan su propio `stockModel` por fila (fijado al
+      // cargarlas) — si no se renombra aquí también, esas filas se quedan
+      // buscando coste/stock bajo el nombre viejo silenciosamente (precio
+      // congelado marcado en amarillo, o "sin stock" incorrecto en Plazos),
+      // sin ningún error visible.
+      let filasPlataforma = 0;
+      const plataformaExportaciones = await this.load("plataformaExportaciones", {});
+      for (const cfg of Object.values(plataformaExportaciones)) {
+        for (const fila of cfg.filas || []) {
+          if (fila.stockModel === desde) { fila.stockModel = hasta; filasPlataforma++; }
+        }
+      }
+      await this.state.storage.put("plataformaExportaciones", plataformaExportaciones);
+      let filasPlazos = 0;
+      const plazosExportaciones = await this.load("plazosExportaciones", {});
+      for (const cfg of Object.values(plazosExportaciones)) {
+        for (const fila of cfg.filas || []) {
+          if (fila.stockModel === desde) { fila.stockModel = hasta; filasPlazos++; }
+        }
+      }
+      await this.state.storage.put("plazosExportaciones", plazosExportaciones);
+      // Pendientes (backorders) ya creados con el `stockModel` viejo (caso
+      // real 2026-09-25: Paris/Zen Mandala "para alojamiento" — el Catálogo
+      // se corrigió el 24/09 para que esa ficha comparta el stockModel
+      // limpio con su gemela normal, pero los pendientes que YA existían de
+      // antes guardaron su propia copia del stockModel viejo al crearse y
+      // se quedaron huérfanos: no se fusionan con "Paris"/"Mandala" en
+      // pantalla y `skuDePendiente` no encuentra ficha con ese stockModel
+      // exacto, así que muestra el SKU como "—"). Sin esto, cualquier
+      // renombrado de stockModel deja pendientes antiguos rotos en
+      // silencio, igual que ya pasaba con Tarifas/Plazos.
+      let pendientesRenombrados = 0;
+      const backorders = await this.load("backorders", []);
+      for (const b of backorders) {
+        if (b.stockModel === desde) { b.stockModel = hasta; pendientesRenombrados++; }
+      }
+      if (pendientesRenombrados) await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, cambiosCoste: cambios, envioCambiado, filasPlataforma, filasPlazos, pendientesRenombrados });
+    }
+
+    // Exportación de precios a plataforma (Jennifer, 2026-09-23): el
+    // listado de SKU/columna se guarda una vez (cargarPlataformaExport) y
+    // el .xlsx se regenera en caliente con los precios actuales cada vez
+    // que se pide (exportarPlataforma) — así ella siempre descarga el
+    // fichero al día, sin que nadie tenga que volver a subir nada a mano.
+    if (url.pathname === "/tarifas/plataforma/cargar" && method === "POST") {
+      return this.cargarPlataformaExport(await request.json());
+    }
+    const exportMatch = url.pathname.match(/^\/tarifas\/plataforma\/([^/]+)\/export$/);
+    if (exportMatch && method === "GET") {
+      return this.exportarPlataforma(decodeURIComponent(exportMatch[1]));
+    }
+    if (url.pathname === "/tarifas/plataforma/listar" && method === "GET") {
+      return this.listarPlataformasExport();
+    }
+
+    // Plazos de entrega > Marketplace (Jennifer, 2026-09-23) — ver
+    // cargarPlazosMarketplace/exportarPlazosMarketplace más abajo.
+    if (url.pathname === "/plazos/marketplace/cargar" && method === "POST") {
+      return this.cargarPlazosMarketplace(await request.json());
+    }
+    if (url.pathname === "/plazos/marketplace/export" && method === "GET") {
+      return this.exportarPlazosMarketplace();
+    }
+    if (url.pathname === "/plazos/listar" && method === "GET") {
+      return this.listarPlazos();
     }
 
     if (url.pathname === "/admin/backfill-pending-decision" && method === "POST") {
@@ -1424,7 +2145,7 @@ export class InventoryStore {
     return Response.json({ ok: true, total: Object.keys(products).length });
   }
 
-  async updateFlags({ productId, exceptionFurniture, noStock, stockModel, skuPrefix, altSkuPrefixes, proveedor, referenciaTipo }) {
+  async updateFlags({ productId, exceptionFurniture, noStock, excluido, stockModel, skuPrefix, altSkuPrefixes, altTitleKeywords, proveedor, referenciaTipo }) {
     const products = await this.load("products", {});
     const entry = products[productId];
     if (!entry) return new Response("not found", { status: 404 });
@@ -1433,6 +2154,13 @@ export class InventoryStore {
     const wasNoStock = entry.noStock;
     if (exceptionFurniture !== undefined) entry.exceptionFurniture = !!exceptionFurniture;
     if (noStock !== undefined) entry.noStock = !!noStock;
+    // "Excluido" (Jennifer, 2026-09-24): para fichas duplicadas de Shopify
+    // (ej. la variante "para alojamiento" de Paris/Zen Mandala) que no se
+    // quieren borrar de Shopify pero que no deben participar nunca en
+    // búsquedas por nombre/SKU/Tarifas — evita que un mismo modelo físico
+    // con dos fichas siga dando problemas de coincidencia ambigua o de
+    // precios huérfanos como ya ha pasado dos veces. Reversible (checkbox).
+    if (excluido !== undefined) entry.excluido = !!excluido;
     if (stockModel !== undefined && stockModel.trim()) entry.stockModel = stockModel.trim();
     if (skuPrefix !== undefined && skuPrefix.trim()) {
       entry.skuPrefix = skuPrefix.trim();
@@ -1450,6 +2178,19 @@ export class InventoryStore {
       entry.altSkuPrefixes = altSkuPrefixes
         .split(",")
         .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+    }
+    // Alias de nombre libre (Jennifer, 2026-09-19, al conectar Worten): a
+    // diferencia de altSkuPrefixes (código de SKU), esto es para cuando el
+    // marketplace no manda ningún código útil y hay que reconocer el
+    // pedido por el texto del producto en portugués/otro idioma, que no
+    // siempre coincide con el nombre real del catálogo (ver
+    // findByTitleFallback en index.js) — ej. Worten dice "Extrasuave" para
+    // lo que aquí es "Toscana Deluxe".
+    if (altTitleKeywords !== undefined) {
+      entry.altTitleKeywords = altTitleKeywords
+        .split(",")
+        .map((s) => s.trim())
         .filter(Boolean);
     }
     products[productId] = entry;
@@ -1503,21 +2244,32 @@ export class InventoryStore {
   // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
   // columna. El excedente de vendidoPendiente se libera cuando el pedido
   // que lo generó se marca como enviado (ver settleShipment).
-  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, refSuffix) {
+  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, refSuffix, platform, orderRef) {
+    // Congelado de stock (Jennifer, 2026-09-23): "vamos a dar de alta las
+    // unidades... pero no quiero que se descuente nada por ahora, yo te
+    // voy a decir en qué momento vas a empezar a descontar". Mientras
+    // `stockCongelado` esté activo, la decisión de agencia/pendientes
+    // sigue funcionando exactamente igual (lee `cantidad` normal), lo
+    // único que cambia es que `cantidad` nunca baja de verdad.
+    const congelado = await this.load("stockCongelado", false);
     const key = stockKey(item.product.stockModel, item.talla);
     const row = stock[key] || { stockModel: item.product.stockModel, talla: item.talla, cantidad: 0, vendidoPendiente: 0 };
     const covered = Math.min(row.cantidad, item.qty);
-    row.cantidad -= covered;
+    if (!congelado) row.cantidad -= covered;
     if (covered > 0) {
-      await this.logMovement({
-        stockModel: item.product.stockModel,
-        talla: item.talla,
-        campo: "cantidad",
-        delta: -covered,
-        resultante: row.cantidad,
-        origen: "venta",
-        orderNumber,
-      });
+      if (!congelado) {
+        await this.logMovement({
+          stockModel: item.product.stockModel,
+          talla: item.talla,
+          campo: "cantidad",
+          delta: -covered,
+          resultante: row.cantidad,
+          origen: "venta",
+          orderNumber,
+          platform,
+          orderRef,
+        });
+      }
       // Se registra siempre el desglose de lo que ya había en stock (no
       // solo para Furniture, ver Jennifer 2026-08-26) — Furniture lo
       // necesita para ver el pedido completo, y desde 2026-09-08 el fichero
@@ -1537,6 +2289,8 @@ export class InventoryStore {
         proveedor,
         estado: "cubierto",
         recibidoFabrica: true,
+        platform,
+        orderRef,
       });
     }
     const falta = item.qty - covered;
@@ -1552,6 +2306,8 @@ export class InventoryStore {
           resultante: row.vendidoPendiente,
           origen: "venta",
           orderNumber,
+          platform,
+          orderRef,
         });
       }
       // La referencia de Polival se genera aquí (solo cuando de verdad se
@@ -1587,6 +2343,8 @@ export class InventoryStore {
         referencia,
         mercanciaFabrica,
         refSuffix,
+        platform,
+        orderRef,
       });
     }
     stock[key] = row;
@@ -1599,7 +2357,7 @@ export class InventoryStore {
   // tocar cantidad/vendidoPendiente. La referencia de Polival ya viene
   // calculada por el llamador (aquí siempre se crea el pendiente, así que
   // no hay riesgo de desperdiciar números del correlativo).
-  addNoStockBackorder(backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica) {
+  addNoStockBackorder(backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica, platform, orderRef) {
     const key = stockKey(item.product.stockModel, item.talla);
     pushBackorder(backorders, {
       id: `${orderId}-${key}`,
@@ -1616,6 +2374,8 @@ export class InventoryStore {
       needsDecision,
       referencia,
       mercanciaFabrica,
+      platform,
+      orderRef,
     });
   }
 
@@ -1645,6 +2405,8 @@ export class InventoryStore {
           resultante: row.vendidoPendiente,
           origen: "envio",
           orderNumber: b.orderNumber,
+          platform: b.platform,
+          orderRef: b.orderRef,
         });
       }
       b.estado = "servido";
@@ -1669,7 +2431,7 @@ export class InventoryStore {
     let actualizados = 0;
     for (const b of backorders) {
       if (b.proveedor) continue;
-      const match = Object.values(products).find((p) => p.stockModel === b.stockModel);
+      const match = activeProducts(products).find((p) => p.stockModel === b.stockModel);
       if (match && match.proveedor) {
         b.proveedor = match.proveedor;
         actualizados++;
@@ -1724,7 +2486,14 @@ export class InventoryStore {
   }
 
   async adjustStock({ stockModel, talla, delta, field, usuario }) {
-    const targetField = field === "pedidoProveedor" ? "pedidoProveedor" : "cantidad";
+    // "vendidoPendiente" añadido (Jennifer, 2026-09-22) para poder corregir
+    // a mano restos huérfanos de ese contador — ej. un pendiente que se
+    // reprocesó con el modelo correcto pero dejó "vendido pendiente" suelto
+    // en el modelo viejo (caso real: pedido Carrefour 76349687-A, Zen
+    // Mandala "para alojamiento" 120X190 con 1 unidad huérfana). No
+    // expuesto en la UI, solo por API — usar con cuidado, no es una acción
+    // de negocio normal.
+    const targetField = field === "pedidoProveedor" ? "pedidoProveedor" : field === "vendidoPendiente" ? "vendidoPendiente" : "cantidad";
     const stock = await this.load("stock", {});
     const key = stockKey(stockModel, talla);
     const row = stock[key] || { stockModel, talla, cantidad: 0, vendidoPendiente: 0, pedidoProveedor: 0 };
@@ -1757,12 +2526,62 @@ export class InventoryStore {
   // Mantenimiento puntual: borra un pendiente suelto (ej. quedó un registro
   // erróneo por un fallo de emparejamiento de SKU ya corregido en Catálogo,
   // o un duplicado de pruebas). No expuesto en la UI, solo por API.
+  // Pedido cancelado con un pendiente ya generado en Proveedores (Jennifer,
+  // 2026-09-16, caso BEZEN12204): NO se borra — se marca "cancelado" para
+  // guardar el rastro (cuándo, y si ya se había pedido a fábrica), y así
+  // deja de aparecer en las listas activas de Proveedores (que filtran por
+  // estado "pendiente") sin perder el historial. Ver aviso de campanita en
+  // index.js (getAvisosCancelados).
+  async cancelBackorder(id) {
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
+    entry.estado = "cancelado";
+    entry.fechaCancelado = new Date().toISOString();
+    await this.state.storage.put("backorders", backorders);
+    return Response.json(entry);
+  }
+
   async deleteBackorder(id) {
     const backorders = await this.load("backorders", []);
     const filtered = backorders.filter((b) => b.id !== id);
     const existed = filtered.length !== backorders.length;
     await this.state.storage.put("backorders", filtered);
     return Response.json({ ok: true, existed });
+  }
+
+  // Mantenimiento puntual (Jennifer, 2026-09-23, caso real Carrefour
+  // 76257042-A): un pedido con VARIOS artículos comparte un único id
+  // interno entre sus líneas — al importar, la última línea pisa a la(s)
+  // anterior(es) en `orders`, así que un artículo puede quedar sin rastro
+  // en el sistema aunque sí estuviera en el fichero real. Mientras se
+  // arregla ese fallo de fondo, esta ruta crea el pendiente a mano
+  // directamente (sin pasar por el motor de stock/agencia — Jennifer ya
+  // sabe y dice qué falta). No expuesta en UI, mismo id que generaría
+  // addNoStockBackorder si hubiera podido procesarse solo.
+  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo }) {
+    if (!orderId || !stockModel || !talla || !proveedor) {
+      return Response.json({ ok: false, error: "Faltan orderId, stockModel, talla o proveedor." }, { status: 400 });
+    }
+    const backorders = await this.load("backorders", []);
+    const key = stockKey(stockModel, talla);
+    pushBackorder(backorders, {
+      id: `${orderId}-${key}`,
+      orderId,
+      orderNumber,
+      stockModel,
+      talla,
+      tipo: tipo || "colchon",
+      cantidad: cantidad || 1,
+      orderDate,
+      esPack: false,
+      proveedor,
+      referencia: referencia || null,
+      platform,
+      orderRef,
+    });
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, id: `${orderId}-${key}` });
   }
 
   // Mantenimiento puntual: pone todo el stock a 0 y borra los pendientes de
@@ -1778,6 +2597,25 @@ export class InventoryStore {
     await this.state.storage.put("stock", stock);
     await this.state.storage.put("backorders", []);
     return Response.json({ ok: true, filas: Object.keys(stock).length });
+  }
+
+  // Mantenimiento puntual (Jennifer, 2026-09-23): "todo lo que hemos estado
+  // haciendo con los pedidos eran pruebas... esto se ha tramitado ya por
+  // otra vía... es más sencillo borrar la info y empezar de 0" — vacía
+  // Proveedores (Luso/New/Polival) + Furniture + SEUR de una vez, porque
+  // las tres pantallas son solo filtros distintos sobre `backorders`. A
+  // diferencia de resetStock(), aquí el STOCK REAL (`cantidad`) NO se toca
+  // — solo se limpia `vendidoPendiente` (huérfano sin backorder detrás) —,
+  // y los pedidos de Shopify (`inventoryProcessed`, Estado, seguimiento)
+  // tampoco se tocan a propósito, para que NO se reprocesen solos y
+  // vuelvan a generar los mismos pendientes que se acaban de borrar.
+  async clearBackorders() {
+    const totalAntes = (await this.load("backorders", [])).length;
+    await this.state.storage.put("backorders", []);
+    const stock = await this.load("stock", {});
+    for (const key of Object.keys(stock)) stock[key].vendidoPendiente = 0;
+    await this.state.storage.put("stock", stock);
+    return Response.json({ ok: true, backordersBorrados: totalAntes });
   }
 
   // Marca que el fabricante ya entregó ese colchón (aviso informativo para
@@ -1821,30 +2659,188 @@ export class InventoryStore {
     const carga = await this.getOrCreateSeurCarga(fecha);
     if (!carga) return Response.json({ ok: false, error: "Fecha de carga no válida." }, { status: 400 });
 
-    const stock = await this.load("stock", {});
-    const key = stockKey(entry.stockModel, entry.talla);
-    const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
-    const antes = row.vendidoPendiente || 0;
-    row.vendidoPendiente = Math.max(0, antes - entry.cantidad);
-    stock[key] = row;
-    await this.logMovement({
-      stockModel: entry.stockModel,
-      talla: entry.talla,
-      campo: "vendidoPendiente",
-      delta: row.vendidoPendiente - antes,
-      resultante: row.vendidoPendiente,
-      origen: "camion",
-      orderNumber: entry.orderNumber,
-    });
+    // "vendidoPendiente" solo existe para colchones (Jennifer, 2026-08-21) —
+    // un gesto comercial (almohada) nunca lo incrementó al crearse, así que
+    // no hay nada que descontar aquí (Jennifer, 2026-09-22: las almohadas de
+    // gesto comercial también salen por SEUR, reusando este mismo botón).
+    if (entry.tipo === "colchon") {
+      const stock = await this.load("stock", {});
+      const key = stockKey(entry.stockModel, entry.talla);
+      const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
+      const antes = row.vendidoPendiente || 0;
+      row.vendidoPendiente = Math.max(0, antes - entry.cantidad);
+      stock[key] = row;
+      await this.logMovement({
+        stockModel: entry.stockModel,
+        talla: entry.talla,
+        campo: "vendidoPendiente",
+        delta: row.vendidoPendiente - antes,
+        resultante: row.vendidoPendiente,
+        origen: "camion",
+        orderNumber: entry.orderNumber,
+        platform: entry.platform,
+        orderRef: entry.orderRef,
+      });
+      await this.state.storage.put("stock", stock);
+    }
 
     entry.estado = "listo-seur";
     entry.recibidoFabrica = true;
     entry.fechaRecibido = new Date().toISOString();
     entry.cargaId = carga.id;
 
-    await this.state.storage.put("stock", stock);
     await this.state.storage.put("backorders", backorders);
     return Response.json({ ok: true, entry, carga });
+  }
+
+  // ¿Ya salió la tapicería (Furniture) de este pedido? (Jennifer,
+  // 2026-09-18) — hace falta para decidir a dónde va un colchón de pack
+  // sustituido: si la carga de Furniture de ese pedido ya está cerrada, un
+  // colchón FPK se manda aparte por SEUR; si no, se deja para salir junto
+  // con la tapicería en su carga de Furniture (normal, manual).
+  async isFurnitureShipped(orderId) {
+    const id = this.env.ORDERS_STORE.idFromName("shopify");
+    const stub = this.env.ORDERS_STORE.get(id);
+    const [ordersRes, cargasRes] = await Promise.all([
+      stub.fetch("https://do/orders"),
+      stub.fetch("https://do/cargas"),
+    ]);
+    const orders = await ordersRes.json();
+    const cargas = await cargasRes.json();
+    const order = orders.find((o) => String(o.id) === String(orderId));
+    if (!order || !order.cargaId) return false;
+    const carga = cargas.find((c) => c.id === order.cargaId);
+    return !!(carga && carga.estado === "cerrada" && (carga.tipo || "furniture") === "furniture");
+  }
+
+  // A dónde va un pendiente sustituido (Jennifer, 2026-09-18, dictado
+  // turno a turno):
+  // - Colchón SUELTO (no es de pack): siempre por SEUR, con fecha a elegir.
+  // - Colchón de PACK con tipoEnvio "FPK": si la tapicería de ese pedido YA
+  //   salió por Furniture, sigue FPK -> por SEUR igual que uno suelto. Si
+  //   la tapicería todavía NO ha salido, se deja "cubierto" para que salga
+  //   junto con ella en su carga de Furniture normal (sin fecha de SEUR).
+  // - Colchón de PACK con tipoEnvio "FUR" (siempre junto): nunca por SEUR
+  //   — se deja "cubierto" para que se vea listo en el desglose de
+  //   Furniture de ese pedido, junto con el cambio de modelo hecho.
+  async decideSustitucionViaSeur(entry) {
+    if (!entry.esPack) return true;
+    if (entry.tipoEnvio === "FPK") return this.isFurnitureShipped(entry.orderId);
+    return false;
+  }
+
+  // Alternativas con stock real de la misma talla (Jennifer, 2026-09-18):
+  // para elegir el sustituto directamente desde el propio pendiente, sin
+  // tener que salir a mirar Stock a mano. Solo colchones, sueltos o de
+  // pack — no se ofrece el propio modelo que ya está pendiente. También
+  // dice si esta sustitución en concreto va a necesitar fecha de SEUR o no
+  // (ver decideSustitucionViaSeur), para que el modal de Jennifer sepa qué
+  // botones enseñar.
+  async listBackorderAlternatives(id) {
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
+    const products = await this.load("products", {});
+    const stock = await this.load("stock", {});
+    const colchonModelos = new Set(
+      Object.values(products).filter((p) => p.product_type === "Colchones").map((p) => p.stockModel)
+    );
+    const alternativas = Object.values(stock)
+      .filter((row) => row.talla === entry.talla && row.cantidad > 0 && row.stockModel !== entry.stockModel && colchonModelos.has(row.stockModel))
+      .map((row) => ({ stockModel: row.stockModel, cantidad: row.cantidad }))
+      .sort((a, b) => b.cantidad - a.cantidad);
+    const viaSeur = await this.decideSustitucionViaSeur(entry);
+    return Response.json({ talla: entry.talla, alternativas, viaSeur });
+  }
+
+  // Sustituir un pendiente de colchón (suelto o de pack) por otro modelo
+  // que SÍ hay en stock real (Jennifer, 2026-09-18): cuando al cliente se
+  // le ofrece una alternativa porque el modelo pedido no está, en vez de
+  // esperar a que llegue de fábrica. Libera el "vendido pendiente" del
+  // modelo original (ya no se va a servir con ese) y descuenta del stock
+  // REAL del modelo sustituto (nunca negativo, igual que el resto del
+  // sistema). El destino (SEUR con fecha, o "cubierto" para salir con la
+  // tapicería) lo decide decideSustitucionViaSeur.
+  async substituteBackorder(id, { query, mode, talla, fecha }) {
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
+    if (entry.estado !== "pendiente") {
+      return Response.json({ ok: false, error: "Este pendiente ya no está pendiente." }, { status: 409 });
+    }
+    if (entry.tipo !== "colchon") {
+      return Response.json({ ok: false, error: "Solo se puede sustituir un colchón." }, { status: 409 });
+    }
+    // Mismo buscador tolerante a prefijos/alias que el alta/baja rápida de
+    // Stock (resolveStockModel) — así no hace falta escribir el nombre
+    // exacto del modelo sustituto.
+    const products = await this.load("products", {});
+    const stockModel = resolveStockModel(query, mode, products);
+    if (!stockModel) {
+      return Response.json({ ok: false, error: "No se ha encontrado ningún modelo que coincida con \"" + query + "\"." }, { status: 404 });
+    }
+    const tallaNorm = normalizeTalla(talla) || (talla || "").trim().toUpperCase();
+    if (!tallaNorm) {
+      return Response.json({ ok: false, error: "Indica una talla válida." }, { status: 400 });
+    }
+    talla = tallaNorm;
+
+    const viaSeur = await this.decideSustitucionViaSeur(entry);
+    let carga = null;
+    if (viaSeur) {
+      carga = await this.getOrCreateSeurCarga(fecha);
+      if (!carga) return Response.json({ ok: false, error: "Fecha de carga no válida." }, { status: 400 });
+    }
+
+    const congelado = await this.load("stockCongelado", false);
+    const stock = await this.load("stock", {});
+
+    const oldKey = stockKey(entry.stockModel, entry.talla);
+    const oldRow = stock[oldKey];
+    if (oldRow) {
+      const antesOld = oldRow.vendidoPendiente || 0;
+      oldRow.vendidoPendiente = Math.max(0, antesOld - entry.cantidad);
+      stock[oldKey] = oldRow;
+      await this.logMovement({
+        stockModel: entry.stockModel, talla: entry.talla, campo: "vendidoPendiente",
+        delta: oldRow.vendidoPendiente - antesOld, resultante: oldRow.vendidoPendiente,
+        origen: "sustitucion", orderNumber: entry.orderNumber,
+        platform: entry.platform, orderRef: entry.orderRef,
+      });
+    }
+
+    const newKey = stockKey(stockModel, talla);
+    const newRow = stock[newKey] || { stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
+    const antesNew = newRow.cantidad;
+    if (!congelado) newRow.cantidad = Math.max(0, newRow.cantidad - entry.cantidad);
+    stock[newKey] = newRow;
+    await this.logMovement({
+      stockModel, talla, campo: "cantidad",
+      delta: newRow.cantidad - antesNew, resultante: newRow.cantidad,
+      origen: "sustitucion", orderNumber: entry.orderNumber,
+      platform: entry.platform, orderRef: entry.orderRef,
+    });
+
+    entry.stockModelOriginal = entry.stockModel;
+    entry.tallaOriginal = entry.talla;
+    entry.stockModel = stockModel;
+    entry.talla = talla;
+    entry.recibidoFabrica = true;
+    entry.fechaRecibido = new Date().toISOString();
+    if (viaSeur) {
+      entry.estado = "listo-seur";
+      entry.cargaId = carga.id;
+    } else {
+      // Pack con FUR, o FPK cuya tapicería todavía no ha salido: se deja
+      // "cubierto" (disponible) — no va a SEUR, sale con la tapicería en
+      // su carga de Furniture normal, y el desglose de ese pedido en
+      // Furniture ya lo mostrará con el modelo sustituto.
+      entry.estado = "cubierto";
+    }
+
+    await this.state.storage.put("stock", stock);
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, entry, carga, viaSeur });
   }
 
   // El albarán decía que venía, pero al descargar el camión falta ese
@@ -1863,21 +2859,28 @@ export class InventoryStore {
       return Response.json({ ok: false, error: "Este pendiente no está preparado para SEUR." }, { status: 409 });
     }
 
-    const stock = await this.load("stock", {});
-    const key = stockKey(entry.stockModel, entry.talla);
-    const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
-    const antes = row.vendidoPendiente || 0;
-    row.vendidoPendiente = antes + entry.cantidad;
-    stock[key] = row;
-    await this.logMovement({
-      stockModel: entry.stockModel,
-      talla: entry.talla,
-      campo: "vendidoPendiente",
-      delta: entry.cantidad,
-      resultante: row.vendidoPendiente,
-      origen: "camion",
-      orderNumber: entry.orderNumber,
-    });
+    // Igual que en resolveSeurBackorder: "vendidoPendiente" solo existe para
+    // colchones (Jennifer, 2026-09-22, gestos comerciales de almohada).
+    if (entry.tipo === "colchon") {
+      const stock = await this.load("stock", {});
+      const key = stockKey(entry.stockModel, entry.talla);
+      const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
+      const antes = row.vendidoPendiente || 0;
+      row.vendidoPendiente = antes + entry.cantidad;
+      stock[key] = row;
+      await this.logMovement({
+        stockModel: entry.stockModel,
+        talla: entry.talla,
+        campo: "vendidoPendiente",
+        delta: entry.cantidad,
+        resultante: row.vendidoPendiente,
+        origen: "camion",
+        orderNumber: entry.orderNumber,
+        platform: entry.platform,
+        orderRef: entry.orderRef,
+      });
+      await this.state.storage.put("stock", stock);
+    }
 
     entry.estado = "pendiente";
     entry.cargaId = null;
@@ -1885,7 +2888,6 @@ export class InventoryStore {
     entry.fechaRecibido = null;
     entry.refSuffix = nextRefSuffix(entry.refSuffix);
 
-    await this.state.storage.put("stock", stock);
     await this.state.storage.put("backorders", backorders);
     return Response.json({ ok: true, entry });
   }
@@ -1947,7 +2949,7 @@ export class InventoryStore {
   // Proveedores para no perder el rastro, se cierran del todo solo cuando
   // el pedido del cliente se marca enviado (settleShipment), igual que
   // siempre.
-  async markOrdered({ ids, unmark }) {
+  async markOrdered({ ids, unmark, sinFecha }) {
     const backorders = await this.load("backorders", []);
     const set = new Set(ids || []);
     let marcados = 0;
@@ -1955,7 +2957,12 @@ export class InventoryStore {
     for (const b of backorders) {
       if (!set.has(b.id)) continue;
       b.pedidoGenerado = !unmark;
-      b.fechaPedidoFabrica = unmark ? null : fecha;
+      // `sinFecha` (Jennifer, 2026-09-23): marcar "pedido a fábrica" SIN
+      // fecha a propósito, para los pendientes que ella pide ya por otra
+      // vía distinta al PDF normal — así puede distinguir de un vistazo
+      // los marcados a mano de los que salgan del proceso automático
+      // (esos sí llevan fecha, como siempre).
+      b.fechaPedidoFabrica = (unmark || sinFecha) ? null : fecha;
       marcados++;
     }
     if (marcados > 0) await this.state.storage.put("backorders", backorders);
@@ -2013,7 +3020,700 @@ export class InventoryStore {
     return Response.json(entry);
   }
 
-  async processSale({ orderId, orderNumber, items, force, orderDate, services, paymentStatus, seurSplitDecision }) {
+  // Mantenimiento puntual (Jennifer, 2026-09-18, caso real BEZEN12212: las
+  // almohadas de regalo no se procesaban hasta ahora): añade UN artículo
+  // suelto a un pedido que YA se procesó, sin volver a tocar lo que ya se
+  // descontó — a diferencia de force-process (que reprocesa todo el pedido
+  // y duplicaría el descuento de los artículos ya resueltos). Reusa
+  // resolveItem/applyStockUsage/addNoStockBackorder tal cual, para un solo
+  // item — mismo cálculo de stock/referencia que en un pedido normal.
+  async addItemToProcessedOrder({ orderId, orderNumber, platform, orderRef, orderDate, item, esPack, colorOverride, tallaOverride, services }) {
+    const products = await this.load("products", {});
+    const resolved = resolveItem(item, products);
+    if (resolved.tipo === "pack" || resolved.tipo === "desconocido") {
+      return Response.json({ ok: false, error: "No se ha podido resolver este artículo contra el Catálogo." }, { status: 400 });
+    }
+    // Un componente de pack (canapé/cabecero) que se añade a mano no pasa
+    // por resolvePackSku, así que el color/talla que calcularía resolveItem
+    // para un Cabecero SUELTO (formato "Cama X - Medida final Ycm", ver
+    // parseCabeceroVariant) no vale aquí dentro de un pack — se puede
+    // forzar el valor correcto explícitamente (Jennifer, 2026-09-19, caso
+    // real BEZEN12207 y similares).
+    if (colorOverride !== undefined) resolved.color = colorOverride;
+    if (tallaOverride !== undefined) resolved.talla = tallaOverride;
+    const stock = await this.load("stock", {});
+    const backorders = await this.load("backorders", []);
+    const proveedor = resolved.product.proveedor || null;
+    const isStockTracked = STOCK_TYPES.has(resolved.tipo);
+
+    if (!isStockTracked || resolved.product.noStock) {
+      if (!proveedor) {
+        return Response.json({ ok: false, error: "Este artículo no tiene proveedor asignado en el Catálogo." }, { status: 400 });
+      }
+      let referencia = null;
+      if (proveedor === "POLIVAL") {
+        const numero = await nextReferenciaNumero(this.state);
+        const built = buildReferencia(numero, resolved.product.referenciaTipo, resolved.color);
+        referencia = built.referencia;
+      }
+      // Igual que hace el motor normal (processSale) para canapés/cabeceros
+      // de Polival — sin esto, un componente de pack añadido a mano se
+      // quedaría con "Mercancía para pedir a fábrica" en blanco.
+      let mercanciaFabrica = null;
+      if (proveedor === "POLIVAL" && resolved.product.product_type === "Canapé") {
+        const built = buildCanapeMercancia(resolved.product.title, resolved.color, resolved.talla, services || "");
+        mercanciaFabrica = built.texto;
+      } else if (proveedor === "POLIVAL" && resolved.product.product_type === "Cabecero") {
+        const built = buildCabeceroMercancia(resolved.product.title, resolved.color, resolved.talla, "");
+        mercanciaFabrica = built.texto;
+      }
+      this.addNoStockBackorder(backorders, resolved, orderId, orderNumber, !!esPack, orderDate, proveedor, false, referencia, mercanciaFabrica, platform, orderRef);
+      await this.state.storage.put("backorders", backorders);
+    } else {
+      await this.applyStockUsage(stock, backorders, resolved, orderId, orderNumber, !!esPack, orderDate, proveedor, false, "", platform, orderRef);
+      await this.state.storage.put("stock", stock);
+      await this.state.storage.put("backorders", backorders);
+    }
+    return Response.json({ ok: true });
+  }
+
+  // Preview de resolución de un artículo (Jennifer, 2026-09-21): igual que
+  // resolveItem, pero sin crear ningún pendiente — solo para que index.js
+  // pueda calcular el desglose real de piezas físicas (descripcionesBackorder,
+  // las mismas reglas que usa la exportación a Furniture) antes de que
+  // Jennifer confirme la reposición.
+  async resolverItemPreview({ item }) {
+    const products = await this.load("products", {});
+    const resolved = resolveItem(item, products);
+    if (resolved.tipo === "pack" || resolved.tipo === "desconocido") {
+      return Response.json({ ok: false, error: "No se ha podido resolver este artículo contra el Catálogo." }, { status: 400 });
+    }
+    return Response.json({
+      ok: true,
+      stockModel: resolved.product.stockModel,
+      talla: resolved.talla,
+      color: resolved.color,
+      tipo: resolved.tipo,
+    });
+  }
+
+  // Reposición de una pieza rota (Jennifer, 2026-09-21, caso real: canapé
+  // de 3 piezas, una llega rota, hay que pedirle a Polival solo esa pieza
+  // y que acabe en Furniture cuando llegue). A diferencia de
+  // addItemToProcessedOrder, para tapicería/cabecero/almohada SIEMPRE se
+  // trata como pedido nuevo a proveedor — nunca descuenta stock real
+  // (una reposición de garantía no es una venta nueva). `item` es el
+  // artículo REAL del pedido (elegido en un desplegable en el cliente, con
+  // su productId real) — se resuelve con resolveItem tal cual, igual que
+  // addItemToProcessedOrder, para heredar gratis el mismo cálculo de
+  // color/talla por tipo de producto (incluido el caso especial de
+  // Cabecero).
+  //
+  // Cuando la reposición es de un COLCHÓN (Jennifer, 2026-09-22), el
+  // comportamiento es distinto en dos aspectos: (1) hay que elegir agencia
+  // — SEUR (el colchón se devolvió mal por SEUR, solo hay que reenviarlo)
+  // o FURNITURE (incidencia real, puede hacer falta recoger el colchón
+  // dañado a la vez que se entrega el nuevo — SEUR no puede hacer
+  // recogidas); (2) en ambos casos SÍ se comprueba el stock real primero
+  // (a diferencia de tapicería): si hay, se descuenta; si no, se genera
+  // igualmente un pendiente a Luso/New. `agenciaReposicion` decide dónde
+  // aparece: SEUR usa el mismo botón "Preparar para SEUR" que un colchón
+  // suelto normal (ver esColchonSeur en index.js); FURNITURE usa la línea
+  // independiente de Furniture, igual que una reposición de tapicería.
+  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino }) {
+    const products = await this.load("products", {});
+    const resolved = resolveItem(item, products);
+    if (resolved.tipo === "pack" || resolved.tipo === "desconocido") {
+      return Response.json({ ok: false, error: "No se ha podido resolver este artículo contra el Catálogo." }, { status: 400 });
+    }
+    const { product, talla, color, tipo } = resolved;
+    const proveedor = product.proveedor || null;
+    if (!proveedor) {
+      return Response.json({ ok: false, error: "Este artículo no tiene proveedor asignado en el Catálogo." }, { status: 400 });
+    }
+    if (tipo === "colchon" && agenciaReposicion !== "SEUR" && agenciaReposicion !== "FURNITURE") {
+      return Response.json({ ok: false, error: "Falta indicar si el colchón sale por SEUR o por FURNITURE." }, { status: 400 });
+    }
+
+    // Referencia propia de reposición (Jennifer, 2026-09-21) — nunca el
+    // correlativo/letra normal de Polival (MR/ASTRA/FUR...), siempre
+    // "I-001", "I-002"... sea cual sea el modelo o el proveedor.
+    const referencia = proveedor === "POLIVAL" ? await nextReposicionReferencia(this.state) : null;
+
+    let mercanciaFabrica = null;
+    if (product.product_type === "Canapé") {
+      mercanciaFabrica = buildCanapeMercancia(product.title, color, talla, "").texto || null;
+    } else if (product.product_type === "Cabecero") {
+      mercanciaFabrica = buildCabeceroMercancia(product.title, color, talla, "").texto || null;
+    }
+    if (!mercanciaFabrica) {
+      mercanciaFabrica = product.stockModel + (talla ? " - MEDIDA: " + talla : "") + (color ? " - COLOR: " + color : "");
+    }
+
+    // Stock real solo para colchones (Jennifer, 2026-09-22) — cantidad
+    // siempre 1 en una reposición, así que es binario: o hay una unidad en
+    // el fondo común y se descuenta en silencio, o no la hay y se deja el
+    // texto por defecto para pedirla a Luso/New (igual que cualquier
+    // pendiente normal de colchón suelto).
+    let recibidoFabrica = false;
+    if (tipo === "colchon") {
+      const congelado = await this.load("stockCongelado", false);
+      const stock = await this.load("stock", {});
+      const key = stockKey(product.stockModel, talla);
+      const row = stock[key] || { stockModel: product.stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
+      if (row.cantidad > 0) {
+        if (!congelado) {
+          row.cantidad -= 1;
+          stock[key] = row;
+          await this.state.storage.put("stock", stock);
+          await this.logMovement({
+            stockModel: product.stockModel, talla, campo: "cantidad", delta: -1, resultante: row.cantidad,
+            origen: "reposicion", orderNumber, platform, orderRef,
+          });
+        }
+        mercanciaFabrica = "REPOSICIÓN — ya en stock, no hace falta pedir a fábrica";
+        // Si va por Furniture y ya lo tenemos en el almacén, no hace falta
+        // esperar a "Marcar recibido" — está físicamente disponible ya.
+        recibidoFabrica = agenciaReposicion === "FURNITURE";
+      }
+    }
+
+    if (piezaTexto) mercanciaFabrica += " · PIEZA A REPONER: " + piezaTexto;
+
+    // "Modelo" de la reposición: la PIEZA elegida (ej. "TAPA"), no el
+    // nombre completo del canapé (Jennifer, 2026-09-21) — medida y color se
+    // conservan igual, vienen del artículo real resuelto arriba. Solo tiene
+    // sentido para Canapé/Base, que de verdad se descomponen en piezas
+    // físicas distintas (TAPA/CAJÓN/FONDO, BASE/PATAS) — para cabecero,
+    // colchón, almohada, topper o protector NO hay una pieza más pequeña
+    // que reponer: "parte" ahí solo repetiría la categoría genérica
+    // (COLCHÓN/CABECERO...) y se perdería el modelo real, así que se
+    // ignora y se mantiene el nombre completo del artículo.
+    const tieneDesglosePiezas = product.product_type === "Canapé" || product.stockModel.toLowerCase().includes("base");
+    const stockModelFinal = (tieneDesglosePiezas && parte) ? parte : product.stockModel;
+
+    const backorders = await this.load("backorders", []);
+    const id = crypto.randomUUID();
+    pushBackorder(backorders, {
+      id,
+      orderId, orderNumber,
+      stockModel: stockModelFinal,
+      // Fecha de HOY, no la del pedido original (Jennifer, 2026-09-22): una
+      // reposición puede pedirse semanas después de la venta, y Polival/New/
+      // Furniture ordenan sus listas de pendientes por esta fecha — si se
+      // usara la del pedido, una reposición de un pedido antiguo se colaría
+      // al fondo del listado y se quedaría "traspapelada" en vez de
+      // aparecer arriba, recién añadida. orderDate (recibido del cliente)
+      // se ignora a propósito para este campo.
+      talla, color, tipo, cantidad: 1, orderDate: new Date().toISOString(),
+      esPack: false, proveedor, needsDecision: false, referencia, mercanciaFabrica,
+      platform, orderRef, reposicion: true, piezaTexto: piezaTexto || "",
+      recibidoFabrica,
+      agenciaReposicion: tipo === "colchon" ? agenciaReposicion : null,
+      recogida: tipo === "colchon" && agenciaReposicion === "FURNITURE" ? !!recogida : false,
+      recogidaDestino: tipo === "colchon" && agenciaReposicion === "FURNITURE" && recogida ? (recogidaDestino || null) : null,
+    });
+    await this.state.storage.put("backorders", backorders);
+    // Devuelve el id (Jennifer, 2026-09-21) — hace falta para poder subir
+    // fotos justificando el motivo justo después de crear la reposición
+    // (ver /admin/reposicion/foto).
+    return Response.json({ ok: true, id });
+  }
+
+  // Adjuntar foto(s) a una reposición ya creada (Jennifer, 2026-09-21):
+  // guarda solo la clave de R2 en el backorder — el binario vive en el
+  // bucket, nunca en Durable Object storage.
+  async adjuntarFotoReposicion({ id, key }) {
+    const backorders = await this.load("backorders", []);
+    const b = backorders.find((x) => x.id === id);
+    if (!b) return Response.json({ ok: false, error: "Reposición no encontrada." }, { status: 404 });
+    b.fotos = [...(b.fotos || []), key];
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, fotos: b.fotos });
+  }
+
+  // Gesto comercial (Jennifer, 2026-09-22): pedido ya entregado con algún
+  // daño donde no compensa gestionar el cambio de la pieza, o retraso — se
+  // compensa con 1-2 almohadas de regalo (cualquiera de los 4 modelos que
+  // se trabajan). A diferencia de crearReposicion (que SIEMPRE pide nuevo a
+  // proveedor), aquí SÍ se descuenta de stock real si lo hay, igual que una
+  // venta normal — Jennifer no quiere pedir almohadas nuevas a Polival si ya
+  // las tenemos en el almacén. Si falta alguna unidad, esa parte sí genera
+  // un pendiente a Polival, con referencia propia "GC-XXX" (nunca la
+  // numeración normal de almohadas, para reconocerlo a simple vista).
+  // Al ser almohadas, salen por SEUR — no por Furniture (Jennifer,
+  // 2026-09-22, corrigió mi primera versión) — así que nace siempre
+  // "pendiente" con proveedor asignado, para que aparezca en Proveedores >
+  // Polival con el mismo botón "Preparar para SEUR" que ya usan los
+  // colchones sueltos (ver resolveSeurBackorder). Cuando ya está cubierta
+  // con stock real, ese botón queda disponible de inmediato — no hace falta
+  // esperar ni marcar "recibido" primero.
+  async crearGestoComercial({ orderId, orderNumber, platform, orderRef, orderDate, productId, talla, cantidad, motivo }) {
+    const cantidadNum = Number(cantidad);
+    if (!Number.isInteger(cantidadNum) || cantidadNum < 1 || cantidadNum > 2) {
+      return Response.json({ ok: false, error: "La cantidad debe ser 1 o 2." }, { status: 400 });
+    }
+    const products = await this.load("products", {});
+    const product = products[productId];
+    if (!product || product.product_type !== "Almohada") {
+      return Response.json({ ok: false, error: "Elige una almohada real del Catálogo." }, { status: 400 });
+    }
+    const tallaNorm = normalizeTalla(talla) || String(talla || "").trim();
+    if (!tallaNorm) return Response.json({ ok: false, error: "Falta la medida." }, { status: 400 });
+
+    const congelado = await this.load("stockCongelado", false);
+    const stock = await this.load("stock", {});
+    const key = stockKey(product.stockModel, tallaNorm);
+    const row = stock[key] || { stockModel: product.stockModel, talla: tallaNorm, cantidad: 0, vendidoPendiente: 0 };
+    const covered = Math.min(row.cantidad, cantidadNum);
+    if (!congelado) row.cantidad -= covered;
+    if (covered > 0) {
+      if (!congelado) await this.logMovement({
+        stockModel: product.stockModel,
+        talla: tallaNorm,
+        campo: "cantidad",
+        delta: -covered,
+        resultante: row.cantidad,
+        origen: "gesto_comercial",
+        orderNumber,
+        platform,
+        orderRef,
+      });
+    }
+    stock[key] = row;
+
+    const falta = cantidadNum - covered;
+    let referencia = null;
+    let mercanciaFabrica;
+    if (falta > 0) {
+      referencia = await nextGestoComercialReferencia(this.state);
+      const built = buildSimpleMercancia(product.title, tallaNorm);
+      mercanciaFabrica = (built.texto || product.stockModel) + ` · GESTO COMERCIAL (${falta} ud. a pedir)`;
+    } else {
+      mercanciaFabrica = "GESTO COMERCIAL — ya en stock, no hace falta pedir a fábrica";
+    }
+
+    const backorders = await this.load("backorders", []);
+    const id = crypto.randomUUID();
+    pushBackorder(backorders, {
+      id,
+      orderId, orderNumber,
+      stockModel: product.stockModel,
+      talla: tallaNorm,
+      color: "",
+      tipo: "almohada",
+      cantidad: cantidadNum,
+      // Fecha de HOY, no la del pedido original (Jennifer, 2026-09-22) —
+      // mismo motivo que en crearReposicion: un gesto comercial puede
+      // registrarse mucho después de la venta, y si se ordenara por la
+      // fecha del pedido se quedaría traspapelado al fondo de Polival/New/
+      // Furniture en vez de aparecer arriba, recién añadido.
+      orderDate: new Date().toISOString(),
+      esPack: false,
+      // Siempre POLIVAL (aunque ya esté cubierta con stock) para que la fila
+      // aparezca en Proveedores > Polival y desde ahí se pueda "Preparar
+      // para SEUR" — nunca queda huérfana sin pestaña donde mostrarse.
+      proveedor: product.proveedor || "POLIVAL",
+      needsDecision: false,
+      referencia,
+      mercanciaFabrica,
+      estado: "pendiente",
+      recibidoFabrica: false,
+      platform, orderRef,
+      gestoComercial: true,
+      piezaTexto: motivo || "",
+    });
+    await this.state.storage.put("stock", stock);
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, id, referencia, cubiertoConStock: covered });
+  }
+
+  // === TARIFAS (Jennifer, 2026-09-22) ===
+  // Guarda (o amplía, nunca reemplaza el proveedor entero) una tarifa de
+  // coste de un proveedor para un periodo concreto (ej. "New Mattress" /
+  // "2026-07" / "Julio 2026"). `precios` = { stockModel: { talla: precio } }
+  // — se hace merge por stockModel+talla, así que subir una tarifa nueva no
+  // borra otros modelos ya cargados en ese mismo periodo.
+  async setTarifaCoste({ proveedor, periodo, label, precios }) {
+    if (!proveedor || !periodo || !precios) {
+      return Response.json({ ok: false, error: "Faltan proveedor, periodo o precios." }, { status: 400 });
+    }
+    const tarifas = await this.load("tarifasCoste", {});
+    if (!tarifas[proveedor]) tarifas[proveedor] = {};
+    if (!tarifas[proveedor][periodo]) tarifas[proveedor][periodo] = { label: label || periodo, precios: {} };
+    if (label) tarifas[proveedor][periodo].label = label;
+    for (const [stockModel, porTalla] of Object.entries(precios)) {
+      if (!tarifas[proveedor][periodo].precios[stockModel]) tarifas[proveedor][periodo].precios[stockModel] = {};
+      Object.assign(tarifas[proveedor][periodo].precios[stockModel], porTalla);
+    }
+    await this.state.storage.put("tarifasCoste", tarifas);
+    return Response.json({ ok: true });
+  }
+
+  // Precio de envío por modelo+talla+país (Jennifer, 2026-09-22, tabla de
+  // transporte) — `precios` = { stockModel: { talla: { ES, FR, IT, DE } } },
+  // también con merge, nunca reemplazo entero.
+  async setTarifaEnvio({ precios }) {
+    if (!precios) return Response.json({ ok: false, error: "Faltan precios." }, { status: 400 });
+    const envios = await this.load("tarifasEnvio", {});
+    for (const [stockModel, porTalla] of Object.entries(precios)) {
+      if (!envios[stockModel]) envios[stockModel] = {};
+      for (const [talla, porPais] of Object.entries(porTalla)) {
+        envios[stockModel][talla] = { ...(envios[stockModel][talla] || {}), ...porPais };
+      }
+    }
+    await this.state.storage.put("tarifasEnvio", envios);
+    return Response.json({ ok: true });
+  }
+
+  // Qué periodo de coste usar como "vigente" para un modelo concreto
+  // (Jennifer, 2026-09-22: por defecto el más reciente que suba, pero
+  // Toscana Deluxe usa Mayo porque Julio no lo incluye — excepción a mano
+  // por modelo, no automática).
+  async setTarifaPeriodoActivo({ stockModel, proveedor, periodo }) {
+    if (!stockModel || !proveedor || !periodo) {
+      return Response.json({ ok: false, error: "Faltan stockModel, proveedor o periodo." }, { status: 400 });
+    }
+    const activos = await this.load("tarifasPeriodoActivo", {});
+    activos[stockModel] = { proveedor, periodo };
+    await this.state.storage.put("tarifasPeriodoActivo", activos);
+    return Response.json({ ok: true });
+  }
+
+  // Calcula las 8 columnas de venta (BEZEN, MAISON/RESTO × ES/FR/IT, RESTO
+  // AL) para un modelo+talla, con el desglose paso a paso de cada una
+  // (Jennifer, 2026-09-22: "quiero poder chequear cómo has sacado ese
+  // cálculo"). El coste se busca en el proveedor+periodo "vigente" de ese
+  // modelo (ver setTarifaPeriodoActivo) — si no hay override, el periodo
+  // más reciente (orden alfabético de "AAAA-MM") del proveedor del
+  // Catálogo. El envío se busca por país en tarifasEnvio.
+  async calcularTarifaModelo(stockModel, talla) {
+    // Modelo descatalogado que usa el precio de OTRO modelo mientras sigue
+    // apareciendo en algún fichero de plataforma (Jennifer, 2026-09-23,
+    // caso real "Termorregulable con Grafeno": "ya no trabajamos ese
+    // colchón... ponle el mismo precio que al 4D momentáneamente hasta que
+    // lo quitemos del catálogo"). Delega el cálculo entero al modelo base
+    // y solo cambia el `stockModel` de vuelta + una nota en el desglose.
+    const sustitutoCompleto = TARIFA_MODELO_DESCATALOGADO_USA_PRECIO_DE[stockModel];
+    if (sustitutoCompleto) {
+      const base = await this.calcularTarifaModelo(sustitutoCompleto.modelo, talla);
+      if (base.error) return { ...base, stockModel };
+      const columnas = {};
+      for (const [key, col] of Object.entries(base.columnas)) {
+        const pasos = col.pasos.length
+          ? [{ ...col.pasos[0], label: col.pasos[0].label + ` (precio igual a ${sustitutoCompleto.modelo}, ${sustitutoCompleto.motivo})` }, ...col.pasos.slice(1)]
+          : col.pasos;
+        columnas[key] = { ...col, pasos };
+      }
+      return { ...base, stockModel, columnas, precioIgualAModelo: sustitutoCompleto.modelo };
+    }
+
+    const products = await this.load("products", {});
+    const product = activeProducts(products).find((p) => p.stockModel === stockModel);
+    if (!product) return { error: "Modelo no encontrado en el Catálogo." };
+    const proveedorProducto = product.proveedor;
+
+    const tarifasCoste = await this.load("tarifasCoste", {});
+    const activos = await this.load("tarifasPeriodoActivo", {});
+    const override = activos[stockModel];
+    const proveedor = override ? override.proveedor : proveedorProducto;
+    const porProveedor = tarifasCoste[proveedor] || {};
+    let periodo = override ? override.periodo : null;
+    if (!periodo) {
+      const periodos = Object.keys(porProveedor).sort();
+      periodo = periodos.length ? periodos[periodos.length - 1] : null;
+    }
+    const tarifaPeriodo = periodo ? porProveedor[periodo] : null;
+    const preciosModelo = (tarifaPeriodo && tarifaPeriodo.precios[stockModel]) || {};
+    let coste = preciosModelo[talla];
+    let costeSustituto = null;
+    // Sustituto de talla si no hay coste real (ver TARIFA_SUSTITUTOS_* más
+    // arriba) — primero el específico de este modelo, luego el general.
+    if (coste == null) {
+      const sustituto = (TARIFA_SUSTITUTOS_POR_MODELO[stockModel] || {})[talla] || sustitutoGeneralDeTalla(talla);
+      if (sustituto && preciosModelo[sustituto] != null) {
+        coste = preciosModelo[sustituto];
+        costeSustituto = sustituto;
+      }
+    }
+    if (coste == null) {
+      return { stockModel, talla, error: "Sin precio de coste guardado para esta talla (proveedor " + (proveedor || "?") + (periodo ? ", " + periodo : "") + ")." };
+    }
+
+    const paises = ["ES", "FR", "IT", "DE"];
+    let envios;
+    let faltaEnvio = [];
+    let envioSustituto = null;
+    let envioFijo = null;
+    if (TARIFA_ENVIO_FIJO_MODELO[stockModel] != null) {
+      // Solo sale por FURNITURE (Jennifer, 2026-09-23) — envío fijo, igual
+      // para cualquier país/talla, no viene en la tabla de transporte (esa
+      // es de SEUR).
+      envioFijo = TARIFA_ENVIO_FIJO_MODELO[stockModel];
+      envios = { ES: envioFijo, FR: envioFijo, IT: envioFijo, DE: envioFijo };
+    } else {
+      const tarifasEnvio = await this.load("tarifasEnvio", {});
+      envios = (tarifasEnvio[stockModel] && tarifasEnvio[stockModel][talla]) || {};
+      faltaEnvio = paises.filter((p) => envios[p] == null);
+      // 1) Talla hermana del MISMO modelo (ver TARIFA_SUSTITUTOS_GENERALES).
+      if (faltaEnvio.length) {
+        const tallaSustituta = sustitutoGeneralDeTalla(talla);
+        const enviosTallaSustituta = tallaSustituta ? ((tarifasEnvio[stockModel] && tarifasEnvio[stockModel][tallaSustituta]) || {}) : {};
+        if (tallaSustituta && !paises.some((p) => enviosTallaSustituta[p] == null)) {
+          envios = enviosTallaSustituta;
+          faltaEnvio = [];
+          envioSustituto = "sustituto de la talla " + tallaSustituta + " de este mismo modelo, sin envío real para " + talla;
+        }
+      }
+      // 2) Modelo hermano, misma talla (ver TARIFA_ENVIO_SUSTITUTO_MODELO).
+      if (faltaEnvio.length) {
+        const modeloSustituto = TARIFA_ENVIO_SUSTITUTO_MODELO[stockModel];
+        const enviosSustituto = modeloSustituto ? ((tarifasEnvio[modeloSustituto] && tarifasEnvio[modeloSustituto][talla]) || {}) : {};
+        if (modeloSustituto && !paises.some((p) => enviosSustituto[p] == null)) {
+          envios = enviosSustituto;
+          faltaEnvio = [];
+          envioSustituto = "sustituto de " + modeloSustituto + ", sin precio real para este modelo";
+        }
+      }
+    }
+    if (faltaEnvio.length) {
+      return { stockModel, talla, coste, costeProveedor: proveedor, costePeriodo: periodo, envios, error: "Sin precio de envío guardado para: " + faltaEnvio.join(", ") + "." };
+    }
+
+    // Modelos de muelles (Jennifer, 2026-09-23): esquema de precios distinto
+    // — BEZEN usa 32% de margen (÷0,68, no ÷0,70 como núcleo), España es
+    // plano (BEZEN+5€, igual para Maison y Resto) y el resto de países usa
+    // ÷0,70 (el margen del 30% de siempre) + comisión de plataforma, SIN
+    // margen fijo por ancho.
+    const esMuelles = TARIFA_MODELOS_MUELLES.includes(stockModel);
+    const bezenResult = esMuelles
+      ? calcularPrecioBezen(coste, envios.ES, 0.68, "32%")
+      : calcularPrecioBezen(coste, envios.ES);
+
+    // BEZEN de Zen Nirvana = BEZEN de Zen Mandala + 15€, siempre (ver
+    // TARIFA_BEZEN_REFERENCIA_MODELO) — se muestra el precio "de fórmula"
+    // Y el final aplicado en el propio desglose, y el final aplicado es el
+    // que se usa de ahí en adelante (incluida la derivación ES = BEZEN+5).
+    const bezenOverride = TARIFA_BEZEN_REFERENCIA_MODELO[stockModel];
+    if (bezenOverride) {
+      const base = await this.calcularTarifaModelo(bezenOverride.modeloBase, talla);
+      if (base && base.columnas && base.columnas.BEZEN && base.columnas.BEZEN.precio != null) {
+        const precioFormula = bezenResult.precio;
+        const precioFinal = round2(base.columnas.BEZEN.precio + bezenOverride.diferencia);
+        bezenResult.pasos.push({ label: "Precio según fórmula (informativo)", valor: precioFormula });
+        bezenResult.pasos.push({ label: `Precio final aplicado (${bezenOverride.etiquetaBase} + ${bezenOverride.diferencia}€)`, valor: precioFinal });
+        bezenResult.precio = precioFinal;
+      }
+    }
+
+    const columnas = esMuelles ? {
+      BEZEN: bezenResult,
+      MAISON_ES: calcularPrecioPlataformaMuellesEs(bezenResult.precio),
+      RESTO_ES: calcularPrecioPlataformaMuellesEs(bezenResult.precio),
+      MAISON_FR: calcularPrecioPlataformaMuellesResto(coste, envios.FR, 0.77),
+      RESTO_FR: calcularPrecioPlataformaMuellesResto(coste, envios.FR, 0.80),
+      MAISON_IT: calcularPrecioPlataformaMuellesResto(coste, envios.IT, 0.77),
+      RESTO_IT: calcularPrecioPlataformaMuellesResto(coste, envios.IT, 0.80),
+      RESTO_AL: calcularPrecioPlataformaMuellesResto(coste, envios.DE, 0.80),
+    } : {
+      BEZEN: bezenResult,
+      MAISON_ES: calcularPrecioPlataforma(coste, envios.ES, talla, 0.77),
+      RESTO_ES: calcularPrecioPlataforma(coste, envios.ES, talla, 0.80),
+      MAISON_FR: calcularPrecioPlataforma(coste, envios.FR, talla, 0.77),
+      RESTO_FR: calcularPrecioPlataforma(coste, envios.FR, talla, 0.80),
+      MAISON_IT: calcularPrecioPlataforma(coste, envios.IT, talla, 0.77),
+      RESTO_IT: calcularPrecioPlataforma(coste, envios.IT, talla, 0.80),
+      RESTO_AL: calcularPrecioPlataforma(coste, envios.DE, talla, 0.80),
+    };
+    // Deja constancia en el propio desglose (Jennifer quiere poder revisar
+    // de dónde sale cada número) cuando el coste y/o el envío no son los
+    // reales de esta talla/modelo, sino un sustituto o un fijo de Furniture.
+    // MAISON_ES/RESTO_ES de muelles parten directo del precio de BEZEN (ya
+    // desglosado aparte), no tienen pasos de coste/envío propios que anotar.
+    if (costeSustituto || envioSustituto || envioFijo != null) {
+      for (const col of Object.values(columnas)) {
+        if (!col.pasos || col.pasos[0]?.label === "Precio BEZEN") continue;
+        if (costeSustituto && col.pasos[0]) col.pasos[0].label += " (sustituto de " + costeSustituto + ", sin precio real para " + talla + ")";
+        if (envioSustituto && col.pasos[1]) col.pasos[1].label += " (" + envioSustituto + ")";
+        if (envioFijo != null && col.pasos[1]) col.pasos[1].label += " (fijo FURNITURE, igual para cualquier talla/país)";
+      }
+    }
+    return { stockModel, talla, coste, costeProveedor: proveedor, costePeriodo: periodo, envios, columnas, costeSustituto, envioSustituto, envioFijo };
+  }
+
+  // Tabla completa (todas las tallas del Catálogo para ese modelo) —
+  // GET /tarifas/tabla?stockModel=...
+  async getTarifaTabla(stockModel) {
+    const products = await this.load("products", {});
+    const product = activeProducts(products).find((p) => p.stockModel === stockModel);
+    if (!product) return Response.json({ ok: false, error: "Modelo no encontrado." }, { status: 404 });
+    // Unión con TARIFA_TALLAS_EXTRA_MODELO (tallas que no son variante real
+    // de Shopify pero sí se venden en otros marketplaces, ver arriba).
+    const tallas = [...new Set([...(product.tallas || []), ...(TARIFA_TALLAS_EXTRA_MODELO[stockModel] || [])])];
+    const filas = [];
+    for (const talla of tallas) {
+      filas.push(await this.calcularTarifaModelo(stockModel, talla));
+    }
+    return Response.json({ ok: true, stockModel, filas });
+  }
+
+  // Guarda (reemplazo completo, es una re-subida del listado entero) el
+  // listado de SKU de una plataforma + a qué columna de Tarifas corresponde
+  // su "precio de oferta" (Jennifer, 2026-09-23: "necesito tener este
+  // fichero en el sistema para que si hacemos alguna actualización de
+  // precio, ese fichero se actualice"). Cada fila puede traer
+  // stockModel+talla (se recalcula en caliente al exportar) o, si no hay
+  // fórmula para ese artículo (ej. toppers), un `precioOfertaManual` fijo
+  // que se conserva tal cual.
+  async cargarPlataformaExport({ plataforma, columnas, columnaPrecio, filename, filas }) {
+    if (!plataforma || !columnaPrecio || !Array.isArray(filas)) {
+      return Response.json({ ok: false, error: "Faltan plataforma, columnaPrecio o filas." }, { status: 400 });
+    }
+    const todas = await this.load("plataformaExportaciones", {});
+    todas[plataforma] = {
+      columnas: columnas || ["SKU", "PRECIO TACHADO", "PRECIO OFERTA", "STOCK"],
+      columnaPrecio,
+      filename: filename || (plataforma + "_precios.xlsx"),
+      filas,
+      actualizado: new Date().toISOString(),
+    };
+    await this.state.storage.put("plataformaExportaciones", todas);
+    return Response.json({ ok: true, totalFilas: filas.length });
+  }
+
+  async listarPlataformasExport() {
+    const todas = await this.load("plataformaExportaciones", {});
+    const plataformas = Object.entries(todas).map(([plataforma, cfg]) => ({
+      plataforma,
+      columnaPrecio: cfg.columnaPrecio,
+      totalFilas: (cfg.filas || []).length,
+      actualizado: cfg.actualizado || null,
+    }));
+    // Ordenado por familia de plataforma, no por orden de carga (Jennifer,
+    // 2026-09-23: "que Maison estén todas juntas, Worten todas juntas,
+    // Leroy Merlin todas juntas...") — el nombre ya es FAMILIA_PAÍS
+    // (MAISON_ES/MAISON_FR/MAISON_IT...), así que un orden alfabético
+    // simple ya agrupa por familia y además ordena ES/FR/IT/PT dentro.
+    plataformas.sort((a, b) => a.plataforma.localeCompare(b.plataforma));
+    return Response.json({ ok: true, plataformas });
+  }
+
+  // Regenera el .xlsx EN CALIENTE con los precios actuales de Tarifas —
+  // Jennifer solo tiene que volver a descargarlo cuando haga falta, nunca
+  // hay que volver a subírselo a mano tras una actualización de precio.
+  async exportarPlataforma(plataforma) {
+    const todas = await this.load("plataformaExportaciones", {});
+    const cfg = todas[plataforma];
+    if (!cfg) return Response.json({ ok: false, error: "Plataforma no cargada." }, { status: 404 });
+
+    const cache = {};
+    const rows = [];
+    for (const fila of cfg.filas) {
+      let precioOferta = fila.precioOfertaManual ?? null;
+      // Sin fórmula/tarifa disponible (Topper, modelo descatalogado como
+      // Sensei Zen, o una talla que ni la sustitución general cubre) — se
+      // mantiene el último precio conocido y se marca en amarillo
+      // (Jennifer, 2026-09-23: "necesito que de alguna manera lo señales
+      // en el fichero, para que así yo lo pueda detectar").
+      let sinRecalcular = true;
+      if (fila.stockModel && fila.talla) {
+        const key = fila.stockModel + "|" + fila.talla;
+        if (!(key in cache)) cache[key] = await this.calcularTarifaModelo(fila.stockModel, fila.talla);
+        const calculo = cache[key];
+        const col = calculo && calculo.columnas && calculo.columnas[cfg.columnaPrecio];
+        if (col && col.precio != null) {
+          precioOferta = col.precio;
+          sinRecalcular = false;
+        }
+      }
+      // El PRECIO TACHADO se deriva del de oferta cuando este sí se ha
+      // recalculado con Tarifas — si la oferta se queda con el último
+      // precio manual (fila sin fórmula), el tachado tampoco se toca.
+      let precioTachado = fila.precioTachado ?? null;
+      if (!sinRecalcular) {
+        const divisor = tarifaTachadoDivisor(fila.talla);
+        if (divisor) precioTachado = round2(precioOferta / divisor);
+      }
+      const celdaPrecio = sinRecalcular ? { v: precioOferta, highlight: true } : precioOferta;
+      rows.push([fila.sku, precioTachado, celdaPrecio, fila.stock ?? null]);
+    }
+
+    const bytes = await buildXlsxBytes(cfg.columnas, rows);
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": `attachment; filename="${cfg.filename}"`,
+      },
+    });
+  }
+
+  // Plazos de entrega > Marketplace (Jennifer, 2026-09-23): igual que la
+  // exportación de precios, reemplazo completo del listado (una vez, o
+  // cuando cambie el propio listado de SKU) — el .xlsx se regenera en
+  // caliente cada descarga con el STOCK actual, no con el de cuando se
+  // cargó. Cada fila trae `tipo` ("colchon"|"almohada"|"spring_zen"|
+  // "topper") para saber qué regla de días aplicar.
+  async cargarPlazosMarketplace({ filas }) {
+    if (!Array.isArray(filas)) {
+      return Response.json({ ok: false, error: "Faltan filas." }, { status: 400 });
+    }
+    const todos = await this.load("plazosExportaciones", {});
+    todos.MARKETPLACE = {
+      columnas: ["MODELO", "SKU", "DIAS"],
+      filename: "MARKETPLACE-PLAZOS.xlsx",
+      filas,
+      actualizado: new Date().toISOString(),
+    };
+    await this.state.storage.put("plazosExportaciones", todos);
+    return Response.json({ ok: true, totalFilas: filas.length });
+  }
+
+  async listarPlazos() {
+    const todos = await this.load("plazosExportaciones", {});
+    const plazos = Object.entries(todos).map(([plazo, cfg]) => ({
+      plazo,
+      totalFilas: (cfg.filas || []).length,
+      actualizado: cfg.actualizado || null,
+      ultimaDescarga: cfg.ultimaDescarga || null,
+    }));
+    return Response.json({ ok: true, plazos });
+  }
+
+  async exportarPlazosMarketplace() {
+    const todos = await this.load("plazosExportaciones", {});
+    const cfg = todos.MARKETPLACE;
+    if (!cfg) return Response.json({ ok: false, error: "Marketplace no cargado." }, { status: 404 });
+    // Fecha de la última vez que se pulsó "Descargar" (Jennifer,
+    // 2026-09-24: "puedes indicar la fecha última en la que se descargó el
+    // fichero de plazos de entrega") — el fichero se regenera en caliente
+    // cada vez con el stock actual, así que "cargado" (cuándo se subió el
+    // listado de SKU) y "descargado" (cuándo se bajó el .xlsx de verdad)
+    // son fechas distintas; antes solo se guardaba la primera.
+    cfg.ultimaDescarga = new Date().toISOString();
+    await this.state.storage.put("plazosExportaciones", todos);
+
+    const stock = await this.load("stock", {});
+    const rows = cfg.filas.map((fila) => {
+      let dias;
+      if (fila.tipo === "topper") {
+        dias = 7;
+      } else {
+        const cantidad = (stock[stockKey(fila.stockModel, fila.talla)] || {}).cantidad || 0;
+        dias = calcularDiasPlazo(fila.tipo, cantidad > 0);
+      }
+      return [fila.modelo, fila.sku, dias];
+    });
+
+    const bytes = await buildXlsxBytes(cfg.columnas, rows);
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": `attachment; filename="${cfg.filename}"`,
+      },
+    });
+  }
+
+  async processSale({ orderId, orderNumber, platform, orderRef, items, force, orderDate, services, paymentStatus, seurSplitDecision }) {
     // Mientras el catálogo/stock no esté configurado del todo, Jennifer
     // pidió no tocar los pedidos que van entrando (ni agencia ni stock).
     // Cuando esté todo listo, un POST a /admin/resume lo reactiva y los
@@ -2052,7 +3752,7 @@ export class InventoryStore {
           needsReview = true;
           reviewReasons.push(...resolved.ambiguousNotes);
         }
-        for (const c of resolved.componentes) flat.push({ ...c, qty: resolved.qty, fromPack: true });
+        for (const c of resolved.componentes) flat.push({ ...c, qty: c.qtyOverride || resolved.qty, fromPack: true });
       } else if (resolved.tipo === "desconocido") {
         needsReview = true;
       } else {
@@ -2182,7 +3882,7 @@ export class InventoryStore {
             reviewReasons.push(built.reason);
           }
         }
-        this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica);
+        this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica, platform, orderRef);
         if (item.tipo === "colchon" && item.fromPack && hasTapiceria) {
           pendingManufacture = { modelo: item.product.stockModel, talla: item.talla, cantidad: item.qty };
           needsReview = true;
@@ -2193,7 +3893,7 @@ export class InventoryStore {
 
       if (!proveedor) needsReview = true;
       const refSuffix = agencia === "SEUR" && item.tipo === "colchon" ? seurRefSuffix : "";
-      const { falta, covered, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, refSuffix);
+      const { falta, covered, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, refSuffix, platform, orderRef);
       if (agencia === "SEUR") seurCubierto += covered;
       if (reviewNotes.length) {
         needsReview = true;

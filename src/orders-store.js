@@ -1,11 +1,39 @@
 const ORPHAN_RE = /BEZEN0*([0-9]+)/i;
 
+// Fecha de corte para Bezen/Shopify (Jennifer, 2026-09-23), mismo mecanismo
+// que PROCESAMIENTO_DESDE ya usa cada marketplace (Carrefour, etc., ver
+// index.js) pero aplicado aquí a Shopify — hasta hoy no existía ninguna
+// puerta de este tipo para Bezen, así que CUALQUIER pedido pagado sin
+// `inventoryProcessed` (había 397, de julio y agosto, de cuando
+// InventoryStore todavía estaba en pausa) podía dispararse solo en la
+// siguiente sincronización/webhook y generar pendientes sorpresa en
+// Polival/Luso/New — pasó dos veces el mismo día con BEZEN12122 (LUSO) y
+// BEZEN12123 (Polival), Jennifer: "para que así no tengamos confusión, si
+// hay que meter algo yo te aviso". A partir de aquí, cualquier pedido con
+// `orderNumber` MENOR que este corte se marca `inventoryProcessed:true`
+// directamente, SIN pasar por InventoryStore (sin agencia, sin pendiente,
+// sin tocar stock) — se considera ya resuelto por la vía anterior. `force`
+// (ver /orders/force-process) sigue permitiendo procesar uno concreto a
+// mano si Jennifer lo pide explícitamente.
+const SHOPIFY_PROCESAMIENTO_DESDE = 12223;
+
+// Notas internas de Sergio (Jennifer, 2026-09-21): mismo patrón que
+// mergeOrphans usa para fusionarlas en la vista (un pedido de Shopify sin
+// servicios cuyo título solo referencia OTRO pedido BEZEN) — pero aquí se
+// usa para decidir si hay que marcarlo como enviado en Shopify SIN
+// seguimiento (no son un envío real, index.js hace la llamada real).
+function esNotaSergio(order) {
+  if (order.platform !== "Shopify") return false;
+  const match = !order.services && (order.product || "").match(ORPHAN_RE);
+  return !!match && Number(match[1]) !== order.orderNumber;
+}
+
 // Estado (color), observaciones y los datos de inventario (agencia, pendiente
 // de fabricante) son datos manuales o calculados una sola vez, no vienen de
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId"];
 
 // Cargas de Furniture (Jennifer, 2026-08-26): cargan miércoles y viernes,
 // así que la "próxima carga" siempre es el miércoles o viernes más cercano
@@ -45,12 +73,15 @@ function nextSeurCargaDate(from) {
 // Elección manual de "hoy" o "mañana" al marcar un pendiente como recibido
 // para SEUR (Jennifer, 2026-09-08) — pedidos atrasados pueden necesitar
 // salir el mismo día en que se marcan, así que aquí no se aplica el corte
-// de las 15:00 ni se saltan fines de semana (es una elección explícita).
+// de las 15:00 (es una elección explícita). SÍ se saltan fines de semana
+// (Jennifer, 2026-09-22: "las cargas de SEUR se hacen solo de lunes a
+// viernes" — un viernes, "mañana" tiene que caer en lunes, nunca en
+// sábado, que no existe como carga real).
 function seurCargaDateFromChoice(choice) {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   if (choice === "manana") d.setDate(d.getDate() + 1);
-  return d;
+  return skipWeekend(d);
 }
 
 async function getOrCreateCargaByFecha(storage, tipo, dateObj) {
@@ -74,11 +105,17 @@ async function getOrCreateCargaByFecha(storage, tipo, dateObj) {
 }
 
 function mergeCustomFields(existing, incoming) {
-  if (!existing) return incoming;
-  const merged = { ...incoming };
-  for (const field of PRESERVED_FIELDS) {
-    if (existing[field] !== undefined) merged[field] = existing[field];
+  const merged = existing ? { ...incoming } : incoming;
+  if (existing) {
+    for (const field of PRESERVED_FIELDS) {
+      if (existing[field] !== undefined) merged[field] = existing[field];
+    }
   }
+  // Un pedido cancelado de verdad en Shopify (incoming.shopifyCancelado,
+  // viene de order.cancelled_at) manda siempre sobre el "cancelado" manual
+  // preservado — no es una decisión editable a mano, es un hecho real de
+  // Shopify (Jennifer, 2026-09-16, caso BEZEN12204).
+  if (incoming.shopifyCancelado) merged.cancelado = true;
   return merged;
 }
 
@@ -125,9 +162,27 @@ export class OrdersStore {
       return Response.json(list);
     }
 
+    // Importación simple, sin procesar inventario (Jennifer, 2026-09-16/17,
+    // Fase 1 de Carrefour): a diferencia de /orders/import, NO llama a
+    // processInventory ni a settleShipment — solo guarda/acumula pedidos.
+    // Pensada para plataformas nuevas cuya integración empieza siendo "solo
+    // tabla", antes de engancharlas al motor de agencia/stock compartido.
+    if (url.pathname === "/orders/import-simple" && request.method === "POST") {
+      const incoming = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      for (const order of incoming) {
+        const existing = orders[order.id];
+        orders[order.id] = mergeCustomFields(existing, order);
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return new Response("ok");
+    }
+
     if (url.pathname === "/orders/import" && request.method === "POST") {
       const incoming = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
+      const notasParaFulfillar = [];
       for (const order of incoming) {
         const existing = orders[order.id];
         if (!existing || !existing.inventoryProcessed) {
@@ -136,11 +191,13 @@ export class OrdersStore {
         if (order.shippingStatus === "fulfilled" && existing?.shippingStatus !== "fulfilled") {
           await this.settleShipment(order.id);
         }
-        orders[order.id] = mergeCustomFields(existing, order);
+        const merged = mergeCustomFields(existing, order);
+        orders[order.id] = merged;
+        if (esNotaSergio(order) && !merged.shopifyFulfilled) notasParaFulfillar.push(order.id);
       }
       await this.state.storage.put("orders", orders);
       this.broadcast();
-      return new Response("ok");
+      return Response.json({ ok: true, notasParaFulfillar });
     }
 
     if (url.pathname === "/orders/upsert" && request.method === "POST") {
@@ -153,10 +210,12 @@ export class OrdersStore {
       if (order.shippingStatus === "fulfilled" && existing?.shippingStatus !== "fulfilled") {
         await this.settleShipment(order.id);
       }
-      orders[order.id] = mergeCustomFields(existing, order);
+      const merged = mergeCustomFields(existing, order);
+      orders[order.id] = merged;
       await this.state.storage.put("orders", orders);
       this.broadcast();
-      return new Response("ok");
+      const notasParaFulfillar = esNotaSergio(order) && !merged.shopifyFulfilled ? [order.id] : [];
+      return Response.json({ ok: true, notasParaFulfillar });
     }
 
     // Mantenimiento puntual: limpia el aviso de "colchón pendiente de
@@ -170,6 +229,68 @@ export class OrdersStore {
     // recalcule desde cero con la lógica actual. Usado tras el incidente
     // del 26/08 donde una sincronización completa procesó pedidos que
     // todavía no estaban PAGADO.
+    // Mantenimiento puntual, no expuesto en la UI (Jennifer, 2026-09-21):
+    // borra pedidos por id, para limpiar pedidos de prueba/erróneos que se
+    // hayan colado (ej. al verificar reglas nuevas contra la API real). NO
+    // borra sus pendientes en InventoryStore — eso se hace aparte con
+    // /api/inventario/pendientes/delete.
+    if (url.pathname === "/orders/admin/delete" && request.method === "POST") {
+      const { ids } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      let borrados = 0;
+      for (const id of ids || []) {
+        if (orders[id]) { delete orders[id]; borrados++; }
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, borrados });
+    }
+
+    // Mantenimiento puntual (Jennifer, 2026-09-22): corrige a mano el
+    // productId guardado en un artículo concreto de un pedido — caso real:
+    // pedidos de marketplace procesados antes del 19/09 (fix del
+    // emparejamiento "para alojamiento") se quedaron con el productId del
+    // catálogo equivocado grabado en el pedido para siempre (el resync no
+    // lo toca si el pedido ya está fuera de la ventana de reproceso), lo
+    // que arrastraba el error a cualquier pantalla que lea items[].productId
+    // directamente — ej. el desplegable "Producto del pedido a reponer" de
+    // Reposición. No toca stock/backorders, solo el dato guardado del
+    // pedido. No expuesto en la UI, solo por API.
+    if (url.pathname === "/orders/admin/fix-item-product" && request.method === "POST") {
+      const { id, itemIndex, productId } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const existing = orders[id];
+      if (!existing || !existing.items || !existing.items[itemIndex]) {
+        return Response.json({ ok: false, error: "Pedido o artículo no encontrado." }, { status: 404 });
+      }
+      const antes = existing.items[itemIndex].productId;
+      existing.items[itemIndex].productId = productId;
+      orders[id] = existing;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, antes, ahora: productId });
+    }
+
+    // Mantenimiento puntual (Jennifer, 2026-09-23): marca de golpe como
+    // "inventoryProcessed" TODOS los pedidos de Shopify pagados por debajo
+    // de SHOPIFY_PROCESAMIENTO_DESDE que aún no lo estaban (397 en el
+    // momento de escribir esto, de julio/agosto, de cuando InventoryStore
+    // seguía en pausa) — sin pasar por InventoryStore, igual que hace ahora
+    // la puerta de processInventory para cualquiera nuevo que aparezca. No
+    // expuesta en UI.
+    if (url.pathname === "/orders/admin/backfill-processed-cutoff" && request.method === "POST") {
+      const orders = (await this.state.storage.get("orders")) || {};
+      let marcados = 0;
+      for (const order of Object.values(orders)) {
+        if (order.platform === "Shopify" && !order.inventoryProcessed && Number(order.orderNumber) < SHOPIFY_PROCESAMIENTO_DESDE) {
+          order.inventoryProcessed = true;
+          marcados++;
+        }
+      }
+      if (marcados > 0) await this.state.storage.put("orders", orders);
+      return Response.json({ ok: true, marcados });
+    }
+
     if (url.pathname === "/orders/unprocess" && request.method === "POST") {
       const { ids } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
@@ -224,7 +345,7 @@ export class OrdersStore {
     }
 
     if (url.pathname === "/orders/meta" && request.method === "POST") {
-      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta } = await request.json();
+      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta, needsReview } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const existing = orders[id];
       if (!existing) return new Response("not found", { status: 404 });
@@ -247,6 +368,34 @@ export class OrdersStore {
       // fechas...), sin que haga falta que la mercancía haya llegado ya.
       // No quita al pedido de ningún otro sitio, es solo una marca.
       if (paraTenerEnCuenta !== undefined) existing.paraTenerEnCuenta = !!paraTenerEnCuenta;
+      // Marcar un aviso de revisión como resuelto a mano (Jennifer,
+      // 2026-09-19: la campanita se quedaba encendida para siempre en
+      // pedidos donde needsReview se puso a true sin ningún motivo de texto
+      // que responder — el modal salía vacío, sin nada que hacer ni forma
+      // de cerrarlo). Solo se usa cuando de verdad no hay preguntas
+      // pendientes (ver botón "Marcar como revisado" en el modal).
+      if (needsReview !== undefined) existing.needsReview = !!needsReview;
+      orders[id] = existing;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return new Response("ok");
+    }
+
+    // Confirmación de que index.js ya mandó el fulfillment a Shopify de
+    // verdad para este pedido (Jennifer, 2026-09-21) — evita volver a
+    // intentarlo si llega otro seguimiento (actualización de estado, no un
+    // envío físico nuevo) para el mismo pedido más adelante.
+    if (url.pathname === "/orders/shopify-fulfilled" && request.method === "POST") {
+      const { id, fulfillmentId } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const existing = orders[id];
+      if (!existing) return new Response("not found", { status: 404 });
+      existing.shopifyFulfilled = true;
+      // Guardado para poder actualizar el seguimiento del MISMO fulfillment
+      // más adelante si el pedido es un pack partido en dos envíos (ver
+      // /orders/tracking-import) — sin esto no habría forma de mandar el
+      // segundo aviso al cliente.
+      if (fulfillmentId) existing.shopifyFulfillmentId = fulfillmentId;
       orders[id] = existing;
       await this.state.storage.put("orders", orders);
       this.broadcast();
@@ -369,6 +518,302 @@ export class OrdersStore {
       return Response.json(existing);
     }
 
+    // Seguimiento de Furniture (Jennifer, 2026-09-16): sube a diario el
+    // listado de notas de Furniture, ya parseado por el navegador en filas
+    // {orderNumber, albaran, estado, fechaPrevista, seguimiento, tipo}. La
+    // información se ACUMULA, no se reemplaza entera: cada albarán es su
+    // propia entrada dentro de furnitureTracking (un pedido puede tener
+    // varios — normal + BIS/INC/REP), y solo se actualiza (se "machaca") el
+    // albarán que SÍ viene en la subida de hoy; si un albarán conocido no
+    // aparece hoy, se deja tal cual estaba (Furniture no siempre repite
+    // todo el histórico en cada listado).
+    if (url.pathname === "/orders/tracking-import" && request.method === "POST") {
+      const { entries } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const byOrderNumber = new Map(Object.values(orders).map((o) => [o.orderNumber, o]));
+      let sinPedido = 0;
+      const pedidosTocados = new Set();
+      // Candidatos a fulfillar en Shopify (Jennifer, 2026-09-21): solo
+      // albaranes REALMENTE nuevos (idx<0, no una actualización de estado de
+      // uno ya conocido) de pedidos de Shopify pagados y sin cancelar. Un
+      // pack partido en dos envíos (tapicería ahora vía Furniture, colchón
+      // más adelante cuando llegue de fábrica) SÍ entra aquí las dos veces
+      // — Shopify trata el pack como una sola línea de producto, así que no
+      // se puede fulfillar "la mitad"; la primera vez se crea el
+      // fulfillment (marca el pedido enviado), la segunda vez (pedido ya
+      // fulfillado) index.js actualiza el seguimiento del mismo fulfillment
+      // en vez de crear uno nuevo — eso también manda un email nuevo al
+      // cliente con el segundo seguimiento (pedido explícito de Jennifer).
+      // Se decide aquí porque solo aquí sabemos si el albarán es nuevo o
+      // no; la llamada real a Shopify la hace index.js (aquí no hay acceso
+      // a env). `primerEnvio`/`fulfillmentId` los lee index.js para saber
+      // si tiene que crear o actualizar.
+      const paraShopify = [];
+      for (const e of entries || []) {
+        const order = byOrderNumber.get(e.orderNumber);
+        if (!order) { sinPedido++; continue; }
+        const tracking = order.furnitureTracking || [];
+        const idx = tracking.findIndex((t) => t.albaran === e.albaran);
+        const esNuevo = idx < 0;
+        const nuevaEntrada = {
+          albaran: e.albaran, estado: e.estado, fechaAlmacen: e.fechaAlmacen,
+          fechaPrevista: e.fechaPrevista, seguimiento: e.seguimiento, tipo: e.tipo,
+          // La nota de seguimiento de "Casos a revisar" es manual, no viene
+          // del fichero — se conserva al actualizar (Jennifer, 2026-09-16).
+          nota: idx >= 0 ? tracking[idx].nota : undefined,
+        };
+        if (idx >= 0) tracking[idx] = nuevaEntrada;
+        else tracking.push(nuevaEntrada);
+        order.furnitureTracking = tracking;
+        pedidosTocados.add(e.orderNumber);
+        if (
+          esNuevo && order.platform === "Shopify" &&
+          !order.cancelado && order.shippingStatus !== "cancelado" &&
+          order.paymentStatus === "PAGADO" && e.seguimiento
+        ) {
+          paraShopify.push({
+            orderId: order.id, orderNumber: e.orderNumber, trackingNumber: e.albaran, trackingUrl: e.seguimiento, company: "FURNITURE",
+            primerEnvio: !order.shopifyFulfilled, fulfillmentId: order.shopifyFulfillmentId || null,
+          });
+        }
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, actualizados: pedidosTocados.size, sinPedido, paraShopify });
+    }
+
+    // Seguimiento de SEUR (Jennifer, 2026-09-16): mismo mecanismo que el de
+    // Furniture, pero el fichero es un .xlsx real (una sola hoja) que se lee
+    // en el navegador con la librería xlsx (CDN, igual que jsPDF). La
+    // columna que le importa a Jennifer para el estado es "DESCRIPCION
+    // SITUACION" (columna AJ del Excel). Clave de acumulación: `localizador`
+    // (identificador único de SEUR por envío) en vez del texto de la
+    // referencia, porque aquí SEUR no repite sufijos como BIS/INC de forma
+    // legible en la propia referencia.
+    if (url.pathname === "/orders/tracking-import-seur" && request.method === "POST") {
+      const { entries } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const byOrderNumber = new Map(Object.values(orders).map((o) => [o.orderNumber, o]));
+      let sinPedido = 0;
+      const pedidosTocados = new Set();
+      // Detalle fila a fila (Jennifer, 2026-09-24: "necesito... revisar
+      // cuales son los pedidos que están teniendo esos problemas" — antes
+      // solo se devolvían contadores, no había forma de saber CUÁLES eran
+      // sin ir a mirar a mano) — se usa para construir el reporte
+      // descargable en el navegador tras cada subida (ver
+      // tracking-seur-upload-input en index.js).
+      const sinPedidoDetalle = [];
+      const actualizadosDetalle = [];
+      // Ver comentario en /orders/tracking-import (Furniture) — mismo
+      // criterio de elegibilidad para fulfillar en Shopify.
+      const paraShopify = [];
+      for (const e of entries || []) {
+        const order = byOrderNumber.get(e.orderNumber);
+        if (!order) {
+          sinPedido++;
+          sinPedidoDetalle.push({ referencia: e.referencia, orderNumberDetectado: e.orderNumber, estadoSeur: e.estado });
+          continue;
+        }
+        const tracking = order.seurTracking || [];
+        const idx = tracking.findIndex((t) => t.localizador === e.localizador);
+        const esNuevo = idx < 0;
+        const nuevaEntrada = {
+          localizador: e.localizador, referencia: e.referencia, numeroExpedicion: e.numeroExpedicion,
+          seguimiento: e.seguimiento, codigoSituacion: e.codigoSituacion, estado: e.estado,
+          fechaSituacion: e.fechaSituacion, fechaCreacion: e.fechaCreacion, infoAdicional: e.infoAdicional,
+          nota: idx >= 0 ? tracking[idx].nota : undefined,
+        };
+        if (idx >= 0) tracking[idx] = nuevaEntrada;
+        else tracking.push(nuevaEntrada);
+        order.seurTracking = tracking;
+        pedidosTocados.add(e.orderNumber);
+        actualizadosDetalle.push({ orderNumber: e.orderNumber, referencia: e.referencia, nombre: order.name || "", estadoSeur: e.estado, nuevo: esNuevo });
+        if (
+          esNuevo && order.platform === "Shopify" &&
+          !order.cancelado && order.shippingStatus !== "cancelado" &&
+          order.paymentStatus === "PAGADO" && e.seguimiento
+        ) {
+          const numero = (e.seguimiento.split("tracking=")[1] || e.numeroExpedicion || "").trim();
+          paraShopify.push({
+            orderId: order.id, orderNumber: e.orderNumber, trackingNumber: numero, trackingUrl: e.seguimiento, company: "SEUR",
+            primerEnvio: !order.shopifyFulfilled, fulfillmentId: order.shopifyFulfillmentId || null,
+          });
+        }
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, actualizados: pedidosTocados.size, sinPedido, sinPedidoDetalle, actualizadosDetalle, paraShopify });
+    }
+
+    // "Casos a revisar" (Jennifer, 2026-09-16): incidencias con Furniture,
+    // calculadas al vuelo cada vez que se piden (no se guardan aparte) a
+    // partir del seguimiento importado y las cargas. Tres reglas dictadas
+    // turno a turno:
+    // 1) Pendiente de recepción estancado: pasaron 2+ días naturales desde
+    //    que se CERRÓ la carga de ese pedido y el estado sigue siendo
+    //    "PENDIENTE DE RECEPCION".
+    // 2) No entregado: el estado es "NO ENTREGADO" — se avisa al momento,
+    //    sin esperar ningún margen.
+    // 3) Retraso en almacén: pasaron 7+ días naturales desde F.Almacén y el
+    //    estado no es "ENTREGADO OK".
+    if (url.pathname === "/casos-revisar" && request.method === "GET") {
+      const orders = (await this.state.storage.get("orders")) || {};
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const cargasById = new Map(cargas.map((c) => [c.id, c]));
+      const hoy = new Date();
+      const hoyUTC = Date.UTC(hoy.getUTCFullYear(), hoy.getUTCMonth(), hoy.getUTCDate());
+      function diasNaturalesDesdeIso(iso) {
+        if (!iso) return null;
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return null;
+        const dUTC = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+        return Math.floor((hoyUTC - dUTC) / 86400000);
+      }
+      function diasNaturalesDesdeFurniture(str) {
+        const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec((str || "").trim());
+        if (!m) return null;
+        const dUTC = Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+        return Math.floor((hoyUTC - dUTC) / 86400000);
+      }
+      const casos = [];
+      for (const order of Object.values(orders)) {
+        if (order.cancelado) continue;
+        for (const t of order.furnitureTracking || []) {
+          const estado = (t.estado || "").toUpperCase();
+          const motivos = [];
+          if (estado === "NO ENTREGADO") {
+            motivos.push("No entregado por Furniture");
+          }
+          if (estado === "PENDIENTE DE RECEPCION") {
+            const carga = order.cargaId ? cargasById.get(order.cargaId) : null;
+            if (carga && carga.estado === "cerrada") {
+              const dias = diasNaturalesDesdeIso(carga.fechaCierre);
+              if (dias !== null && dias >= 2) {
+                motivos.push(`Pendiente de recepción ${dias} días después de cerrar la carga`);
+              }
+            }
+          }
+          if (estado !== "ENTREGADO OK" && t.fechaAlmacen) {
+            const dias = diasNaturalesDesdeFurniture(t.fechaAlmacen);
+            if (dias !== null && dias >= 7) {
+              motivos.push(`${dias} días desde que llegó a Almacén sin entregarse`);
+            }
+          }
+          if (motivos.length) {
+            casos.push({
+              tipo: "furniture", orderId: order.id, orderNumber: order.orderNumber, name: order.name,
+              platform: order.platform, orderRef: order.orderRef,
+              key: t.albaran, albaran: t.albaran, estado: t.estado, fechaAlmacen: t.fechaAlmacen,
+              seguimiento: t.seguimiento, motivos, nota: t.nota || "",
+            });
+          }
+        }
+      }
+      return Response.json(casos);
+    }
+
+    // Nota de seguimiento manual sobre un caso a revisar (Jennifer,
+    // 2026-09-16): "va a haber cosas que revisar a diario", necesita apuntar
+    // qué gestión está haciendo sobre cada uno. Se guarda directo en la
+    // propia entrada de tracking (furnitureTracking/seurTracking), no en una
+    // colección aparte, para que sobreviva igual que el resto del
+    // seguimiento (ACUMULA, ver /orders/tracking-import[-seur]).
+    if (url.pathname === "/orders/casos-revisar/nota" && request.method === "POST") {
+      const { orderId, tipo, key, nota } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order) return new Response("not found", { status: 404 });
+      const campo = tipo === "seur" ? "seurTracking" : "furnitureTracking";
+      const claveCampo = tipo === "seur" ? "localizador" : "albaran";
+      const tracking = order[campo] || [];
+      const entry = tracking.find((t) => t[claveCampo] === key);
+      if (!entry) return new Response("not found", { status: 404 });
+      entry.nota = nota;
+      orders[orderId] = order;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return new Response("ok");
+    }
+
+    // "Casos a revisar" de SEUR (Jennifer, 2026-09-16), reglas dictadas
+    // turno a turno — algunas inmediatas por el estado exacto, otras con
+    // margen de días:
+    // 1) "El envío está retenido. pendiente de recibir instrucciones para
+    //    poder realizar la entrega." — inmediato.
+    // 2) "El envío se está devolviendo a origen." — inmediato.
+    // 3) "El envío ha sido registrado." + 3 días naturales desde
+    //    "FECHA CREACION" (columna D del Excel — el día en que Jennifer
+    //    crea el envío en SEUR, normalmente un día antes de que lo
+    //    recojan; corregido de 2 a 3 días y de "fecha de la carga" a esta
+    //    fecha real de SEUR, 2026-09-16).
+    // 4) "El envío está disponible para recoger en el punto seur pickup."
+    //    — inmediato.
+    // 5) "Los datos del envío han sido modificados y se entregará en un
+    //    punto seur pickup." — inmediato.
+    // 6) 3+ días naturales sin cambiar de estado (fechaSituacion, la que da
+    //    el propio SEUR) y no está entregado — para detectar que no avanza.
+    //    Regla aparte de la 3, no la sustituye (confirmado por Jennifer).
+    // 7) "El envío se ha anulado por estar duplicado o no haber sido
+    //    recibido por seur." — inmediato.
+    // 8) "Envío devuelto" — inmediato.
+    // Equivalencia: "El destinatario ha retirado el envío de la tienda seur
+    // pickup seleccionada." cuenta como entregado en todo lo demás (no
+    // dispara la regla 6).
+    if (url.pathname === "/casos-revisar-seur" && request.method === "GET") {
+      const orders = (await this.state.storage.get("orders")) || {};
+      const hoy = new Date();
+      const hoyUTC = Date.UTC(hoy.getUTCFullYear(), hoy.getUTCMonth(), hoy.getUTCDate());
+      // fechaSituacion/fechaCreacion se guardan ya formateadas "dd/mm/aaaa" (es-ES, ver
+      // excelSerialToFecha en el frontend).
+      function diasNaturalesDesdeSeur(str) {
+        const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec((str || "").trim());
+        if (!m) return null;
+        const dUTC = Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+        return Math.floor((hoyUTC - dUTC) / 86400000);
+      }
+      const esEntregado = (estado) => /ENTREGAD/i.test(estado || "") || /retirado el envío/i.test(estado || "");
+      const ESTADOS_INMEDIATOS = [
+        "El envío está retenido. pendiente de recibir instrucciones para poder realizar la entrega.",
+        "El envío se está devolviendo a origen.",
+        "El envío está disponible para recoger en el punto seur pickup.",
+        "Los datos del envío han sido modificados y se entregará en un punto seur pickup.",
+        "El envío se ha anulado por estar duplicado o no haber sido recibido por seur.",
+        "Envío devuelto",
+      ];
+      const casos = [];
+      for (const order of Object.values(orders)) {
+        if (order.cancelado) continue;
+        for (const t of order.seurTracking || []) {
+          const motivos = [];
+          const estadoNorm = (t.estado || "").trim();
+          if (ESTADOS_INMEDIATOS.some((e) => e.toLowerCase() === estadoNorm.toLowerCase())) {
+            motivos.push(estadoNorm);
+          }
+          if (estadoNorm.toLowerCase() === "el envío ha sido registrado.") {
+            const dias = diasNaturalesDesdeSeur(t.fechaCreacion);
+            if (dias !== null && dias >= 3) {
+              motivos.push(`Registrado hace ${dias} días sin avanzar`);
+            }
+          }
+          if (!esEntregado(estadoNorm)) {
+            const dias = diasNaturalesDesdeSeur(t.fechaSituacion);
+            if (dias !== null && dias >= 3) {
+              motivos.push(`${dias} días en el mismo estado sin avanzar`);
+            }
+          }
+          if (motivos.length) {
+            casos.push({
+              tipo: "seur", orderId: order.id, orderNumber: order.orderNumber, name: order.name,
+              platform: order.platform, orderRef: order.orderRef,
+              key: t.localizador, referencia: t.referencia, estado: t.estado, fechaSituacion: t.fechaSituacion,
+              seguimiento: t.seguimiento, motivos, nota: t.nota || "",
+            });
+          }
+        }
+      }
+      return Response.json(casos);
+    }
+
     if (url.pathname === "/ws") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -382,11 +827,18 @@ export class OrdersStore {
   }
 
   async processInventory(order, force, seurSplitDecision) {
+    // Ver SHOPIFY_PROCESAMIENTO_DESDE arriba del fichero — solo aplica a
+    // Shopify (los marketplaces ya tienen su propia puerta, PROCESAMIENTO_
+    // DESDE en index.js, con otro esquema de numeración).
+    if (!force && order.platform === "Shopify" && Number(order.orderNumber) < SHOPIFY_PROCESAMIENTO_DESDE) {
+      order.inventoryProcessed = true;
+      return;
+    }
     const id = this.env.INVENTORY_STORE.idFromName("main");
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, items: order.items || [], force, orderDate: order.orderDate, services: order.services || "", paymentStatus: order.paymentStatus, seurSplitDecision }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, items: order.items || [], force, orderDate: order.orderDate, services: order.services || "", paymentStatus: order.paymentStatus, seurSplitDecision }),
     });
     const { agencia, pendingManufacture, needsReview, reviewReasons, paused, seurMixedPending, seurMixedInfo, seurReady } = await res.json();
     // Pedido de 2+ colchones SEUR con disponibilidad mixta (Jennifer,
