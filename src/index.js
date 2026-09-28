@@ -1186,6 +1186,17 @@ function renderPage() {
   .badge.pendiente { background: #fef3c7; color: #92400e; }
   .badge.pago-pendiente { background: #fee2e2; color: #991b1b; }
   .badge.reembolsado { background: #ede9fe; color: #5b21b6; }
+  .grupo-envio-tag {
+    display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 6px;
+    background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; white-space: nowrap;
+  }
+  .juntar-envio-btn {
+    display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 3px;
+    border: 1px solid var(--border); border-radius: 6px; background: #fff; color: #6b7280; cursor: pointer;
+  }
+  .juntar-envio-btn svg { width: 14px; height: 14px; }
+  .juntar-envio-btn:hover { color: var(--brand); border-color: var(--brand); }
+  .juntar-envio-btn-activa { background: #fef3c7; color: #92400e; border-color: #f59e0b; }
   .badge.pago-manual-tag { background: #dcfce7; color: #146138; margin-top: 4px; font-size: 11px; }
   .pago-manual-btn {
     margin-top: 4px; padding: 3px 8px; font-size: 11px; font-weight: 600; cursor: pointer;
@@ -2328,6 +2339,17 @@ function gestoComercialButton(order) {
   return \`<button type="button" class="\${cls}" data-gesto-comercial-order-id="\${order.id}" title="\${escapeAttr(title)}">GC</button>\`;
 }
 
+// Envío conjunto (Jennifer, 2026-09-28): mismo cliente, pedidos distintos,
+// quiere recibirlo todo junto.
+const JUNTAR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>';
+function juntarEnvioButton(order) {
+  const cls = "juntar-envio-btn" + (order.grupoEnvio ? " juntar-envio-btn-activa" : "");
+  const title = order.grupoEnvio
+    ? "Se envía junto con " + pedidosDelGrupo(order).filter(o => o.id !== order.id).map(refLabel).join(", ") + " — clic para separarlo"
+    : "Enviar junto con otro pedido del mismo cliente (un solo envío por Furniture)";
+  return \`<button type="button" class="\${cls}" data-juntar-id="\${order.id}" title="\${escapeAttr(title)}">\${JUNTAR_ICON}</button>\`;
+}
+
 function cancelButton(order) {
   const cls = order.cancelado ? "cancel-btn cancelado" : "cancel-btn";
   const icon = order.cancelado ? CANCEL_ICON_UNDO : CANCEL_ICON_X;
@@ -2453,8 +2475,8 @@ function render(orders) {
   const tbody = document.querySelector("#orders tbody");
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
-      <td class="bell-cell">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}</td>
-      <td>BEZEN\${o.orderNumber}</td>
+      <td class="bell-cell">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}</td>
+      <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
       <td>\${o.address}</td>
@@ -2652,6 +2674,39 @@ document.querySelector("#orders tbody").addEventListener("click", (e) => {
   const btn = e.target.closest("[data-gesto-comercial-order-id]");
   if (!btn) return;
   abrirGestoComercialDesdePedido(btn.dataset.gestoComercialOrderId);
+});
+document.querySelector("#orders tbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-juntar-id]");
+  if (!btn) return;
+  const order = allOrders.find(o => String(o.id) === btn.dataset.juntarId);
+  if (!order) return;
+  if (order.grupoEnvio) {
+    const otros = pedidosDelGrupo(order).filter(o => o.id !== order.id).map(refLabel).join(", ");
+    if (!confirm("¿Separar " + refLabel(order) + " del envío conjunto con " + otros + "?\\n\\nVolverá a salir por su cuenta (un colchón volverá a SEUR).")) return;
+    const res = await fetch("/api/pedidos/shopify/grupo-envio/desvincular", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: order.id }),
+    });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) alert("No se ha podido separar: " + (r.error || res.status));
+  } else {
+    const texto = prompt("¿Con qué pedido se envía junto " + refLabel(order) + "?\\nEscribe el número (ej. BEZEN12233 o 12233):");
+    if (!texto) return;
+    const limpio = texto.trim().toUpperCase();
+    const numero = Number(limpio.replace(/^BEZEN/, ""));
+    const otro = allOrders.find(o => o.id !== order.id && ((numero && o.platform === "Shopify" && o.orderNumber === numero) || (o.orderRef || "").toUpperCase() === limpio));
+    if (!otro) { alert("No encuentro el pedido " + texto + "."); return; }
+    const nombreLimpio = s => (s || "").normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").trim().toLowerCase();
+    if (nombreLimpio(otro.name) !== nombreLimpio(order.name)
+      && !confirm("Ojo: los nombres no coinciden (" + order.name + " / " + otro.name + "). ¿Juntarlos igualmente?")) return;
+    const res = await fetch("/api/pedidos/shopify/grupo-envio/vincular", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderIds: [order.id, otro.id] }),
+    });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) { alert("No se han podido juntar: " + (r.error || res.status)); return; }
+    alert(refLabel(order) + " y " + refLabel(otro) + " saldrán juntos por Furniture, en un solo envío.");
+  }
+  await loadOrders();
+  loadPendientes();
 });
 document.querySelector("#orders tbody").addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-pago-manual-id]");
@@ -3132,10 +3187,26 @@ const TAPICERIA_PRODUCT_TYPES_FRONT = new Set(["Canapé", "Canapé fijo", "Base"
 function ordenTieneTapiceria(orderNumber) {
   const order = allOrders.find(o => o.orderNumber === orderNumber);
   if (!order) return false;
-  return (order.items || []).some(it => {
-    const p = catalogoProducts.find(cp => cp.productId === it.productId);
-    return p && TAPICERIA_PRODUCT_TYPES_FRONT.has(p.product_type);
-  });
+  // Envío conjunto (Jennifer, 2026-09-28): la tapicería puede estar en otro
+  // pedido del mismo grupo — cuenta igual, el colchón sale con ella (FUR).
+  const pedidos = order.grupoEnvio ? pedidosDelGrupo(order) : [order];
+  return pedidos.some(p => (p.items || []).some(it => {
+    const cp = catalogoProducts.find(c => c.productId === it.productId);
+    return cp && TAPICERIA_PRODUCT_TYPES_FRONT.has(cp.product_type);
+  }));
+}
+
+// Pedidos que se envían juntos (Jennifer, 2026-09-28): todos llevan
+// grupoEnvio = id del pedido principal.
+function pedidosDelGrupo(order) {
+  if (!order || !order.grupoEnvio) return order ? [order] : [];
+  return allOrders.filter(o => o.grupoEnvio === order.grupoEnvio);
+}
+function grupoEnvioTag(order) {
+  if (!order.grupoEnvio) return "";
+  const otros = pedidosDelGrupo(order).filter(o => o.id !== order.id).map(refLabel).join(", ");
+  const principal = allOrders.find(o => o.id === order.grupoEnvio);
+  return \`<div class="grupo-envio-tag" title="Un solo envío por Furniture con la referencia \${escapeAttr(principal ? refLabel(principal) : "")}">📦 Junto con \${escapeAttr(otros)}</div>\`;
 }
 
 // La fila de filtros (Pendientes/Furniture) va sticky justo debajo de la
@@ -4120,7 +4191,10 @@ async function resolverPendiente(id) {
 async function checkAutoAddCarga(orderId) {
   const order = allOrders.find(o => o.id === orderId);
   if (!order || order.cargaId || order.cancelado) return;
-  const items = backordersPorPedido(orderId);
+  // Envío conjunto (Jennifer, 2026-09-28): el grupo entero espera hasta que
+  // TODOS sus pedidos estén recibidos, y entonces sube junto a la carga.
+  const grupo = pedidosDelGrupo(order).filter(o => !o.cancelado);
+  const items = grupo.flatMap(o => backordersPorPedido(o.id));
   // Un colchón de pack marcado FPK sale independiente por SEUR, no junto con
   // la tapicería — no debe bloquear que el resto del pedido (tapicería,
   // almohadas...) suba solo a la carga de Furniture en cuanto esté listo.
@@ -4129,12 +4203,12 @@ async function checkAutoAddCarga(orderId) {
   const todosRecibidos = itemsFurniture.length > 0 && itemsFurniture.every(i => i.recibidoFabrica);
   const colchonFpkPendiente = items.some(i => esFpkPendiente(i) && i.estado === "pendiente");
   if (!todosRecibidos) return;
-  const notaTexto = (order.notas || "").trim();
+  const notaTexto = grupo.map(o => (o.notas || "").trim()).filter(Boolean).join(" / ");
   const confirmar = notaTexto
-    ? confirm(refLabel(order) + ' tiene una nota: "' + notaTexto + '". ¿Añadirlo a la próxima carga igualmente?')
+    ? confirm(grupo.map(refLabel).join(" + ") + ' tiene una nota: "' + notaTexto + '". ¿Añadirlo a la próxima carga igualmente?')
     : true;
   if (confirmar) {
-    await anadirPedidosACarga([order.id]);
+    await anadirPedidosACarga(grupo.map(o => o.id));
   } else if (!order.paraTenerEnCuenta) {
     // Si Jennifer dice que NO lo añada (ej. el cliente pidió recibirlo más
     // adelante), que no se pierda de vista entre el resto de pendientes —
@@ -4311,7 +4385,7 @@ function furnitureRowCells(o) {
       }).join("")
     : "<em>Todo en stock</em>";
   return \`
-    <td>\${refLabel(o)}</td>
+    <td>\${refLabel(o)}\${grupoEnvioTag(o)}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name}</td>
     <td>\${o.product}</td>
@@ -4408,13 +4482,17 @@ function renderFurniture() {
   \`).join("");
   document.querySelectorAll(".sacar-carga-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
-      await fetch("/api/cargas/remove", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ orderId: Number(btn.dataset.id) }),
-      });
+      // Envío conjunto: sale el grupo entero de la carga.
       const order = allOrders.find(o => String(o.id) === btn.dataset.id);
-      if (order) order.cargaId = null;
+      for (const o of pedidosDelGrupo(order)) {
+        if (!o.cargaId) continue;
+        await fetch("/api/cargas/remove", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ orderId: o.id }),
+        });
+        o.cargaId = null;
+      }
       renderFurniture();
     });
   });
@@ -4549,6 +4627,8 @@ document.getElementById("anadir-tener-en-cuenta-btn").addEventListener("click", 
 });
 
 async function anadirPedidosACarga(orderIds) {
+  // Un pedido de un envío conjunto nunca entra solo: arrastra a su grupo.
+  orderIds = [...new Set(orderIds.flatMap(id => pedidosDelGrupo(allOrders.find(o => o.id === id)).filter(o => !o.cancelado).map(o => o.id).concat(id)))];
   const res = await fetch("/api/cargas/add", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -6167,7 +6247,12 @@ async function buildFurnitureExport(env, cargaId) {
   const carga = cargaId ? cargas.find((c) => c.id === cargaId) : cargas.find((c) => c.estado === "abierta");
   if (!carga) return { error: "No hay carga abierta." };
 
-  const pedidos = orders.filter((o) => o.cargaId === carga.id);
+  // Envío conjunto (Jennifer, 2026-09-28): los pedidos de un mismo grupo
+  // van seguidos y como UN solo envío — referencia, nombre, dirección y
+  // contacto del pedido principal en todas sus líneas.
+  const clavePedido = (o) => String(o.grupoEnvio || o.id);
+  const pedidos = orders.filter((o) => o.cargaId === carga.id)
+    .sort((a, b) => clavePedido(a).localeCompare(clavePedido(b)) || (a.id === a.grupoEnvio ? -1 : b.id === b.grupoEnvio ? 1 : 0));
 
   // Se sube el día antes de la carga (Jennifer, 2026-08-26): carga viernes
   // 28/08 -> fecha en el fichero 27/08/2026.
@@ -6180,10 +6265,11 @@ async function buildFurnitureExport(env, cargaId) {
 
   const rows = [];
   for (const o of pedidos) {
+    const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
     const montaje = tieneMontajeFurniture(o.services);
     const tapaPartida = tapaPartidaFurniture(o.services);
     const observaciones = observacionesRetiradaFurniture(o.services);
-    const telefono = limpiarTelefonoFurniture(o.phone);
+    const telefono = limpiarTelefonoFurniture(envio.phone);
     // Igual que en el desglose de Furniture: un colchón marcado "FPK" sale
     // independiente por SEUR, no entra en esta exportación. Ampliado
     // 2026-09-25 (caso real BEZEN12173): antes solo se comprobaba para un
@@ -6208,11 +6294,11 @@ async function buildFurnitureExport(env, cargaId) {
 
     for (const descrip of descripciones) {
       rows.push([
-        fechaTexto, "", referenciaPedido(o), o.name, o.furnitureAddress || o.address || "",
-        o.postalCode || "", o.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
+        fechaTexto, "", referenciaPedido(envio), envio.name, envio.furnitureAddress || envio.address || "",
+        envio.postalCode || "", envio.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
         "", "", "", "", "", "", "", "", "", "", "", "",
         montaje ? "Subida a piso y montaje" : "Subida a piso", "1", "", "", "",
-        o.email || "", provinciaPorCp(o.postalCode), "",
+        envio.email || o.email || "", provinciaPorCp(envio.postalCode), "",
       ]);
     }
   }
@@ -6967,6 +7053,14 @@ async function handleFetch(request, env) {
       const { order } = await res.json();
       await handleUpsertOrder(order, env);
       return Response.json({ ok: true, orderNumber: order.order_number });
+    }
+
+    const grupoEnvioMatch = url.pathname.match(/^\/api\/pedidos\/shopify\/grupo-envio\/(vincular|desvincular)$/);
+    if (grupoEnvioMatch && request.method === "POST") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/orders/grupo-envio/" + grupoEnvioMatch[1], { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     const adminPedidosMatch = url.pathname.match(/^\/api\/pedidos\/shopify\/admin\/(marcar-sin-pagar|tramitar-como-nuevo|tramitar-pagado-manual)$/);

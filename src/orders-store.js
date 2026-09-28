@@ -33,7 +33,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -377,6 +377,85 @@ export class OrdersStore {
       return Response.json(existing);
     }
 
+    // Pedidos que se envían juntos (Jennifer, 2026-09-28, caso BEZEN12205 +
+    // BEZEN12233: el mismo cliente compra en días distintos y quiere
+    // recibirlo todo junto). Todos los pedidos del grupo llevan
+    // grupoEnvio = id del pedido principal (el más antiguo) y van por
+    // FURNITURE como un único envío: misma referencia en el fichero, misma
+    // carga y mismo seguimiento. Un colchón que iba por SEUR pasa a FUR.
+    if (url.pathname === "/orders/grupo-envio/vincular" && request.method === "POST") {
+      const { orderIds } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const seleccion = (orderIds || []).map((id) => orders[id]).filter(Boolean);
+      if (seleccion.length < 2) return Response.json({ ok: false, error: "Hacen falta al menos dos pedidos." }, { status: 400 });
+      // Si alguno ya está en un grupo, se añaden todos a ese grupo.
+      const gruposPrevios = new Set(seleccion.map((o) => o.grupoEnvio).filter(Boolean));
+      const miembros = new Map(seleccion.map((o) => [o.id, o]));
+      for (const o of Object.values(orders)) {
+        if (o.grupoEnvio && gruposPrevios.has(o.grupoEnvio)) miembros.set(o.id, o);
+      }
+      const lista = [...miembros.values()];
+      for (const o of lista) {
+        if (o.cancelado || o.shopifyCancelado) return Response.json({ ok: false, error: `${o.orderRef || "BEZEN" + o.orderNumber} está cancelado.` }, { status: 409 });
+        if (o.shippingStatus === "fulfilled") return Response.json({ ok: false, error: `${o.orderRef || "BEZEN" + o.orderNumber} ya está enviado.` }, { status: 409 });
+        if (!o.inventoryProcessed || !o.agencia) return Response.json({ ok: false, error: `${o.orderRef || "BEZEN" + o.orderNumber} todavía no está tramitado (¿sin pagar?).` }, { status: 409 });
+      }
+      if (!lista.some((o) => o.agencia === "FURNITURE")) {
+        return Response.json({ ok: false, error: "Ninguno de los pedidos va por Furniture: juntar envíos solo está pensado para Furniture." }, { status: 409 });
+      }
+      const fechaDe = (o) => { const t = Date.parse(o.orderDate); return Number.isNaN(t) ? Infinity : t; };
+      const principal = lista.slice().sort((a, b) => fechaDe(a) - fechaDe(b) || a.orderNumber - b.orderNumber)[0];
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      for (const o of lista) {
+        o.grupoEnvio = principal.id;
+        if (o.agencia !== "FURNITURE") {
+          o.agenciaAntesDeGrupo = o.agencia;
+          o.agencia = "FURNITURE";
+        }
+        // Todos vuelven a esperar juntos: si alguno ya estaba en una carga
+        // abierta (de Furniture o de SEUR), sale de ella y el grupo entero
+        // sube a la misma carga cuando esté todo recibido.
+        const carga = o.cargaId && cargas.find((c) => c.id === o.cargaId);
+        if (carga && carga.estado === "abierta") o.cargaId = null;
+      }
+      await this.state.storage.put("orders", orders);
+      await this.planColchonesDelGrupo(lista.map((o) => o.id), "FUR");
+      this.broadcast();
+      return Response.json({ ok: true, principal: principal.id, miembros: lista.map((o) => o.id) });
+    }
+
+    if (url.pathname === "/orders/grupo-envio/desvincular" && request.method === "POST") {
+      const { orderId } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order || !order.grupoEnvio) return Response.json({ ok: false, error: "Este pedido no está en ningún envío conjunto." }, { status: 404 });
+      const grupo = order.grupoEnvio;
+      const miembros = Object.values(orders).filter((o) => o.grupoEnvio === grupo);
+      // Si quedan menos de dos, el grupo desaparece entero.
+      const salen = miembros.length <= 2 ? miembros : [order];
+      const restauradosASeur = [];
+      for (const o of salen) {
+        delete o.grupoEnvio;
+        if (o.agenciaAntesDeGrupo) {
+          o.agencia = o.agenciaAntesDeGrupo;
+          if (o.agencia !== "FURNITURE") restauradosASeur.push(o.id);
+          delete o.agenciaAntesDeGrupo;
+        }
+        o.cargaId = null;
+      }
+      // Si sale el principal y quedan 2+, el grupo pasa a colgar del más antiguo que queda.
+      const quedan = miembros.filter((o) => o.grupoEnvio === grupo);
+      if (quedan.length && !quedan.some((o) => o.id === grupo)) {
+        const fechaDe = (o) => { const t = Date.parse(o.orderDate); return Number.isNaN(t) ? Infinity : t; };
+        const nuevo = quedan.slice().sort((a, b) => fechaDe(a) - fechaDe(b) || a.orderNumber - b.orderNumber)[0];
+        for (const o of quedan) o.grupoEnvio = nuevo.id;
+      }
+      await this.state.storage.put("orders", orders);
+      if (restauradosASeur.length) await this.planColchonesDelGrupo(restauradosASeur, "FPK");
+      this.broadcast();
+      return Response.json({ ok: true, desvinculados: salen.map((o) => o.id) });
+    }
+
     if (url.pathname === "/orders/unprocess" && request.method === "POST") {
       const { ids } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
@@ -661,9 +740,20 @@ export class OrdersStore {
       // a env). `primerEnvio`/`fulfillmentId` los lee index.js para saber
       // si tiene que crear o actualizar.
       const paraShopify = [];
+      // Envío conjunto (Jennifer, 2026-09-28): el fichero de Furniture solo
+      // trae la referencia del pedido principal, pero el seguimiento es de
+      // TODOS los pedidos del grupo — si no, el otro (ej. BEZEN12233) se
+      // quedaría pendiente de envío para siempre, aquí y en Shopify.
+      const destinos = [];
       for (const e of entries || []) {
-        const order = byOrderNumber.get(e.orderNumber);
-        if (!order) { sinPedido++; continue; }
+        const principal = byOrderNumber.get(e.orderNumber);
+        if (!principal) { sinPedido++; continue; }
+        const grupo = principal.grupoEnvio
+          ? Object.values(orders).filter((o) => o.grupoEnvio === principal.grupoEnvio)
+          : [principal];
+        for (const order of grupo) destinos.push({ e: { ...e, orderNumber: order.orderNumber }, order });
+      }
+      for (const { e, order } of destinos) {
         const tracking = order.furnitureTracking || [];
         const idx = tracking.findIndex((t) => t.albaran === e.albaran);
         const esNuevo = idx < 0;
@@ -681,7 +771,7 @@ export class OrdersStore {
         if (
           esNuevo && order.platform === "Shopify" &&
           !order.cancelado && order.shippingStatus !== "cancelado" &&
-          order.paymentStatus === "PAGADO" && e.seguimiento
+          (order.paymentStatus === "PAGADO" || order.pagoConfirmadoManual) && e.seguimiento
         ) {
           paraShopify.push({
             orderId: order.id, orderNumber: e.orderNumber, trackingNumber: e.albaran, trackingUrl: e.seguimiento, company: "FURNITURE",
@@ -1000,6 +1090,23 @@ export class OrdersStore {
     if (seurReady && !order.cargaId) {
       const carga = await getOrCreateCargaByFecha(this.state.storage, "seur", nextSeurCargaDate(new Date()));
       order.cargaId = carga.id;
+    }
+  }
+
+  // Colchones pendientes de los pedidos de un envío conjunto: FUR al juntar
+  // (salen con la tapicería por Furniture), FPK al separar (vuelven a SEUR).
+  async planColchonesDelGrupo(orderIds, tipoEnvio) {
+    const stub = this.env.INVENTORY_STORE.get(this.env.INVENTORY_STORE.idFromName("main"));
+    const backorders = await (await stub.fetch("https://do/backorders")).json();
+    const ids = new Set(orderIds);
+    for (const b of backorders) {
+      if (!ids.has(b.orderId) || b.tipo !== "colchon" || b.reposicion || b.gestoComercial) continue;
+      if (b.estado !== "pendiente" && b.estado !== "cubierto") continue;
+      if (b.tipoEnvio === tipoEnvio) continue;
+      await stub.fetch("https://do/backorders/" + encodeURIComponent(b.id) + "/plan", {
+        method: "POST",
+        body: JSON.stringify({ tipoEnvio }),
+      });
     }
   }
 
