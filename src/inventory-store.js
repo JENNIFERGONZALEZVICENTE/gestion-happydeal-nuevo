@@ -788,6 +788,22 @@ const CANAPE_RECIPES_TELA = {
 Object.assign(CANAPE_RECIPES, CANAPE_RECIPES_TELA);
 
 
+// Canapé abatible NO de madera de 160X190/160X200 (Jennifer, 2026-09-28):
+// Polival necesita saber si va en GEMELOS o PARTIDO — lo decide ella.
+export const PREGUNTA_FORMATO_160 = "¿GEMELOS o PARTIDO?";
+export function necesitaFormato160(item) {
+  if (!item || !item.product || item.product.product_type !== "Canapé") return false;
+  const key = matchCanapeRecipeKey(item.product.title);
+  if (key === "zenit" || key === "astra" || /madera/i.test(item.product.title || "")) return false;
+  return item.talla === "160X190" || item.talla === "160X200";
+}
+
+// Cambia (o añade) "FORMATO: X" al final del texto de fabricación.
+export function textoConFormato160(texto, formato) {
+  const limpio = String(texto || "").replace(/\s*·\s*FORMATO:\s*(GEMELOS|PARTIDO)\s*$/i, "");
+  return formato ? `${limpio}${limpio ? " · " : ""}FORMATO: ${formato}` : limpio;
+}
+
 function matchCanapeRecipeKey(title) {
   const t = normalizeKey(title);
   if (t.includes("esquinas curvas")) return "zenit";
@@ -1331,6 +1347,11 @@ function resolveItem(item, products) {
   if (!product) return { tipo: "desconocido" };
   if (product.product_type === "Pack") {
     const { componentes, needsReview, ambiguousNotes } = resolvePackSku(item.sku, products, extractColor(item.variantTitle), normalizeTalla(item.variantTitle));
+    // La variante del pack (ej. "... - Gemelos") vale para sus componentes
+    // (Jennifer, 2026-09-28: formato GEMELOS/PARTIDO de los canapés de 160).
+    // Campo aparte: variantTitle NO se toca (buildCabeceroMercancia lo lee
+    // para los cabeceros sueltos y con el del pack sacaría mal el color).
+    for (const c of componentes) c.variantPack = item.variantTitle;
     return { tipo: "pack", componentes, needsReview, ambiguousNotes, qty: item.qty };
   }
   const tipo = TYPE_MAP[product.product_type] || "otro";
@@ -1912,6 +1933,21 @@ export class InventoryStore {
     if (referenciaMatch && method === "POST") {
       const { referencia } = await request.json();
       return this.setBackorderReferencia(decodeURIComponent(referenciaMatch[1]), referencia);
+    }
+    // Formato GEMELOS/PARTIDO de un canapé de 160 (Jennifer, 2026-09-28).
+    const formatoMatch = url.pathname.match(/^\/backorders\/([^/]+)\/formato160$/);
+    if (formatoMatch && method === "POST") {
+      const { formato } = await request.json();
+      if (formato !== "GEMELOS" && formato !== "PARTIDO") return Response.json({ ok: false, error: "Formato no válido." }, { status: 400 });
+      const backorders = await this.load("backorders", []);
+      const entry = backorders.find((b) => b.id === decodeURIComponent(formatoMatch[1]));
+      if (!entry) return new Response("not found", { status: 404 });
+      entry.formato160 = formato;
+      entry.necesitaFormato160 = false;
+      entry.formato160Elegido = new Date().toISOString();
+      entry.mercanciaFabrica = textoConFormato160(entry.mercanciaFabrica, formato);
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, entry });
     }
     // Reserva de stock ya avisada al almacén (Jennifer, 2026-09-28): para no
     // mandar dos veces las etiquetas del mismo artículo.
@@ -4210,6 +4246,25 @@ export class InventoryStore {
           }
         }
         this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica, platform, orderRef);
+        // Canapé de 160 que no es de madera: Polival necesita saber si va en
+        // GEMELOS o PARTIDO (Jennifer, 2026-09-28). Si el cliente NO lo ha
+        // comprado en gemelos, va PARTIDO directamente. Si lo ha comprado en
+        // gemelos, se le pregunta SIEMPRE a ella (a veces el cliente cambia
+        // de idea al llamarle): pregunta en la campana y el pendiente queda
+        // "falta elegir" hasta que lo elige en Polival.
+        if (necesitaFormato160(item)) {
+          const bo = backorders.find((b) => b.id === `${orderId}-${stockKey(item.product.stockModel, item.talla)}`);
+          if (bo && !bo.formato160) {
+            if (/gemelo/i.test((item.variantTitle || "") + " " + (item.variantPack || ""))) {
+              bo.necesitaFormato160 = true;
+              needsReview = true;
+              reviewReasons.push(`${PREGUNTA_FORMATO_160} El cliente ha comprado en GEMELOS: ${item.product.title} (${item.talla}${item.color ? ", " + item.color : ""}). Confírmalo en Proveedores · Polival.`);
+            } else {
+              bo.formato160 = "PARTIDO";
+              bo.mercanciaFabrica = textoConFormato160(bo.mercanciaFabrica, "PARTIDO");
+            }
+          }
+        }
         if (item.tipo === "colchon" && item.fromPack && hasTapiceria) {
           pendingManufacture = { modelo: item.product.stockModel, talla: item.talla, cantidad: item.qty };
           needsReview = true;

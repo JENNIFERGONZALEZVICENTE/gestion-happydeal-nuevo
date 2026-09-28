@@ -1,6 +1,6 @@
 export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
-import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES, findBestPrefixMatch } from "./inventory-store.js";
+import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES, findBestPrefixMatch, PREGUNTA_FORMATO_160 } from "./inventory-store.js";
 import { etiquetaTransformacionPdf } from "./etiqueta-pdf.js";
 import { enviarEmailAlmacen, enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, fechaHoyEs, referenciaPedidoAlmacen, modeloCorto } from "./avisos-almacen.js";
 
@@ -1257,6 +1257,9 @@ function renderPage() {
   .abierto-btn { margin-left: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; border: 1px solid #7c3aed; border-radius: 6px; background: #fff; color: #7c3aed; cursor: pointer; }
   .abierto-btn:hover { background: #7c3aed; color: #fff; }
   .abiertos-oportunidades-box { margin: 1rem 2rem; padding: 12px 14px; border: 2px solid #c4b5fd; border-radius: 10px; background: #faf5ff; }
+  .formato160-box { margin-top: 4px; }
+  .formato160-falta { display: inline-block; margin-bottom: 3px; padding: 1px 6px; border-radius: 6px; background: #fee2e2; color: #991b1b; font-size: 11px; font-weight: 700; }
+  .formato160-select { font-size: 12px; }
   .transformado-tag { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 6px; background: #e0e7ff; color: #3730a3; font-size: 11px; font-weight: 600; white-space: nowrap; }
   .grupo-envio-item-ref { font-size: 11px; font-weight: 700; color: #92400e; }
   .grupo-envio-tag {
@@ -4057,9 +4060,15 @@ function renderPendientes() {
     // para no perder el rastro, pero no se puede seleccionar para pedir a
     // fábrica.
     const pedidoCancelado = !!allOrders.find(o => o.orderNumber === b.orderNumber)?.cancelado;
+    // Canapé de 160 comprado en GEMELOS (Jennifer, 2026-09-28): hasta que
+    // ella confirme GEMELOS o PARTIDO no se puede pedir a fábrica.
+    const faltaFormato = b.necesitaFormato160 && !b.formato160;
     const checkCell = showCheckbox
-      ? \`<td><input type="checkbox" class="pendiente-check" data-id="\${b.id}"\${pedidoFabricaSeleccion.has(b.id) ? " checked" : ""}\${pedidoCancelado ? " disabled" : ""}></td>\`
+      ? \`<td><input type="checkbox" class="pendiente-check" data-id="\${b.id}"\${pedidoFabricaSeleccion.has(b.id) && !faltaFormato ? " checked" : ""}\${pedidoCancelado || faltaFormato ? " disabled" : ""}\${faltaFormato ? ' title="Falta elegir GEMELOS o PARTIDO"' : ""}></td>\`
       : "<td></td>";
+    const formatoHtml = b.necesitaFormato160 || b.formato160
+      ? \`<div class="formato160-box">\${faltaFormato ? '<span class="formato160-falta">⚠ Falta elegir: el cliente lo compró en GEMELOS</span><br>' : ""}<select class="formato160-select" data-id="\${escapeAttr(b.id)}"><option value="">¿Gemelos o partido?</option><option value="GEMELOS"\${b.formato160 === "GEMELOS" ? " selected" : ""}>GEMELOS</option><option value="PARTIDO"\${b.formato160 === "PARTIDO" ? " selected" : ""}>PARTIDO</option></select></div>\`
+      : "";
     // Sin fecha a propósito (Jennifer, 2026-09-23): pendientes marcados
     // "pedido a fábrica" a mano por fuera del PDF normal, para distinguir
     // de los que sí llevan fecha real (ver markOrdered/sinFecha).
@@ -4108,7 +4117,7 @@ function renderPendientes() {
       \${checkCell}
       <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
-      <td>\${b.stockModel}\${pedidoTag}\${abiertoTagHtml(b)}</td>
+      <td>\${b.stockModel}\${pedidoTag}\${abiertoTagHtml(b)}\${formatoHtml}</td>
       <td>\${b.color || "—"}</td>
       <td>\${b.talla}\${b.transformadoDesde ? '<br><span class="transformado-tag" title="Transformado de un colchón de otra medida que había en stock">Transformado desde ' + b.transformadoDesde + '</span>' : ""}</td>
       \${skuCell}
@@ -4168,6 +4177,18 @@ function renderPendientes() {
   });
   tbody.querySelectorAll(".tipo-envio-select").forEach(sel => {
     sel.addEventListener("change", () => updateBackorderPlan(sel.dataset.id, { tipoEnvio: sel.value }));
+  });
+  tbody.querySelectorAll(".formato160-select").forEach(sel => {
+    sel.addEventListener("change", async () => {
+      if (!sel.value) return;
+      const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(sel.dataset.id) + "/formato160", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ formato: sel.value }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) { alert(data.error || "No se ha podido guardar el formato."); return; }
+      await loadOrders();
+      loadPendientes();
+    });
   });
   tbody.querySelectorAll(".fecha-camion-input").forEach(inp => {
     inp.addEventListener("change", () => updateBackorderPlan(inp.dataset.id, { fechaEstimadaLlegada: inp.value || null }));
@@ -4449,6 +4470,11 @@ async function descargarPedidoFabricaExcel(seleccionados) {
 async function generarPedidoFabrica(formato) {
   const seleccionados = backorders.filter(b => pedidoFabricaSeleccion.has(b.id));
   if (!seleccionados.length) return;
+  const sinFormato = seleccionados.filter(b => b.necesitaFormato160 && !b.formato160);
+  if (sinFormato.length) {
+    alert("Falta elegir GEMELOS o PARTIDO en: " + sinFormato.map(b => refLabel(b)).join(", ") + ". Elígelo antes de pedirlo a fábrica.");
+    return;
+  }
 
   if (formato === "excel") {
     // Si falla la descarga, no se marcan como pedidos a fábrica.
@@ -6569,7 +6595,9 @@ function piezasBackorder(b, productoTexto, tapaPartida) {
     const medida = parseMedidaFurniture(b.talla);
     const rule = matchCanapeRule(stockModel);
     if (!rule || !medida) return [{ parte: "REVISAR", texto: `REVISAR (sin regla de bultos): ${stockModel} ${b.talla}` }];
-    const gemelo = esGemeloFurniture(medida, productoTexto);
+    // Si Jennifer ha elegido el formato de un canapé de 160 (2026-09-28),
+    // manda sobre lo que diga la variante de Shopify.
+    const gemelo = b.formato160 ? b.formato160 === "GEMELOS" : esGemeloFurniture(medida, productoTexto);
     return rule.gen(rule.modelo, medida, color, referencia, tapaPartida, gemelo);
   }
   if (t.includes("cabecero")) {
@@ -7192,6 +7220,28 @@ async function handleFetch(request, env) {
     const alternativasPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/alternativas$/);
     if (alternativasPendingMatch && request.method === "GET") {
       return proxyInventory(env, `/backorders/${alternativasPendingMatch[1]}/alternativas`, request);
+    }
+
+    // Formato GEMELOS/PARTIDO de un canapé de 160 (Jennifer, 2026-09-28): se
+    // guarda en el pendiente y además se da por respondida la pregunta de
+    // la campana de ese pedido.
+    const formato160Match = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/formato160$/);
+    if (formato160Match && request.method === "POST") {
+      const body = await request.text();
+      const res = await inventoryStub(env).fetch("https://do/backorders/" + formato160Match[1] + "/formato160", { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok && data.entry) {
+        const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+        const o = await pedidoDeBackorder(env, data.entry);
+        const reasons = (o && o.reviewReasons) || [];
+        const answers = ((o && o.reviewAnswers) || []).slice();
+        const idx = reasons.findIndex((r, i) => r.startsWith(PREGUNTA_FORMATO_160) && r.includes("(" + data.entry.talla) && !(answers[i] || "").trim());
+        if (idx >= 0) {
+          answers[idx] = data.entry.formato160 + " (elegido en Polival)";
+          await ordersStub.fetch("https://do/orders/review-note", { method: "POST", body: JSON.stringify({ id: o.id, reviewAnswers: answers }) });
+        }
+      }
+      return Response.json(data, { status: res.status });
     }
 
     // Colchones abiertos (Jennifer, 2026-09-28) — ver adjustAbiertos/usarAbierto.
