@@ -1,6 +1,7 @@
 export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
 import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES, findBestPrefixMatch } from "./inventory-store.js";
+import { etiquetaTransformacionPdf, base64DeBytes } from "./etiqueta-pdf.js";
 
 // Interruptor de Fase 2 de cada "marketplace" (Carrefour, Jennifer,
 // 2026-09-17, activado parcialmente 2026-09-19; generalizado el mismo día
@@ -912,7 +913,18 @@ async function avisarAlmacenTransformacion(env, entry) {
     `Pedido: ${pedido}${cliente ? " — " + cliente : ""}`,
     "",
     "Sale por Furniture (colchón abierto).",
+    "",
+    "Se adjunta la etiqueta para imprimir y pegar en el colchón.",
   ];
+  // Etiqueta 15x10 cm que el almacén imprime y pega al colchón (Jennifer,
+  // 2026-09-28: antes se la mandaban a mano). Modelo corto: el último trozo
+  // del nombre de catálogo ("... | Zen Natural" -> "Zen Natural").
+  const partesModelo = (modelo || "").split("|").map((s) => s.trim()).filter(Boolean);
+  const etiqueta = etiquetaTransformacionPdf({
+    pedido, cliente, modelo: partesModelo[partesModelo.length - 1] || modelo,
+    desde: entry.transformadoDesde, hasta: entry.talla, unidades,
+    fecha: new Date().toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" }),
+  });
   try {
     const res = await fetch(env.ALMACEN_AVISO_URL, {
       method: "POST",
@@ -921,6 +933,7 @@ async function avisarAlmacenTransformacion(env, entry) {
         secreto: env.ALMACEN_AVISO_SECRET,
         asunto: `Transformación de colchón — ${pedido}`,
         texto: lineas.join("\n"),
+        adjunto: { nombre: `Etiqueta transformacion ${pedido}.pdf`, base64: base64DeBytes(etiqueta) },
       }),
     });
     const r = await res.json().catch(() => ({}));
