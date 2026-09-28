@@ -33,7 +33,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -454,6 +454,27 @@ export class OrdersStore {
       if (restauradosASeur.length) await this.planColchonesDelGrupo(restauradosASeur, "FPK");
       this.broadcast();
       return Response.json({ ok: true, desvinculados: salen.map((o) => o.id) });
+    }
+
+    // Un colchón transformado sale siempre por Furniture (Jennifer,
+    // 2026-09-28): si el pedido iba por SEUR, pasa a FURNITURE (se recuerda
+    // la agencia anterior) y sale de cualquier carga de SEUR abierta.
+    if (url.pathname === "/orders/pasar-a-furniture" && request.method === "POST") {
+      const { orderId, motivo } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      if (order.agencia !== "FURNITURE") {
+        order.agenciaAntesDeFurniture = order.agencia || null;
+        order.agencia = "FURNITURE";
+        order.motivoFurniture = motivo || null;
+        const cargas = (await this.state.storage.get("cargas")) || [];
+        const carga = order.cargaId && cargas.find((c) => c.id === order.cargaId);
+        if (carga && carga.tipo === "seur" && carga.estado === "abierta") order.cargaId = null;
+        await this.state.storage.put("orders", orders);
+        this.broadcast();
+      }
+      return Response.json({ ok: true, agencia: order.agencia });
     }
 
     if (url.pathname === "/orders/unprocess" && request.method === "POST") {

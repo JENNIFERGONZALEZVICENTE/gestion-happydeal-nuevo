@@ -2905,7 +2905,9 @@ export class InventoryStore {
     }
     const origenMovimiento = transformar ? "transformacion" : "sustitucion";
 
-    const viaSeur = await this.decideSustitucionViaSeur(entry);
+    // Un colchón transformado va abierto: sale SIEMPRE por Furniture, nunca
+    // por SEUR (Jennifer, 2026-09-28).
+    const viaSeur = transformar ? false : await this.decideSustitucionViaSeur(entry);
     let carga = null;
     if (viaSeur) {
       carga = await this.getOrCreateSeurCarga(fecha);
@@ -2949,9 +2951,16 @@ export class InventoryStore {
 
     if (transformar) {
       // El cliente recibe la medida que compró: el pendiente no cambia de
-      // modelo ni de medida, solo se apunta de dónde salió.
+      // modelo ni de medida, solo se apunta de dónde salió. Va con FUR y el
+      // pedido entero pasa a FURNITURE.
       entry.transformadoDesde = talla;
       entry.fechaTransformacion = new Date().toISOString();
+      entry.tipoEnvio = "FUR";
+      const ordersStub = this.env.ORDERS_STORE.get(this.env.ORDERS_STORE.idFromName("shopify"));
+      await ordersStub.fetch("https://do/orders/pasar-a-furniture", {
+        method: "POST",
+        body: JSON.stringify({ orderId: entry.orderId, motivo: "transformacion" }),
+      });
     } else {
       entry.stockModelOriginal = entry.stockModel;
       entry.tallaOriginal = entry.talla;

@@ -3787,7 +3787,9 @@ function renderPendientes() {
     // pedido) tampoco va por SEUR — se trata igual que el colchón de un pack
     // en FUR, "Marcar recibido" normal para que luego lo recoja
     // buildFurnitureExport en la carga de Furniture de ese pedido.
-    const esColchonSeur = ((b.tipo === "colchon" && !b.esPack && !(esColchonSueltoConTapiceria && b.tipoEnvio === "FUR")) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
+    // Un colchón transformado va abierto: siempre Furniture, nunca SEUR
+    // (Jennifer, 2026-09-28).
+    const esColchonSeur = ((b.tipo === "colchon" && !b.esPack && !b.transformadoDesde && !(esColchonSueltoConTapiceria && b.tipoEnvio === "FUR")) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
     // Sustituir por otro modelo que sí hay en stock (Jennifer, 2026-09-18):
     // vale tanto para colchón suelto como de pack, mientras siga
     // "pendiente" — una vez preparado o sustituido ya no aplica. El propio
@@ -4401,7 +4403,7 @@ function furnitureRowCells(o) {
         return \`
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
-          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}
+          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}
         </label>
       \`;
       }).join("")
@@ -5606,12 +5608,7 @@ async function abrirModalSustituir(b) {
   // Colchón de pack con FUR, o FPK cuya tapicería aún no ha salido: no
   // hace falta elegir fecha de SEUR, sale junto con la tapicería (Jennifer,
   // 2026-09-18) — se enseña un único botón "Sustituir" en vez de hoy/mañana.
-  if (sustituirViaSeur) {
-    hoyBtn.style.display = "";
-    mananaBtn.style.display = "";
-  } else {
-    directoBtn.style.display = "";
-  }
+  mostrarBotonesSustituir(false);
   const alternativas = data.alternativas || [];
   listEl.innerHTML = alternativas.length
     ? alternativas.map(a => \`<button type="button" class="alternativa-opcion" data-modelo="\${escapeAttr(a.stockModel)}"><span>\${a.stockModel}</span><span class="alternativa-stock">\${a.cantidad} en stock</span></button>\`).join("")
@@ -5628,6 +5625,7 @@ async function abrirModalSustituir(b) {
       todasOpciones().forEach(x => x.classList.remove("selected"));
       btn.classList.add("selected");
       sustituirTransformarTalla = null;
+      mostrarBotonesSustituir(false);
       document.getElementById("sustituir-query").value = btn.dataset.modelo;
       activarBotones();
     });
@@ -5637,10 +5635,21 @@ async function abrirModalSustituir(b) {
       todasOpciones().forEach(x => x.classList.remove("selected"));
       btn.classList.add("selected");
       sustituirTransformarTalla = btn.dataset.talla;
+      mostrarBotonesSustituir(true);
       document.getElementById("sustituir-query").value = "";
       activarBotones();
     });
   });
+}
+// Un colchón transformado sale siempre por Furniture (Jennifer, 2026-09-28):
+// nunca se elige carga de SEUR, solo un botón "Transformar".
+function mostrarBotonesSustituir(transformando) {
+  const directoBtn = document.getElementById("sustituir-directo-btn");
+  const conSeur = !transformando && sustituirViaSeur;
+  directoBtn.textContent = transformando ? "Transformar" : "Sustituir";
+  directoBtn.style.display = conSeur ? "none" : "";
+  document.getElementById("sustituir-hoy-btn").style.display = conSeur ? "" : "none";
+  document.getElementById("sustituir-manana-btn").style.display = conSeur ? "" : "none";
 }
 // Desde la ficha de un pedido (Shopify o Carrefour), Jennifer pidió poder
 // sustituir sin salir a Proveedores — se busca al vuelo si ese pedido tiene
@@ -5899,6 +5908,7 @@ document.getElementById("sustituir-modal-overlay").addEventListener("click", (e)
 document.getElementById("sustituir-query").addEventListener("input", () => {
   const has = document.getElementById("sustituir-query").value.trim().length > 0;
   sustituirTransformarTalla = null;
+  mostrarBotonesSustituir(false);
   document.getElementById("sustituir-directo-btn").disabled = !has;
   document.getElementById("sustituir-hoy-btn").disabled = !has;
   document.getElementById("sustituir-manana-btn").disabled = !has;
@@ -5910,7 +5920,7 @@ async function confirmarSustituir(fecha) {
   const transformarDesde = sustituirTransformarTalla;
   const query = document.getElementById("sustituir-query").value.trim();
   if (!query && !transformarDesde) return;
-  if (transformarDesde && !confirm("¿Transformar un " + b.stockModel + " " + transformarDesde + " en " + b.talla + " para " + refLabel(b) + "?\\n\\nSe descuenta " + (b.cantidad || 1) + " del stock de " + transformarDesde + " y el pedido queda listo para salir.")) return;
+  if (transformarDesde && !confirm("¿Transformar un " + b.stockModel + " " + transformarDesde + " en " + b.talla + " para " + refLabel(b) + "?\\n\\nSe descuenta " + (b.cantidad || 1) + " del stock de " + transformarDesde + " y el colchón sale por FURNITURE (va abierto, nunca por SEUR).")) return;
   const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/sustituir", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -5922,6 +5932,14 @@ async function confirmarSustituir(fecha) {
   cerrarModalSustituir();
   if (!res.ok || data.ok === false) {
     alert(data.error || "No se pudo sustituir.");
+    return;
+  }
+  if (transformarDesde) {
+    // El pedido ha podido pasar de SEUR a FURNITURE: se recarga todo y, si
+    // ya está todo lo del pedido listo, sube solo a la carga de Furniture.
+    await loadOrders();
+    await loadPendientes();
+    await checkAutoAddCarga(b.orderId);
     return;
   }
   if (document.getElementById("view-pendientes").style.display !== "none") loadPendientes();
