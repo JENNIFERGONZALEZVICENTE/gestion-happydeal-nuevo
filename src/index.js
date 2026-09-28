@@ -1299,6 +1299,10 @@ function renderPage() {
   .tracking-estado { font-size: 11px; color: #92400e; }
   .tracking-estado.tracking-estado-ok { color: var(--brand-dark); }
   .bell-cell { text-align: center; width: 1%; white-space: nowrap; }
+  /* Iconos de cada pedido en rejilla de 3 por fila (Jennifer, 2026-09-28:
+     "ya tenemos muchos iconos... ponerlos en dos líneas"). */
+  .iconos-pedido { display: grid; grid-template-columns: repeat(3, auto); gap: 4px; justify-content: center; align-items: center; }
+  .iconos-pedido > * { margin: 0 !important; }
   .cancel-btn {
     display: inline-flex;
     align-items: center;
@@ -2584,7 +2588,7 @@ function render(orders) {
   const tbody = document.querySelector("#orders tbody");
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
-      <td class="bell-cell">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}</td>
+      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}</div></td>
       <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
@@ -5453,7 +5457,7 @@ function renderMarketplace(platformId) {
   }
   document.querySelector("#" + platformId + "-table tbody").innerHTML = filtered.map(o => \`
     <tr\${(o.cancelado || estadoSeguimientoEspecial(o.estado) === "CANCELADO") ? ' class="fila-cancelada"' : ""}>
-      <td class="bell-cell">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}</td>
+      <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}</div></td>
       <td>\${o.orderRef}</td>
       <td>\${o.orderDate || ""}</td>
       <td>\${o.name || ""}</td>
