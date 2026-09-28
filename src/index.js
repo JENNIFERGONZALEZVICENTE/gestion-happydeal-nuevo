@@ -886,6 +886,50 @@ async function handleReviewNote(request, env) {
   });
 }
 
+// Aviso al almacén de una transformación (Jennifer, 2026-09-28): tiene que
+// subir el colchón de la medida de origen a fábrica. El email lo manda un
+// Google Apps Script de la cuenta de Jennifer (colchonesbezen.com está en
+// otra cuenta de Cloudflare, no se puede enviar correo desde aquí): el
+// destinatario está fijo en el script, aquí solo va el contenido + secreto.
+// Secrets del Worker: ALMACEN_AVISO_URL, ALMACEN_AVISO_SECRET.
+async function avisarAlmacenTransformacion(env, entry) {
+  if (!env.ALMACEN_AVISO_URL || !env.ALMACEN_AVISO_SECRET) return { ok: false, reason: "sin_configurar" };
+  let cliente = "";
+  try {
+    const orders = await (await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders")).json();
+    const o = orders.find((x) => String(x.id) === String(entry.orderId));
+    if (o) cliente = o.name || "";
+  } catch (e) { /* sin nombre de cliente, el aviso sale igual */ }
+  const pedido = entry.platform && entry.platform !== "Shopify" && entry.orderRef ? entry.orderRef : "BEZEN" + entry.orderNumber;
+  const unidades = entry.cantidad || 1;
+  const modelo = entry.stockModel;
+  const lineas = [
+    "Hay que subir a fábrica para transformar:",
+    "",
+    `${modelo}`,
+    `De ${entry.transformadoDesde} a ${entry.talla} — ${unidades} ${unidades > 1 ? "unidades" : "unidad"}`,
+    "",
+    `Pedido: ${pedido}${cliente ? " — " + cliente : ""}`,
+    "",
+    "Sale por Furniture (colchón abierto).",
+  ];
+  try {
+    const res = await fetch(env.ALMACEN_AVISO_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        secreto: env.ALMACEN_AVISO_SECRET,
+        asunto: `Transformación de colchón — ${pedido}`,
+        texto: lineas.join("\n"),
+      }),
+    });
+    const r = await res.json().catch(() => ({}));
+    return r.ok ? { ok: true } : { ok: false, reason: r.error || "status_" + res.status };
+  } catch (e) {
+    return { ok: false, reason: "error_red" };
+  }
+}
+
 async function proxyInventory(env, path, request) {
   const stub = inventoryStub(env);
   const init = request.method === "GET" ? undefined : { method: request.method, body: await request.text() };
@@ -5935,6 +5979,9 @@ async function confirmarSustituir(fecha) {
     return;
   }
   if (transformarDesde) {
+    alert(data.avisoAlmacen && data.avisoAlmacen.ok
+      ? "Transformación registrada. Se ha enviado el aviso por email al almacén."
+      : "Transformación registrada, pero NO se ha podido enviar el email al almacén (" + ((data.avisoAlmacen && data.avisoAlmacen.reason) || "error") + "). Avísales tú, por favor.");
     // El pedido ha podido pasar de SEUR a FURNITURE: se recarga todo y, si
     // ya está todo lo del pedido listo, sube solo a la carga de Furniture.
     await loadOrders();
@@ -6883,7 +6930,18 @@ async function handleFetch(request, env) {
 
     const sustituirPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/sustituir$/);
     if (sustituirPendingMatch && request.method === "POST") {
-      return proxyInventory(env, `/backorders/${sustituirPendingMatch[1]}/sustituir`, request);
+      const body = await request.text();
+      const res = await inventoryStub(env).fetch("https://do/backorders/" + sustituirPendingMatch[1] + "/sustituir", { method: "POST", body });
+      const texto = await res.text();
+      let data = null;
+      try { data = JSON.parse(texto); } catch (e) { /* respuesta no JSON: se devuelve tal cual */ }
+      // Transformación hecha: aviso por email al almacén (Jennifer, 2026-09-28)
+      // — no bloquea ni deshace la transformación si el email falla.
+      if (res.ok && data && data.ok && data.entry && data.entry.transformadoDesde) {
+        data.avisoAlmacen = await avisarAlmacenTransformacion(env, data.entry);
+        return Response.json(data);
+      }
+      return new Response(texto, { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     const planPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/plan$/);
