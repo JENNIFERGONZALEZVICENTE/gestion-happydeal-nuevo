@@ -909,7 +909,7 @@ async function avisarAlmacenTransformacion(env, entry) {
     "Hay que subir a fábrica para transformar:",
     "",
     `${entry.stockModel}`,
-    `De ${entry.transformadoDesde}${entry.transformadoDesdeAbierto ? " (el colchón ABIERTO)" : ""} a ${entry.talla} — ${unidades} ${unidades > 1 ? "unidades" : "unidad"}`,
+    `De ${entry.transformadoDesde}${entry.transformadoDesdeAbierto ? " (el colchón ABIERTO" + (entry.notaAbierto ? " — " + entry.notaAbierto : "") + ")" : ""} a ${entry.talla} — ${unidades} ${unidades > 1 ? "unidades" : "unidad"}`,
     "",
     `Pedido: ${pedido}${cliente ? " — " + cliente : ""}`,
     "",
@@ -918,7 +918,7 @@ async function avisarAlmacenTransformacion(env, entry) {
     "Se adjunta la etiqueta para imprimir y pegar en el colchón.",
   ];
   const pdf = etiquetaTransformacionPdf({
-    pedido, cliente, modelo: modeloCorto(entry.stockModel) + (entry.transformadoDesdeAbierto ? " · ABIERTO" : ""),
+    pedido, cliente, modelo: modeloCorto(entry.stockModel) + (entry.transformadoDesdeAbierto ? " · ABIERTO" + (entry.notaAbierto ? " · " + entry.notaAbierto : "") : ""),
     desde: entry.transformadoDesde, hasta: entry.talla, unidades, fecha: fechaHoyEs(),
   });
   return enviarEmailAlmacen(env, { asunto: `Transformación de colchón — ${pedido}`, texto: lineas.join("\n"), pdf, nombrePdf: `Etiqueta transformacion ${pedido}.pdf` });
@@ -3636,7 +3636,9 @@ function colchonCandidatoAbierto(b) {
 function abiertosParaBackorder(b) {
   if (!abiertosRows.length || !colchonCandidatoAbierto(b)) return null;
   const n = b.cantidad || 1;
-  const delModelo = abiertosRows.filter(a => a.stockModel === b.stockModel && a.cantidad >= n);
+  // La ficha normal y la de "LIQUIDACIÓN" son el mismo colchón.
+  const base = s => String(s || "").replace(/\\s*-\\s*LIQUIDACI[ÓO]N\\s*$/i, "").trim();
+  const delModelo = abiertosRows.filter(a => base(a.stockModel) === base(b.stockModel) && a.cantidad >= n);
   const mismo = delModelo.find(a => a.talla === b.talla) || null;
   // Cortar solo aplica a lo que sigue pendiente (lo cubierto con enrollado
   // ya tiene la medida exacta: ahí solo tiene sentido "usar el abierto").
@@ -3659,10 +3661,10 @@ function abiertoTagHtml(b) {
   if (!op) return "";
   let html = "";
   if (op.mismo) {
-    html += \`<span class="abierto-tag">🟣 ABIERTO disponible: \${escapeAttr(nombreCortoModelo(b.stockModel))} \${b.talla} (\${op.mismo.cantidad})</span> <button type="button" class="abierto-btn" data-usar-abierto="\${escapeAttr(b.id)}">Usar el abierto</button>\`;
+    html += \`<span class="abierto-tag">🟣 ABIERTO disponible: \${escapeAttr(nombreCortoModelo(b.stockModel))} \${b.talla} (\${op.mismo.cantidad})\${op.mismo.nota ? " · " + escapeAttr(op.mismo.nota) : ""}</span> <button type="button" class="abierto-btn" data-usar-abierto="\${escapeAttr(b.id)}">Usar el abierto</button>\`;
   }
   for (const a of op.cortar) {
-    html += \`\${html ? "<br>" : ""}<span class="abierto-tag">🟣✂️ Se puede CORTAR: abierto \${a.talla} → \${b.talla} (\${a.cantidad})</span> <button type="button" class="abierto-btn" data-cortar-abierto="\${escapeAttr(b.id)}" data-talla="\${escapeAttr(a.talla)}">Cortar</button>\`;
+    html += \`\${html ? "<br>" : ""}<span class="abierto-tag">🟣✂️ Se puede CORTAR: abierto \${a.talla} → \${b.talla} (\${a.cantidad})\${a.nota ? " · " + escapeAttr(a.nota) : ""}</span> <button type="button" class="abierto-btn" data-cortar-abierto="\${escapeAttr(b.id)}" data-talla="\${escapeAttr(a.talla)}">Cortar</button>\`;
   }
   return '<div class="abierto-box">' + html + "</div>";
 }
@@ -7207,8 +7209,8 @@ async function handleFetch(request, env) {
         data.avisoReserva = await enviarReservaAlmacen(env, {
           pedido: referenciaPedidoAlmacen(entry),
           cliente: (o && o.name) || "",
-          lineasTexto: [lineaTextoReserva(entry) + " — COLCHÓN ABIERTO" + (entry.enrolladoDevuelto ? " (sustituye al enrollado, que vuelve a stock)" : "")],
-          bultos: bultosPorUnidad(entry).map((b) => ({ ...b, parte: "COLCHÓN ABIERTO" })),
+          lineasTexto: [lineaTextoReserva(entry) + " — COLCHÓN ABIERTO" + (entry.notaAbierto ? " (" + entry.notaAbierto + ")" : "") + (entry.enrolladoDevuelto ? " (sustituye al enrollado, que vuelve a stock)" : "")],
+          bultos: bultosPorUnidad(entry).map((b) => ({ ...b, parte: "COLCHÓN ABIERTO" + (entry.notaAbierto ? " · " + entry.notaAbierto : "") })),
         });
         if (data.avisoReserva.ok) {
           await inventoryStub(env).fetch("https://do/backorders/" + usarAbiertoMatch[1] + "/reserva-enviada", { method: "POST", body: "{}" });

@@ -2627,6 +2627,16 @@ export class InventoryStore {
     return Response.json(row);
   }
 
+  // Un abierto sirve igual para la ficha normal y la de "LIQUIDACIÓN" del
+  // mismo colchón (Jennifer, 2026-09-28: son el mismo colchón físico).
+  static modeloBase(stockModel) {
+    return String(stockModel || "").replace(/\s*-\s*LIQUIDACI[ÓO]N\s*$/i, "").trim();
+  }
+  static claveAbierto(abiertos, stockModel, talla) {
+    const base = InventoryStore.modeloBase(stockModel);
+    return Object.keys(abiertos).find((k) => abiertos[k].talla === talla && InventoryStore.modeloBase(abiertos[k].stockModel) === base) || null;
+  }
+
   // "Usar el abierto" en un colchón de un pedido de Furniture: si estaba
   // pendiente de fábrica, deja de estarlo (libera el vendido pendiente); si
   // el motor ya había gastado un ENROLLADO de stock (pendiente "-cubierto"),
@@ -2644,18 +2654,24 @@ export class InventoryStore {
     }
     const n = entry.cantidad || 1;
     const abiertos = await this.load("abiertos", {});
-    const key = stockKey(entry.stockModel, entry.talla);
-    if (!abiertos[key] || abiertos[key].cantidad < n) {
+    const keyAbierto = InventoryStore.claveAbierto(abiertos, entry.stockModel, entry.talla);
+    if (!keyAbierto || abiertos[keyAbierto].cantidad < n) {
       return Response.json({ ok: false, error: `No hay ${n} abierto(s) de ${entry.stockModel} ${entry.talla}.` }, { status: 409 });
     }
-    abiertos[key].cantidad -= n;
-    if (abiertos[key].cantidad === 0 && !abiertos[key].nota) delete abiertos[key];
+    const modeloAbierto = abiertos[keyAbierto].stockModel;
+    // La nota del abierto (ej. "Versión anterior") viaja al email del
+    // almacén para que cojan el colchón correcto.
+    entry.notaAbierto = abiertos[keyAbierto].nota || "";
+    abiertos[keyAbierto].cantidad -= n;
+    const quedan = abiertos[keyAbierto].cantidad;
+    if (quedan === 0 && !abiertos[keyAbierto].nota) delete abiertos[keyAbierto];
     await this.state.storage.put("abiertos", abiertos);
     await this.logMovement({
-      stockModel: entry.stockModel, talla: entry.talla, campo: "abiertos", delta: -n,
-      resultante: abiertos[key] ? abiertos[key].cantidad : 0, origen: "abierto",
+      stockModel: modeloAbierto, talla: entry.talla, campo: "abiertos", delta: -n,
+      resultante: quedan, origen: "abierto",
       usuario: usuario || null, orderNumber: entry.orderNumber, platform: entry.platform, orderRef: entry.orderRef,
     });
+    const key = stockKey(entry.stockModel, entry.talla);
     const stock = await this.load("stock", {});
     const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
     if (conEnrollado) {
@@ -3033,8 +3049,9 @@ export class InventoryStore {
     const congelado = await this.load("stockCongelado", false);
     const stock = await this.load("stock", {});
     const abiertos = desdeAbierto ? await this.load("abiertos", {}) : null;
+    const keyAbiertoOrigen = desdeAbierto ? InventoryStore.claveAbierto(abiertos, stockModel, talla) : null;
     if (transformar) {
-      const origen = (desdeAbierto ? abiertos : stock)[stockKey(stockModel, talla)];
+      const origen = desdeAbierto ? (keyAbiertoOrigen && abiertos[keyAbiertoOrigen]) : stock[stockKey(stockModel, talla)];
       if (!origen || origen.cantidad < entry.cantidad) {
         return Response.json({ ok: false, error: `No hay ${desdeAbierto ? "abiertos" : "stock"} de ${stockModel} ${talla} para transformar.` }, { status: 409 });
       }
@@ -3056,13 +3073,15 @@ export class InventoryStore {
 
     const newKey = stockKey(stockModel, talla);
     if (desdeAbierto) {
-      const ab = abiertos[newKey];
+      const ab = abiertos[keyAbiertoOrigen];
+      entry.notaAbierto = ab.nota || "";
       ab.cantidad = Math.max(0, ab.cantidad - entry.cantidad);
-      if (ab.cantidad === 0 && !ab.nota) delete abiertos[newKey];
+      const quedan = ab.cantidad;
+      if (ab.cantidad === 0 && !ab.nota) delete abiertos[keyAbiertoOrigen];
       await this.state.storage.put("abiertos", abiertos);
       await this.logMovement({
-        stockModel, talla, campo: "abiertos",
-        delta: -entry.cantidad, resultante: abiertos[newKey] ? abiertos[newKey].cantidad : 0,
+        stockModel: ab.stockModel, talla, campo: "abiertos",
+        delta: -entry.cantidad, resultante: quedan,
         origen: origenMovimiento, orderNumber: entry.orderNumber,
         platform: entry.platform, orderRef: entry.orderRef,
       });
