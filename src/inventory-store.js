@@ -1840,6 +1840,16 @@ export class InventoryStore {
     if (url.pathname === "/stock/adjust" && method === "POST") {
       return this.adjustStock(await request.json());
     }
+    if (url.pathname === "/abiertos" && method === "GET") {
+      return Response.json(Object.values(await this.load("abiertos", {})));
+    }
+    if (url.pathname === "/abiertos/adjust" && method === "POST") {
+      return this.adjustAbiertos(await request.json());
+    }
+    const usarAbiertoMatch = url.pathname.match(/^\/backorders\/([^/]+)\/usar-abierto$/);
+    if (usarAbiertoMatch && method === "POST") {
+      return this.usarAbierto(decodeURIComponent(usarAbiertoMatch[1]), await request.json().catch(() => ({})));
+    }
     if (url.pathname === "/stock/adjust-by-lookup" && method === "POST") {
       return this.adjustStockByLookup(await request.json());
     }
@@ -1891,8 +1901,8 @@ export class InventoryStore {
     }
     const sustituirMatch = url.pathname.match(/^\/backorders\/([^/]+)\/sustituir$/);
     if (sustituirMatch && method === "POST") {
-      const { query, mode, talla, fecha, transformar } = await request.json();
-      return this.substituteBackorder(decodeURIComponent(sustituirMatch[1]), { query, mode, talla, fecha, transformar });
+      const { query, mode, talla, fecha, transformar, desdeAbierto } = await request.json();
+      return this.substituteBackorder(decodeURIComponent(sustituirMatch[1]), { query, mode, talla, fecha, transformar, desdeAbierto: !!(transformar && desdeAbierto) });
     }
     const planMatch = url.pathname.match(/^\/backorders\/([^/]+)\/plan$/);
     if (planMatch && method === "POST") {
@@ -2587,6 +2597,98 @@ export class InventoryStore {
     return Response.json({ ok: true, actualizados });
   }
 
+  // Colchones ABIERTOS del almacén (Jennifer, 2026-09-28): no pueden salir
+  // por SEUR, solo por Furniture — se llevan aparte del stock normal
+  // (enrollado) para poder gastarlos en pedidos de Furniture (tal cual o
+  // cortándolos a una medida menor). Clave: stockKey(modelo, talla).
+  async adjustAbiertos({ query, mode, talla, delta, nota, usuario }) {
+    const products = await this.load("products", {});
+    const stockModel = resolveStockModel(query, mode || "nombre", products);
+    if (!stockModel) {
+      return Response.json({ error: "No se ha encontrado ningún modelo que coincida con \"" + query + "\"." }, { status: 404 });
+    }
+    const tallaNorm = normalizeTalla(talla) || (talla || "").trim().toUpperCase();
+    if (!tallaNorm) return Response.json({ error: "Indica una talla válida." }, { status: 400 });
+    const abiertos = await this.load("abiertos", {});
+    const key = stockKey(stockModel, tallaNorm);
+    const row = abiertos[key] || { stockModel, talla: tallaNorm, cantidad: 0, nota: "" };
+    row.cantidad = Math.max(0, (row.cantidad || 0) + Number(delta || 0));
+    if (nota !== undefined) row.nota = String(nota || "");
+    row.actualizado = new Date().toISOString();
+    if (row.cantidad === 0 && !row.nota) delete abiertos[key];
+    else abiertos[key] = row;
+    await this.state.storage.put("abiertos", abiertos);
+    if (Number(delta)) {
+      await this.logMovement({
+        stockModel, talla: tallaNorm, campo: "abiertos", delta: Number(delta), resultante: row.cantidad,
+        origen: "manual", usuario: usuario || null,
+      });
+    }
+    return Response.json(row);
+  }
+
+  // "Usar el abierto" en un colchón de un pedido de Furniture: si estaba
+  // pendiente de fábrica, deja de estarlo (libera el vendido pendiente); si
+  // el motor ya había gastado un ENROLLADO de stock (pendiente "-cubierto"),
+  // ese enrollado vuelve al stock — se guarda para SEUR, que es donde hace
+  // falta. En ambos casos sale por Furniture (FUR).
+  async usarAbierto(id, { usuario } = {}) {
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
+    if (entry.tipo !== "colchon") return Response.json({ ok: false, error: "Solo para colchones." }, { status: 409 });
+    if (entry.desdeAbierto) return Response.json({ ok: false, error: "Este colchón ya sale de un abierto." }, { status: 409 });
+    const conEnrollado = entry.estado === "cubierto" && String(entry.id).endsWith("-cubierto") && !entry.transformadoDesde;
+    if (entry.estado !== "pendiente" && !conEnrollado) {
+      return Response.json({ ok: false, error: "Este colchón ya no está pendiente." }, { status: 409 });
+    }
+    const n = entry.cantidad || 1;
+    const abiertos = await this.load("abiertos", {});
+    const key = stockKey(entry.stockModel, entry.talla);
+    if (!abiertos[key] || abiertos[key].cantidad < n) {
+      return Response.json({ ok: false, error: `No hay ${n} abierto(s) de ${entry.stockModel} ${entry.talla}.` }, { status: 409 });
+    }
+    abiertos[key].cantidad -= n;
+    if (abiertos[key].cantidad === 0 && !abiertos[key].nota) delete abiertos[key];
+    await this.state.storage.put("abiertos", abiertos);
+    await this.logMovement({
+      stockModel: entry.stockModel, talla: entry.talla, campo: "abiertos", delta: -n,
+      resultante: abiertos[key] ? abiertos[key].cantidad : 0, origen: "abierto",
+      usuario: usuario || null, orderNumber: entry.orderNumber, platform: entry.platform, orderRef: entry.orderRef,
+    });
+    const stock = await this.load("stock", {});
+    const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
+    if (conEnrollado) {
+      const antes = row.cantidad || 0;
+      row.cantidad = antes + n;
+      await this.logMovement({
+        stockModel: entry.stockModel, talla: entry.talla, campo: "cantidad", delta: n, resultante: row.cantidad,
+        origen: "abierto", usuario: usuario || null, orderNumber: entry.orderNumber, platform: entry.platform, orderRef: entry.orderRef,
+      });
+    } else {
+      const antes = row.vendidoPendiente || 0;
+      row.vendidoPendiente = Math.max(0, antes - n);
+      await this.logMovement({
+        stockModel: entry.stockModel, talla: entry.talla, campo: "vendidoPendiente", delta: row.vendidoPendiente - antes,
+        resultante: row.vendidoPendiente, origen: "abierto", usuario: usuario || null,
+        orderNumber: entry.orderNumber, platform: entry.platform, orderRef: entry.orderRef,
+      });
+    }
+    stock[key] = row;
+    await this.state.storage.put("stock", stock);
+    entry.desdeAbierto = true;
+    entry.enrolladoDevuelto = conEnrollado;
+    entry.fechaAbierto = new Date().toISOString();
+    entry.estado = "cubierto";
+    entry.recibidoFabrica = true;
+    entry.fechaRecibido = entry.fechaRecibido || entry.fechaAbierto;
+    entry.tipoEnvio = "FUR";
+    // La reserva (si la hubo) era del enrollado: la del abierto se manda de nuevo.
+    entry.reservaEnviada = null;
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, entry });
+  }
+
   async adjustStockByLookup({ query, mode, talla, delta, usuario }) {
     const products = await this.load("products", {});
     const stockModel = resolveStockModel(query, mode, products);
@@ -2888,7 +2990,10 @@ export class InventoryStore {
   // MISMO modelo de OTRA medida (`talla` = medida de origen) y se adapta a
   // la vendida — se descuenta el stock de la medida de origen, pero el
   // pendiente sigue siendo de la medida que recibe el cliente.
-  async substituteBackorder(id, { query, mode, talla, fecha, transformar }) {
+  // desdeAbierto (Jennifer, 2026-09-28): la medida de origen de la
+  // transformación sale de la lista de colchones ABIERTOS, no del stock
+  // enrollado ("cortar" un abierto más grande).
+  async substituteBackorder(id, { query, mode, talla, fecha, transformar, desdeAbierto }) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
@@ -2927,10 +3032,11 @@ export class InventoryStore {
 
     const congelado = await this.load("stockCongelado", false);
     const stock = await this.load("stock", {});
+    const abiertos = desdeAbierto ? await this.load("abiertos", {}) : null;
     if (transformar) {
-      const origen = stock[stockKey(stockModel, talla)];
+      const origen = (desdeAbierto ? abiertos : stock)[stockKey(stockModel, talla)];
       if (!origen || origen.cantidad < entry.cantidad) {
-        return Response.json({ ok: false, error: `No hay stock de ${stockModel} ${talla} para transformar.` }, { status: 409 });
+        return Response.json({ ok: false, error: `No hay ${desdeAbierto ? "abiertos" : "stock"} de ${stockModel} ${talla} para transformar.` }, { status: 409 });
       }
     }
 
@@ -2949,22 +3055,36 @@ export class InventoryStore {
     }
 
     const newKey = stockKey(stockModel, talla);
-    const newRow = stock[newKey] || { stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
-    const antesNew = newRow.cantidad;
-    if (!congelado) newRow.cantidad = Math.max(0, newRow.cantidad - entry.cantidad);
-    stock[newKey] = newRow;
-    await this.logMovement({
-      stockModel, talla, campo: "cantidad",
-      delta: newRow.cantidad - antesNew, resultante: newRow.cantidad,
-      origen: origenMovimiento, orderNumber: entry.orderNumber,
-      platform: entry.platform, orderRef: entry.orderRef,
-    });
+    if (desdeAbierto) {
+      const ab = abiertos[newKey];
+      ab.cantidad = Math.max(0, ab.cantidad - entry.cantidad);
+      if (ab.cantidad === 0 && !ab.nota) delete abiertos[newKey];
+      await this.state.storage.put("abiertos", abiertos);
+      await this.logMovement({
+        stockModel, talla, campo: "abiertos",
+        delta: -entry.cantidad, resultante: abiertos[newKey] ? abiertos[newKey].cantidad : 0,
+        origen: origenMovimiento, orderNumber: entry.orderNumber,
+        platform: entry.platform, orderRef: entry.orderRef,
+      });
+    } else {
+      const newRow = stock[newKey] || { stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
+      const antesNew = newRow.cantidad;
+      if (!congelado) newRow.cantidad = Math.max(0, newRow.cantidad - entry.cantidad);
+      stock[newKey] = newRow;
+      await this.logMovement({
+        stockModel, talla, campo: "cantidad",
+        delta: newRow.cantidad - antesNew, resultante: newRow.cantidad,
+        origen: origenMovimiento, orderNumber: entry.orderNumber,
+        platform: entry.platform, orderRef: entry.orderRef,
+      });
+    }
 
     if (transformar) {
       // El cliente recibe la medida que compró: el pendiente no cambia de
       // modelo ni de medida, solo se apunta de dónde salió. Va con FUR y el
       // pedido entero pasa a FURNITURE.
       entry.transformadoDesde = talla;
+      entry.transformadoDesdeAbierto = !!desdeAbierto;
       entry.fechaTransformacion = new Date().toISOString();
       entry.tipoEnvio = "FUR";
       const ordersStub = this.env.ORDERS_STORE.get(this.env.ORDERS_STORE.idFromName("shopify"));

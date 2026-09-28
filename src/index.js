@@ -909,7 +909,7 @@ async function avisarAlmacenTransformacion(env, entry) {
     "Hay que subir a fábrica para transformar:",
     "",
     `${entry.stockModel}`,
-    `De ${entry.transformadoDesde} a ${entry.talla} — ${unidades} ${unidades > 1 ? "unidades" : "unidad"}`,
+    `De ${entry.transformadoDesde}${entry.transformadoDesdeAbierto ? " (el colchón ABIERTO)" : ""} a ${entry.talla} — ${unidades} ${unidades > 1 ? "unidades" : "unidad"}`,
     "",
     `Pedido: ${pedido}${cliente ? " — " + cliente : ""}`,
     "",
@@ -918,7 +918,7 @@ async function avisarAlmacenTransformacion(env, entry) {
     "Se adjunta la etiqueta para imprimir y pegar en el colchón.",
   ];
   const pdf = etiquetaTransformacionPdf({
-    pedido, cliente, modelo: modeloCorto(entry.stockModel),
+    pedido, cliente, modelo: modeloCorto(entry.stockModel) + (entry.transformadoDesdeAbierto ? " · ABIERTO" : ""),
     desde: entry.transformadoDesde, hasta: entry.talla, unidades, fecha: fechaHoyEs(),
   });
   return enviarEmailAlmacen(env, { asunto: `Transformación de colchón — ${pedido}`, texto: lineas.join("\n"), pdf, nombrePdf: `Etiqueta transformacion ${pedido}.pdf` });
@@ -1250,6 +1250,13 @@ function renderPage() {
   .badge.pendiente { background: #fef3c7; color: #92400e; }
   .badge.pago-pendiente { background: #fee2e2; color: #991b1b; }
   .badge.reembolsado { background: #ede9fe; color: #5b21b6; }
+  /* Colchones abiertos (2026-09-28): morado, distinto de la campana */
+  .abiertos-badge { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 6px; border-radius: 9px; background: #7c3aed; color: #fff; font-size: 11px; font-weight: 700; text-align: center; line-height: 18px; }
+  .abierto-box { margin-top: 4px; }
+  .abierto-tag { display: inline-block; margin: 2px 0; padding: 2px 7px; border-radius: 6px; background: #ede9fe; color: #5b21b6; font-size: 11px; font-weight: 700; white-space: nowrap; }
+  .abierto-btn { margin-left: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; border: 1px solid #7c3aed; border-radius: 6px; background: #fff; color: #7c3aed; cursor: pointer; }
+  .abierto-btn:hover { background: #7c3aed; color: #fff; }
+  .abiertos-oportunidades-box { margin: 1rem 2rem; padding: 12px 14px; border: 2px solid #c4b5fd; border-radius: 10px; background: #faf5ff; }
   .transformado-tag { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 6px; background: #e0e7ff; color: #3730a3; font-size: 11px; font-weight: 600; white-space: nowrap; }
   .grupo-envio-item-ref { font-size: 11px; font-weight: 700; color: #92400e; }
   .grupo-envio-tag {
@@ -1679,6 +1686,7 @@ function renderPage() {
   <ul id="inventario-list">
     <li><a href="#" class="nav-link" data-inventario="catalogo">Catálogo</a></li>
     <li><a href="#" class="nav-link" data-inventario="stock">Stock</a></li>
+    <li><a href="#" class="nav-link" data-inventario="abiertos">Colchones abiertos <span id="abiertos-badge" class="abiertos-badge" style="display:none" title="Pedidos de Furniture que pueden usar un colchón abierto"></span></a></li>
     <li><a href="#" class="nav-link" data-inventario="historial">Historial de stock</a></li>
     <li><a href="#" class="nav-link" data-inventario="pesos">Pesos SEUR</a></li>
   </ul>
@@ -1934,6 +1942,39 @@ function renderPage() {
   <div class="table-wrap">
     <table id="stock-table">
       <thead><tr><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th>Pedido a proveedor</th><th>Disponible al llegar</th><th>Ajustar</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-abiertos" style="display:none">
+  <div class="abiertos-oportunidades-box">
+    <h3 style="margin:0 0 6px">✂️ Pedidos que pueden usar un colchón abierto</h3>
+    <div id="abiertos-oportunidades-count" class="inventario-count" style="padding:0 0 6px"></div>
+    <div class="table-wrap">
+      <table id="abiertos-oportunidades-table">
+        <thead><tr><th>Pedido</th><th>Cliente</th><th>Colchón del pedido</th><th>Abierto disponible</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="quickform">
+    <h3>Dar de alta / baja un colchón abierto</h3>
+    <div class="toolbar">
+      <input id="abiertos-query" type="text" list="abiertos-models-datalist" placeholder="Modelo de colchón..." autocomplete="off" />
+      <datalist id="abiertos-models-datalist"></datalist>
+      <input id="abiertos-talla" type="text" placeholder="Talla (ej. 150x190)" autocomplete="off" />
+      <input id="abiertos-qty" type="number" min="1" value="1" />
+      <input id="abiertos-nota" type="text" placeholder="Nota (opcional)" autocomplete="off" />
+      <button id="abiertos-alta" type="button">Dar de alta (+)</button>
+      <button id="abiertos-baja" type="button">Dar de baja (−)</button>
+    </div>
+    <div id="abiertos-result" class="inventario-count"></div>
+  </div>
+  <div id="abiertos-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="abiertos-table">
+      <thead><tr><th>Modelo</th><th>Talla</th><th>Abiertos</th><th>Nota</th><th>Ajustar</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -2549,7 +2590,7 @@ function render(orders) {
       <td>\${o.name}</td>
       <td>\${o.address}</td>
       <td>\${o.phone}</td>
-      <td>\${o.product}</td>
+      <td>\${o.product}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
       <td class="services">\${o.services}</td>
       <td>\${o.paymentMethod}</td>
       <td>\${pagoManualCell(o)}</td>
@@ -2860,6 +2901,7 @@ function currentFiltered() {
 
 function applyFilter() {
   render(currentFiltered());
+  actualizarBadgeAbiertos();
 }
 
 document.getElementById("search").addEventListener("input", applyFilter);
@@ -2939,6 +2981,9 @@ function onUserReady() {
     backorders = data;
     applyFilter();
   });
+  // Colchones abiertos: el contador morado del menú tiene que verse nada
+  // más entrar, sin haber abierto antes esa pantalla (Jennifer, 2026-09-28).
+  cargarAbiertos().then(applyFilter);
   connectWS();
 }
 
@@ -2964,7 +3009,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace"];
+const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -3036,7 +3081,7 @@ async function cargarPlazosMarketplace() {
   }
 }
 
-const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", historial: "Historial de stock", pesos: "Pesos SEUR" };
+const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", abiertos: "Colchones abiertos", historial: "Historial de stock", pesos: "Pesos SEUR" };
 function selectInventario(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.inventario === id));
   document.getElementById("view-title").textContent = "Inventario · " + INVENTARIO_LABELS[id];
@@ -3044,6 +3089,7 @@ function selectInventario(id) {
   document.getElementById("view-" + id).style.display = "block";
   if (id === "catalogo") loadCatalogo();
   if (id === "stock") loadStock();
+  if (id === "abiertos") loadAbiertos();
   if (id === "historial") loadHistorial();
   if (id === "pesos") loadPesos();
 }
@@ -3553,6 +3599,192 @@ async function loadStock() {
   renderStock();
 }
 
+// === Colchones ABIERTOS (Jennifer, 2026-09-28) ===
+// Un abierto no puede ir por SEUR, solo por Furniture. Aviso MORADO propio
+// (distinto de la campana): un colchón de un pedido de Furniture que se
+// puede cubrir con un abierto de la misma medida ("Usar el abierto") o
+// cortando uno abierto MÁS GRANDE del mismo modelo ("Cortar").
+let abiertosRows = [];
+async function cargarAbiertos() {
+  try {
+    abiertosRows = await (await fetch("/api/inventario/abiertos")).json();
+  } catch (e) {
+    abiertosRows = [];
+  }
+  actualizarBadgeAbiertos();
+}
+function tallaDims(t) {
+  const m = String(t || "").toUpperCase().match(/^(\\d+)X(\\d+)$/);
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+function esTallaMayor(grande, pequena) {
+  const g = tallaDims(grande), p = tallaDims(pequena);
+  return !!(g && p && g[0] >= p[0] && g[1] >= p[1] && (g[0] > p[0] || g[1] > p[1]));
+}
+// Colchón que podría salir de un abierto: de un pedido que va por
+// Furniture, pendiente de fábrica o cubierto con un ENROLLADO de stock (que
+// se puede devolver para SEUR). Nunca uno ya sacado de un abierto,
+// transformado, de reposición o de gesto comercial.
+function colchonCandidatoAbierto(b) {
+  if (b.tipo !== "colchon" || b.reposicion || b.gestoComercial || b.desdeAbierto || b.transformadoDesde) return false;
+  const conEnrollado = b.estado === "cubierto" && String(b.id).endsWith("-cubierto");
+  if (b.estado !== "pendiente" && !conEnrollado) return false;
+  const o = allOrders.find(x => x.id === b.orderId);
+  return !!(o && o.agencia === "FURNITURE" && !o.cancelado && o.shippingStatus !== "fulfilled" && !o.cargaId);
+}
+// -> { mismo: fila de abierto misma medida | null, cortar: [filas mayores] }
+function abiertosParaBackorder(b) {
+  if (!abiertosRows.length || !colchonCandidatoAbierto(b)) return null;
+  const n = b.cantidad || 1;
+  const delModelo = abiertosRows.filter(a => a.stockModel === b.stockModel && a.cantidad >= n);
+  const mismo = delModelo.find(a => a.talla === b.talla) || null;
+  // Cortar solo aplica a lo que sigue pendiente (lo cubierto con enrollado
+  // ya tiene la medida exacta: ahí solo tiene sentido "usar el abierto").
+  const cortar = b.estado === "pendiente" ? delModelo.filter(a => esTallaMayor(a.talla, b.talla)) : [];
+  return mismo || cortar.length ? { mismo, cortar } : null;
+}
+function oportunidadesAbiertos() {
+  return backorders.map(b => ({ b, op: abiertosParaBackorder(b) })).filter(x => x.op);
+}
+function actualizarBadgeAbiertos() {
+  const badge = document.getElementById("abiertos-badge");
+  if (!badge) return;
+  const n = oportunidadesAbiertos().length;
+  badge.textContent = n;
+  badge.style.display = n ? "" : "none";
+}
+// Etiqueta morada con sus botones, para pintar junto al colchón.
+function abiertoTagHtml(b) {
+  const op = abiertosParaBackorder(b);
+  if (!op) return "";
+  let html = "";
+  if (op.mismo) {
+    html += \`<span class="abierto-tag">🟣 ABIERTO disponible: \${escapeAttr(nombreCortoModelo(b.stockModel))} \${b.talla} (\${op.mismo.cantidad})</span> <button type="button" class="abierto-btn" data-usar-abierto="\${escapeAttr(b.id)}">Usar el abierto</button>\`;
+  }
+  for (const a of op.cortar) {
+    html += \`\${html ? "<br>" : ""}<span class="abierto-tag">🟣✂️ Se puede CORTAR: abierto \${a.talla} → \${b.talla} (\${a.cantidad})</span> <button type="button" class="abierto-btn" data-cortar-abierto="\${escapeAttr(b.id)}" data-talla="\${escapeAttr(a.talla)}">Cortar</button>\`;
+  }
+  return '<div class="abierto-box">' + html + "</div>";
+}
+function nombreCortoModelo(stockModel) {
+  const partes = String(stockModel || "").split("|").map(s => s.trim()).filter(Boolean);
+  return partes[partes.length - 1] || stockModel || "";
+}
+async function usarAbierto(id) {
+  const b = backorders.find(x => x.id === id);
+  if (!b) return;
+  const conEnrollado = b.estado === "cubierto";
+  if (!confirm("¿Usar un colchón ABIERTO " + nombreCortoModelo(b.stockModel) + " " + b.talla + " para " + refLabel(b) + "?\\n\\n"
+    + (conEnrollado ? "El enrollado que se había descontado vuelve al stock (para SEUR). " : "Deja de estar pendiente de fábrica. ")
+    + "Sale por FURNITURE y se manda la reserva del abierto al almacén.")) return;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/usar-abierto", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ usuario: currentUser }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { alert(data.error || "No se ha podido usar el abierto."); return; }
+  alert(data.avisoReserva && data.avisoReserva.ok
+    ? "Hecho: sale del abierto. Se ha enviado la reserva al almacén."
+    : "Hecho: sale del abierto, pero NO se ha podido enviar la reserva al almacén (" + ((data.avisoReserva && data.avisoReserva.reason) || "error") + "). Avísales tú, por favor.");
+  await recargarTrasAbierto(b.orderId);
+}
+async function cortarAbierto(id, tallaAbierto) {
+  const b = backorders.find(x => x.id === id);
+  if (!b) return;
+  if (!confirm("¿Cortar un colchón ABIERTO " + nombreCortoModelo(b.stockModel) + " " + tallaAbierto + " a " + b.talla + " para " + refLabel(b) + "?\\n\\nSe manda al almacén el aviso de transformación con su etiqueta, y sale por FURNITURE.")) return;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/sustituir", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ transformar: true, desdeAbierto: true, talla: tallaAbierto, fecha: null }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) { alert(data.error || "No se ha podido cortar."); return; }
+  alert(data.avisoAlmacen && data.avisoAlmacen.ok
+    ? "Hecho: se corta el abierto. Se ha enviado el aviso al almacén."
+    : "Hecho: se corta el abierto, pero NO se ha podido enviar el email al almacén (" + ((data.avisoAlmacen && data.avisoAlmacen.reason) || "error") + "). Avísales tú, por favor.");
+  await recargarTrasAbierto(b.orderId);
+}
+async function recargarTrasAbierto(orderId) {
+  await cargarAbiertos();
+  await loadOrders();
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  applyFilter();
+  if (document.getElementById("view-pendientes").style.display !== "none") renderPendientes();
+  if (document.getElementById("view-furniture").style.display !== "none") renderFurniture();
+  if (document.getElementById("view-abiertos").style.display !== "none") renderAbiertos();
+  await checkAutoAddCarga(orderId);
+}
+// Los botones pueden estar en cualquier tabla (Pedidos, Luso/New,
+// Furniture, la propia lista de abiertos): un solo escuchador global.
+document.addEventListener("click", (e) => {
+  const usar = e.target.closest("[data-usar-abierto]");
+  if (usar) { e.preventDefault(); e.stopPropagation(); usarAbierto(usar.dataset.usarAbierto); return; }
+  const cortar = e.target.closest("[data-cortar-abierto]");
+  if (cortar) { e.preventDefault(); e.stopPropagation(); cortarAbierto(cortar.dataset.cortarAbierto, cortar.dataset.talla); }
+}, true);
+
+async function loadAbiertos() {
+  if (!catalogoProducts.length) {
+    try { catalogoProducts = await (await fetch("/api/inventario/catalogo")).json(); } catch (e) { /* sin catálogo, el datalist queda vacío */ }
+  }
+  const modelos = [...new Set(catalogoProducts.filter(p => p.product_type === "Colchones" && !p.noStock).map(p => p.stockModel).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  document.getElementById("abiertos-models-datalist").innerHTML = modelos.map(m => \`<option value="\${escapeAttr(m)}"></option>\`).join("");
+  if (!backorders.length) backorders = await (await fetch("/api/inventario/pendientes")).json();
+  await cargarAbiertos();
+  renderAbiertos();
+}
+function renderAbiertos() {
+  const ops = oportunidadesAbiertos();
+  document.getElementById("abiertos-oportunidades-count").textContent = ops.length
+    ? ops.length + (ops.length === 1 ? " colchón de Furniture puede salir de un abierto" : " colchones de Furniture pueden salir de un abierto")
+    : "Ahora mismo ningún pedido de Furniture puede aprovechar un abierto.";
+  document.querySelector("#abiertos-oportunidades-table tbody").innerHTML = ops.map(({ b }) => {
+    const o = allOrders.find(x => x.id === b.orderId) || {};
+    return \`<tr>
+      <td>\${refLabel(b)}</td>
+      <td>\${escapeAttr(o.name || "")}</td>
+      <td>\${b.cantidad || 1}x \${escapeAttr(nombreCortoModelo(b.stockModel))} \${b.talla}\${b.estado === "cubierto" ? " <em>(ahora con un enrollado)</em>" : ""}</td>
+      <td colspan="2">\${abiertoTagHtml(b)}</td>
+    </tr>\`;
+  }).join("");
+  const filas = abiertosRows.slice().sort((a, b) => a.stockModel.localeCompare(b.stockModel) || compareTalla(a.talla, b.talla));
+  const total = filas.reduce((n, r) => n + (r.cantidad || 0), 0);
+  document.getElementById("abiertos-count").textContent = total + (total === 1 ? " colchón abierto" : " colchones abiertos") + " en el almacén";
+  document.querySelector("#abiertos-table tbody").innerHTML = filas.map(r => \`<tr>
+    <td>\${escapeAttr(r.stockModel)}</td>
+    <td>\${r.talla}</td>
+    <td>\${r.cantidad}</td>
+    <td>\${escapeAttr(r.nota || "")}</td>
+    <td><span class="adjust-form">
+      <button type="button" class="abiertos-adjust" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="-1">−</button>
+      <button type="button" class="abiertos-adjust" data-model="\${escapeAttr(r.stockModel)}" data-talla="\${escapeAttr(r.talla)}" data-delta="1">+</button>
+    </span></td>
+  </tr>\`).join("");
+  document.querySelectorAll(".abiertos-adjust").forEach(btn => {
+    btn.addEventListener("click", () => ajustarAbiertos(btn.dataset.model, btn.dataset.talla, Number(btn.dataset.delta)));
+  });
+}
+async function ajustarAbiertos(query, talla, delta, nota) {
+  const res = await fetch("/api/inventario/abiertos/adjust", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query, mode: "nombre", talla, delta, nota, usuario: currentUser }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { document.getElementById("abiertos-result").textContent = data.error || "No se ha podido guardar."; return; }
+  document.getElementById("abiertos-result").textContent = data.stockModel + " " + data.talla + ": " + data.cantidad + " abierto(s).";
+  await cargarAbiertos();
+  renderAbiertos();
+  applyFilter();
+}
+["abiertos-alta", "abiertos-baja"].forEach(idBtn => {
+  document.getElementById(idBtn).addEventListener("click", () => {
+    const query = document.getElementById("abiertos-query").value.trim();
+    const talla = document.getElementById("abiertos-talla").value.trim();
+    const qty = Math.max(1, Number(document.getElementById("abiertos-qty").value) || 1);
+    const nota = document.getElementById("abiertos-nota").value.trim();
+    if (!query || !talla) { document.getElementById("abiertos-result").textContent = "Indica el modelo y la talla."; return; }
+    ajustarAbiertos(query, talla, idBtn === "abiertos-alta" ? qty : -qty, nota || undefined);
+  });
+});
+
 function populateStockModelSelect() {
   const datalist = document.getElementById("stock-models-datalist");
   const models = [...new Set(stockRows.map(r => r.stockModel))].sort((a, b) => a.localeCompare(b));
@@ -3870,7 +4102,7 @@ function renderPendientes() {
       \${checkCell}
       <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
-      <td>\${b.stockModel}\${pedidoTag}</td>
+      <td>\${b.stockModel}\${pedidoTag}\${abiertoTagHtml(b)}</td>
       <td>\${b.color || "—"}</td>
       <td>\${b.talla}\${b.transformadoDesde ? '<br><span class="transformado-tag" title="Transformado de un colchón de otra medida que había en stock">Transformado desde ' + b.transformadoDesde + '</span>' : ""}</td>
       \${skuCell}
@@ -4475,8 +4707,8 @@ function furnitureRowCells(o) {
         return \`
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
-          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}
-        </label>
+          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}\${b.desdeAbierto ? ' <span class="abierto-tag">🟣 Sale de un colchón ABIERTO</span>' : ""}
+        </label>\${abiertoTagHtml(b)}
       \`;
       }).join("")
     : "<em>Todo en stock</em>";
@@ -6954,6 +7186,35 @@ async function handleFetch(request, env) {
     const alternativasPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/alternativas$/);
     if (alternativasPendingMatch && request.method === "GET") {
       return proxyInventory(env, `/backorders/${alternativasPendingMatch[1]}/alternativas`, request);
+    }
+
+    // Colchones abiertos (Jennifer, 2026-09-28) — ver adjustAbiertos/usarAbierto.
+    if (url.pathname === "/api/inventario/abiertos" && request.method === "GET") {
+      return proxyInventory(env, "/abiertos", request);
+    }
+    if (url.pathname === "/api/inventario/abiertos/adjust" && request.method === "POST") {
+      return proxyInventory(env, "/abiertos/adjust", request);
+    }
+    const usarAbiertoMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/usar-abierto$/);
+    if (usarAbiertoMatch && request.method === "POST") {
+      const res = await inventoryStub(env).fetch("https://do/backorders/" + usarAbiertoMatch[1] + "/usar-abierto", { method: "POST", body: await request.text() });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok && data.entry) {
+        // El abierto se queda en el almacén hasta la carga de Furniture:
+        // reserva con su etiqueta, como cualquier otro artículo de stock.
+        const entry = data.entry;
+        const o = await pedidoDeBackorder(env, entry);
+        data.avisoReserva = await enviarReservaAlmacen(env, {
+          pedido: referenciaPedidoAlmacen(entry),
+          cliente: (o && o.name) || "",
+          lineasTexto: [lineaTextoReserva(entry) + " — COLCHÓN ABIERTO" + (entry.enrolladoDevuelto ? " (sustituye al enrollado, que vuelve a stock)" : "")],
+          bultos: bultosPorUnidad(entry).map((b) => ({ ...b, parte: "COLCHÓN ABIERTO" })),
+        });
+        if (data.avisoReserva.ok) {
+          await inventoryStub(env).fetch("https://do/backorders/" + usarAbiertoMatch[1] + "/reserva-enviada", { method: "POST", body: "{}" });
+        }
+      }
+      return Response.json(data, { status: res.status });
     }
 
     const sustituirPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/sustituir$/);
