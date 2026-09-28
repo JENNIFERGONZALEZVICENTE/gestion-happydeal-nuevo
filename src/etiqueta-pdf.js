@@ -52,54 +52,85 @@ function cadenaPdf(texto) {
   return "(" + out + ")";
 }
 
-// datos: { pedido, cliente, modelo, desde, hasta, unidades, fecha }
-export function etiquetaTransformacionPdf(datos) {
+// Lienzo de una etiqueta: marco + helpers para pintar líneas centradas de
+// arriba abajo. `y` es siempre el borde de arriba de lo siguiente que se
+// pinta: cada línea baja su altura de mayúsculas, pinta la línea base ahí,
+// y deja debajo el hueco del trazo descendente + interlineado.
+function lienzo() {
   const margen = 8 * MM;
   const util = ANCHO - 2 * margen;
-  const ops = [];
-  // Marco
-  ops.push("1.5 w", `${margen / 2} ${margen / 2} ${ANCHO - margen} ${ALTO - margen} re S`);
-  // `y` es siempre el borde de arriba de lo siguiente que se pinta: cada
-  // línea baja su altura de mayúsculas, pinta la línea base ahí, y deja
-  // debajo el hueco del trazo descendente + interlineado.
-  let y = ALTO - margen - 4;
-  const linea = (texto, tam, negrita = true, centrado = true) => {
+  const ops = ["1.5 w", `${margen / 2} ${margen / 2} ${ANCHO - margen} ${ALTO - margen} re S`];
+  const c = { ops, y: ALTO - margen - 4 };
+  c.linea = (texto, tam, negrita = true) => {
     const fuente = negrita ? "/F2" : "/F1";
     for (const l of partirLineas(texto, tam, util, negrita)) {
-      y -= tam * 0.74;
-      const x = centrado ? (ANCHO - anchoTexto(l, tam, negrita)) / 2 : margen;
-      ops.push(`BT ${fuente} ${tam} Tf ${x.toFixed(1)} ${y.toFixed(1)} Td ${cadenaPdf(l)} Tj ET`);
-      y -= tam * 0.38;
+      c.y -= tam * 0.74;
+      const x = (ANCHO - anchoTexto(l, tam, negrita)) / 2;
+      ops.push(`BT ${fuente} ${tam} Tf ${x.toFixed(1)} ${c.y.toFixed(1)} Td ${cadenaPdf(l)} Tj ET`);
+      c.y -= tam * 0.38;
     }
   };
-  const separador = () => {
-    y -= 5;
-    ops.push("0.6 w", `${margen} ${y.toFixed(1)} m ${ANCHO - margen} ${y.toFixed(1)} l S`);
-    y -= 9;
+  c.separador = () => {
+    c.y -= 5;
+    ops.push("0.6 w", `${margen} ${c.y.toFixed(1)} m ${ANCHO - margen} ${c.y.toFixed(1)} l S`);
+    c.y -= 9;
   };
+  c.pie = (texto) => {
+    c.y = margen + 16;
+    c.linea(texto, 11, false);
+  };
+  return c;
+}
 
-  linea("TRANSFORMACIÓN DE COLCHÓN", 15);
-  separador();
-  linea(datos.pedido, 32);
-  if (datos.cliente) linea(datos.cliente, 13, false);
-  separador();
-  linea(String(datos.modelo || "").toUpperCase(), 22);
-  y -= 6;
-  linea(`DE ${datos.desde}  A  ${datos.hasta}`, 30);
-  if ((datos.unidades || 1) > 1) linea(`${datos.unidades} UNIDADES`, 18);
-  // Pie fijo abajo
-  y = margen + 16;
-  linea(`${datos.fecha || ""}   ·   Sale por FURNITURE`, 11, false);
+// datos: { pedido, cliente, modelo, desde, hasta, unidades, fecha }
+function paginaTransformacion(datos) {
+  const c = lienzo();
+  c.linea("TRANSFORMACIÓN DE COLCHÓN", 15);
+  c.separador();
+  c.linea(datos.pedido, 32);
+  if (datos.cliente) c.linea(datos.cliente, 13, false);
+  c.separador();
+  c.linea(String(datos.modelo || "").toUpperCase(), 22);
+  c.y -= 6;
+  c.linea(`DE ${datos.desde}  A  ${datos.hasta}`, 30);
+  if ((datos.unidades || 1) > 1) c.linea(`${datos.unidades} UNIDADES`, 18);
+  c.pie(`${datos.fecha || ""}   ·   Sale por FURNITURE`);
+  return c.ops.join("\n");
+}
 
-  const contenido = ops.join("\n");
+// Etiqueta de reserva (Jennifer, 2026-09-28): una por bulto, para que el
+// almacén aparte todas las partes de lo que ya está vendido.
+// datos: { pedido, cliente, articulo, parte, bulto, totalBultos, fecha }
+function paginaReserva(datos) {
+  const c = lienzo();
+  c.linea("RESERVADO", 30);
+  c.separador();
+  c.linea(datos.pedido, 28);
+  if (datos.cliente) c.linea(datos.cliente, 13, false);
+  c.separador();
+  c.linea(String(datos.articulo || "").toUpperCase(), 17);
+  if (datos.parte) { c.y -= 4; c.linea(String(datos.parte).toUpperCase(), 22); }
+  if (datos.totalBultos > 1) { c.y -= 2; c.linea(`BULTO ${datos.bulto} DE ${datos.totalBultos}`, 14); }
+  c.pie(`${datos.fecha || ""}   ·   Sale por FURNITURE`);
+  return c.ops.join("\n");
+}
+
+// Un PDF con una etiqueta por página.
+function pdfDePaginas(contenidos) {
   const objetos = [
     "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${ANCHO.toFixed(2)} ${ALTO.toFixed(2)}] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>`,
-    `<< /Length ${contenido.length} >>\nstream\n${contenido}\nendstream`,
+    null, // Pages: se rellena al final, cuando se conocen los números de página
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
   ];
+  const kids = [];
+  for (const contenido of contenidos) {
+    objetos.push(`<< /Length ${contenido.length} >>\nstream\n${contenido}\nendstream`);
+    const idContenido = objetos.length;
+    objetos.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${ANCHO.toFixed(2)} ${ALTO.toFixed(2)}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${idContenido} 0 R >>`);
+    kids.push(`${objetos.length} 0 R`);
+  }
+  objetos[1] = `<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${kids.length} >>`;
   let pdf = "%PDF-1.4\n";
   const offsets = [];
   objetos.forEach((obj, i) => {
@@ -113,6 +144,15 @@ export function etiquetaTransformacionPdf(datos) {
   // Todo el contenido es ASCII (las tildes van escapadas en octal), así
   // que cada carácter es un byte.
   return new TextEncoder().encode(pdf);
+}
+
+export function etiquetaTransformacionPdf(datos) {
+  return pdfDePaginas([paginaTransformacion(datos)]);
+}
+
+// etiquetas: [{ pedido, cliente, articulo, parte, bulto, totalBultos, fecha }]
+export function etiquetasReservaPdf(etiquetas) {
+  return pdfDePaginas(etiquetas.map(paginaReserva));
 }
 
 export function base64DeBytes(bytes) {

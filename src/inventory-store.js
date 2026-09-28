@@ -1903,6 +1903,17 @@ export class InventoryStore {
       const { referencia } = await request.json();
       return this.setBackorderReferencia(decodeURIComponent(referenciaMatch[1]), referencia);
     }
+    // Reserva de stock ya avisada al almacén (Jennifer, 2026-09-28): para no
+    // mandar dos veces las etiquetas del mismo artículo.
+    const reservaMatch = url.pathname.match(/^\/backorders\/([^/]+)\/reserva-enviada$/);
+    if (reservaMatch && method === "POST") {
+      const backorders = await this.load("backorders", []);
+      const entry = backorders.find((b) => b.id === decodeURIComponent(reservaMatch[1]));
+      if (!entry) return new Response("not found", { status: 404 });
+      entry.reservaEnviada = new Date().toISOString();
+      await this.state.storage.put("backorders", backorders);
+      return Response.json(entry);
+    }
     const mercanciaMatch = url.pathname.match(/^\/backorders\/([^/]+)\/mercancia$/);
     if (mercanciaMatch && method === "POST") {
       const { mercanciaFabrica } = await request.json();

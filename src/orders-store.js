@@ -1,3 +1,5 @@
+import { enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, referenciaPedidoAlmacen } from "./avisos-almacen.js";
+
 const ORPHAN_RE = /BEZEN0*([0-9]+)/i;
 
 // Fecha de corte para Bezen/Shopify (Jennifer, 2026-09-23), mismo mecanismo
@@ -1104,6 +1106,7 @@ export class OrdersStore {
     order.needsReview = needsReview;
     order.reviewReasons = reviewReasons || [];
     order.inventoryProcessed = true;
+    if (agencia === "FURNITURE") await this.reservarStockCubierto(order);
     // Carga automática de SEUR (Jennifer, 2026-09-08): en cuanto hay algo
     // de este pedido con stock real disponible, se prepara solo para la
     // próxima carga — sin que nadie tenga que seleccionarlo a mano, a
@@ -1111,6 +1114,35 @@ export class OrdersStore {
     if (seurReady && !order.cargaId) {
       const carga = await getOrCreateCargaByFecha(this.state.storage, "seur", nextSeurCargaDate(new Date()));
       order.cargaId = carga.id;
+    }
+  }
+
+  // Reserva automática (Jennifer, 2026-09-28, caso BEZEN12235 con un topper
+  // V5 de stock): lo que el motor cubre con stock real en un pedido que sale
+  // por Furniture se queda físicamente en el almacén hasta la carga, así que
+  // el almacén tiene que apartarlo — email con una etiqueta por unidad. Solo
+  // los pendientes "-cubierto" que crea el propio motor, una vez cada uno.
+  // Si el email falla no se bloquea nada: queda sin reservaEnviada.
+  async reservarStockCubierto(order) {
+    try {
+      const stub = this.env.INVENTORY_STORE.get(this.env.INVENTORY_STORE.idFromName("main"));
+      const backorders = await (await stub.fetch("https://do/backorders")).json();
+      const cubiertos = backorders.filter((b) => String(b.orderId) === String(order.id)
+        && b.estado === "cubierto" && String(b.id).endsWith("-cubierto")
+        && !b.reservaEnviada && !b.reposicion && !b.gestoComercial);
+      if (!cubiertos.length) return;
+      const r = await enviarReservaAlmacen(this.env, {
+        pedido: referenciaPedidoAlmacen(order),
+        cliente: order.name || "",
+        lineasTexto: cubiertos.map(lineaTextoReserva),
+        bultos: cubiertos.flatMap(bultosPorUnidad),
+      });
+      if (!r.ok) return;
+      for (const b of cubiertos) {
+        await stub.fetch("https://do/backorders/" + encodeURIComponent(b.id) + "/reserva-enviada", { method: "POST", body: "{}" });
+      }
+    } catch (e) {
+      // el aviso nunca debe romper la tramitación del pedido
     }
   }
 

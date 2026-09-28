@@ -1,7 +1,8 @@
 export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
 import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES, findBestPrefixMatch } from "./inventory-store.js";
-import { etiquetaTransformacionPdf, base64DeBytes } from "./etiqueta-pdf.js";
+import { etiquetaTransformacionPdf } from "./etiqueta-pdf.js";
+import { enviarEmailAlmacen, enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, fechaHoyEs, referenciaPedidoAlmacen, modeloCorto } from "./avisos-almacen.js";
 
 // Interruptor de Fase 2 de cada "marketplace" (Carrefour, Jennifer,
 // 2026-09-17, activado parcialmente 2026-09-19; generalizado el mismo día
@@ -887,27 +888,27 @@ async function handleReviewNote(request, env) {
   });
 }
 
-// Aviso al almacén de una transformación (Jennifer, 2026-09-28): tiene que
-// subir el colchón de la medida de origen a fábrica. El email lo manda un
-// Google Apps Script de la cuenta de Jennifer (colchonesbezen.com está en
-// otra cuenta de Cloudflare, no se puede enviar correo desde aquí): el
-// destinatario está fijo en el script, aquí solo va el contenido + secreto.
-// Secrets del Worker: ALMACEN_AVISO_URL, ALMACEN_AVISO_SECRET.
-async function avisarAlmacenTransformacion(env, entry) {
-  if (!env.ALMACEN_AVISO_URL || !env.ALMACEN_AVISO_SECRET) return { ok: false, reason: "sin_configurar" };
-  let cliente = "";
+// Emails al almacén (Jennifer, 2026-09-28) — ver avisos-almacen.js.
+async function pedidoDeBackorder(env, entry) {
   try {
     const orders = await (await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders")).json();
-    const o = orders.find((x) => String(x.id) === String(entry.orderId));
-    if (o) cliente = o.name || "";
-  } catch (e) { /* sin nombre de cliente, el aviso sale igual */ }
-  const pedido = entry.platform && entry.platform !== "Shopify" && entry.orderRef ? entry.orderRef : "BEZEN" + entry.orderNumber;
+    return orders.find((x) => String(x.id) === String(entry.orderId)) || null;
+  } catch (e) {
+    return null; // sin datos del pedido, el aviso sale igual
+  }
+}
+
+// Transformación: el almacén tiene que subir el colchón de la medida de
+// origen a fábrica. Etiqueta 15x10 cm adjunta para pegarla al colchón.
+async function avisarAlmacenTransformacion(env, entry) {
+  const o = await pedidoDeBackorder(env, entry);
+  const cliente = (o && o.name) || "";
+  const pedido = referenciaPedidoAlmacen(entry);
   const unidades = entry.cantidad || 1;
-  const modelo = entry.stockModel;
   const lineas = [
     "Hay que subir a fábrica para transformar:",
     "",
-    `${modelo}`,
+    `${entry.stockModel}`,
     `De ${entry.transformadoDesde} a ${entry.talla} — ${unidades} ${unidades > 1 ? "unidades" : "unidad"}`,
     "",
     `Pedido: ${pedido}${cliente ? " — " + cliente : ""}`,
@@ -916,39 +917,37 @@ async function avisarAlmacenTransformacion(env, entry) {
     "",
     "Se adjunta la etiqueta para imprimir y pegar en el colchón.",
   ];
-  // Etiqueta 15x10 cm que el almacén imprime y pega al colchón (Jennifer,
-  // 2026-09-28: antes se la mandaban a mano). Modelo corto: el último trozo
-  // del nombre de catálogo ("... | Zen Natural" -> "Zen Natural").
-  const partesModelo = (modelo || "").split("|").map((s) => s.trim()).filter(Boolean);
-  const etiqueta = etiquetaTransformacionPdf({
-    pedido, cliente, modelo: partesModelo[partesModelo.length - 1] || modelo,
-    desde: entry.transformadoDesde, hasta: entry.talla, unidades,
-    fecha: new Date().toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" }),
+  const pdf = etiquetaTransformacionPdf({
+    pedido, cliente, modelo: modeloCorto(entry.stockModel),
+    desde: entry.transformadoDesde, hasta: entry.talla, unidades, fecha: fechaHoyEs(),
   });
-  try {
-    // Apps Script responde con un 302 a otra URL donde está el resultado.
-    // Con un cuerpo grande (la etiqueta adjunta), seguir la redirección de
-    // forma automática devuelve una página de error de Google aunque el
-    // email SÍ se haya enviado (visto en la prueba real del 28/09) — así
-    // que la redirección se sigue a mano, con un GET aparte.
-    let res = await fetch(env.ALMACEN_AVISO_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      redirect: "manual",
-      body: JSON.stringify({
-        secreto: env.ALMACEN_AVISO_SECRET,
-        asunto: `Transformación de colchón — ${pedido}`,
-        texto: lineas.join("\n"),
-        adjunto: { nombre: `Etiqueta transformacion ${pedido}.pdf`, base64: base64DeBytes(etiqueta) },
-      }),
+  return enviarEmailAlmacen(env, { asunto: `Transformación de colchón — ${pedido}`, texto: lineas.join("\n"), pdf, nombrePdf: `Etiqueta transformacion ${pedido}.pdf` });
+}
+
+// Reserva de un artículo marcado a mano como "STOCK" (Jennifer, 2026-09-28:
+// de tapicería la app no conoce el stock, así que lo marcan ellos). Un
+// canapé lleva una etiqueta por BULTO (mismo desglose que el fichero de
+// Furniture: tapas, cajones, fondo, bisagras...), para que el almacén
+// reserve todas sus partes; el resto, una por unidad.
+async function reservarStockManual(env, entry) {
+  const o = await pedidoDeBackorder(env, entry);
+  const cliente = (o && o.name) || "";
+  const pedido = referenciaPedidoAlmacen(entry);
+  let bultos;
+  if (entry.tipo === "tapiceria") {
+    const piezas = piezasBackorder(entry, (o && o.product) || "", tapaPartidaFurniture((o && o.services) || ""));
+    bultos = piezas.map((p) => {
+      // p.texto = "<referencia> <parte> <resto>": para la etiqueta, el
+      // artículo sin referencia ni parte, y la parte en grande aparte.
+      let resto = p.texto;
+      if (entry.referencia && resto.startsWith(entry.referencia + " ")) resto = resto.slice(entry.referencia.length + 1);
+      if (p.parte && resto.startsWith(p.parte + " ")) resto = resto.slice(p.parte.length + 1);
+      return { articulo: resto, parte: p.parte === "REVISAR" ? "" : p.parte };
     });
-    const destino = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
-    if (destino) res = await fetch(destino);
-    const r = await res.json().catch(() => ({}));
-    return r.ok ? { ok: true } : { ok: false, reason: r.error || "status_" + res.status };
-  } catch (e) {
-    return { ok: false, reason: "error_red" };
+  } else {
+    bultos = bultosPorUnidad(entry);
   }
+  return enviarReservaAlmacen(env, { pedido, cliente, lineasTexto: [lineaTextoReserva(entry)], bultos });
 }
 
 async function proxyInventory(env, path, request) {
@@ -3962,13 +3961,21 @@ async function guardarMercanciaFabrica(id, texto) {
 }
 
 async function guardarReferenciaPolival(id, referencia) {
-  await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/referencia", {
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/referencia", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ referencia }),
   });
   const b = backorders.find(b => b.id === id);
   if (b) b.referencia = referencia;
+  // "STOCK" manda la reserva al almacén con sus etiquetas (Jennifer, 2026-09-28).
+  const data = await res.json().catch(() => ({}));
+  if (data.avisoReserva) {
+    if (data.avisoReserva.ok && b) b.reservaEnviada = new Date().toISOString();
+    alert(data.avisoReserva.ok
+      ? "Marcado como STOCK. Se ha enviado al almacén el email de reserva con sus etiquetas."
+      : "Marcado como STOCK, pero NO se ha podido enviar la reserva al almacén (" + (data.avisoReserva.reason || "error") + "). Avísales tú, por favor.");
+  }
 }
 
 // Nombre limpio de modelo + talla para un colchón suelto de Luso/New (a
@@ -6972,7 +6979,26 @@ async function handleFetch(request, env) {
 
     const referenciaPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/referencia$/);
     if (referenciaPendingMatch && request.method === "POST") {
-      return proxyInventory(env, `/backorders/${referenciaPendingMatch[1]}/referencia`, request);
+      // Al marcar un artículo como "STOCK" (Jennifer, 2026-09-28), se manda
+      // la reserva al almacén con sus etiquetas — una sola vez por artículo.
+      const body = await request.text();
+      const id = decodeURIComponent(referenciaPendingMatch[1]);
+      const antes = (await (await inventoryStub(env).fetch("https://do/backorders")).json()).find((b) => b.id === id);
+      const res = await inventoryStub(env).fetch("https://do/backorders/" + referenciaPendingMatch[1] + "/referencia", { method: "POST", body });
+      const texto = await res.text();
+      let nueva = "";
+      try { nueva = String(JSON.parse(body).referencia || "").trim().toUpperCase(); } catch (e) { /* sin referencia */ }
+      if (res.ok && antes && nueva === "STOCK" && !antes.reservaEnviada) {
+        const entry = { ...antes, referencia: "STOCK" };
+        const avisoReserva = await reservarStockManual(env, entry);
+        if (avisoReserva.ok) {
+          await inventoryStub(env).fetch("https://do/backorders/" + referenciaPendingMatch[1] + "/reserva-enviada", { method: "POST", body: "{}" });
+        }
+        let data = {};
+        try { data = JSON.parse(texto); } catch (e) { /* respuesta no JSON */ }
+        return Response.json({ ...data, avisoReserva });
+      }
+      return new Response(texto, { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     const mercanciaPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/mercancia$/);
