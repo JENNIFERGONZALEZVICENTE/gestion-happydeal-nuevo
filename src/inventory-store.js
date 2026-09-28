@@ -1032,7 +1032,9 @@ function buildCanapeFijoMercancia(colorRaw, talla) {
   if (!entry) {
     return { texto: "", needsReview: true, reason: `No tengo la correlación de color de fábrica para "${colorRaw || "(sin color)"}" en Canapé Fijo — dime el color de fábrica o rellena "Mercancía para pedir a fábrica" a mano.` };
   }
-  return { texto: `MODELO - ${CANAPE_FIJO_MODELO} · MEDIDA: ${talla} · COLOR: ${entry.color}`, needsReview: false };
+  // La Base Alpha también lleva rejilla, con la misma correlación que el
+  // SPACE DELUXE de tela (Jennifer, 2026-09-28).
+  return { texto: `MODELO - ${CANAPE_FIJO_MODELO} · MEDIDA: ${talla} · COLOR: ${entry.color} · REJILLA: ${entry.rejilla}`, needsReview: false };
 }
 
 function longestCommonPrefix(strings) {
