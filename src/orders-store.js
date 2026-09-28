@@ -33,7 +33,15 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion"];
+
+// Campos que escribe processInventory al tramitar un pedido. Cuando en esta
+// misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
+// guardado no lo estaba) mandan los valores nuevos: si no, un pedido
+// "desprocesado" (inventoryProcessed:false, agencia:null guardados) pisaba
+// el resultado recién calculado con los valores viejos y no se tramitaba
+// nunca (visto 2026-09-28 revisando BEZEN12205).
+const CAMPOS_DE_TRAMITACION = ["inventoryProcessed", "agencia", "pendingManufacture", "needsReview", "reviewReasons", "vistoSinPagar", "fechaTramitacion"];
 
 // Cargas de Furniture (Jennifer, 2026-08-26): cargan miércoles y viernes,
 // así que la "próxima carga" siempre es el miércoles o viernes más cercano
@@ -109,6 +117,12 @@ function mergeCustomFields(existing, incoming) {
   if (existing) {
     for (const field of PRESERVED_FIELDS) {
       if (existing[field] !== undefined) merged[field] = existing[field];
+    }
+    if (incoming.inventoryProcessed && !existing.inventoryProcessed) {
+      for (const field of CAMPOS_DE_TRAMITACION) {
+        if (incoming[field] !== undefined) merged[field] = incoming[field];
+      }
+      if (incoming.cargaId && !existing.cargaId) merged.cargaId = incoming.cargaId;
     }
   }
   // Un pedido cancelado de verdad en Shopify (incoming.shopifyCancelado,
@@ -186,6 +200,7 @@ export class OrdersStore {
       for (const order of incoming) {
         const existing = orders[order.id];
         if (!existing || !existing.inventoryProcessed) {
+          if (existing) order.vistoSinPagar = existing.vistoSinPagar;
           await this.processInventory(order);
         }
         if (order.shippingStatus === "fulfilled" && existing?.shippingStatus !== "fulfilled") {
@@ -205,6 +220,7 @@ export class OrdersStore {
       const orders = (await this.state.storage.get("orders")) || {};
       const existing = orders[order.id];
       if (!existing || !existing.inventoryProcessed) {
+        if (existing) order.vistoSinPagar = existing.vistoSinPagar;
         await this.processInventory(order);
       }
       if (order.shippingStatus === "fulfilled" && existing?.shippingStatus !== "fulfilled") {
@@ -289,6 +305,44 @@ export class OrdersStore {
       }
       if (marcados > 0) await this.state.storage.put("orders", orders);
       return Response.json({ ok: true, marcados });
+    }
+
+    // Mantenimiento puntual (Jennifer, 2026-09-28): los pedidos de Shopify
+    // que siguen PENDIENTE DE PAGO y nunca se tramitaron se marcan como
+    // "vistos sin pagar" y dejan de estar dados por gestionados, para que
+    // se tramiten con fecha del día en que se paguen. No toca los ya
+    // tramitados (con agencia) ni los cancelados.
+    if (url.pathname === "/orders/admin/marcar-sin-pagar" && request.method === "POST") {
+      const orders = (await this.state.storage.get("orders")) || {};
+      const marcados = [];
+      for (const order of Object.values(orders)) {
+        if (order.platform !== "Shopify" || order.paymentStatus !== "PENDIENTE DE PAGO") continue;
+        if (order.agencia || order.cancelado || order.shopifyCancelado) continue;
+        order.vistoSinPagar = true;
+        delete order.inventoryProcessed;
+        marcados.push(order.orderNumber);
+      }
+      if (marcados.length) await this.state.storage.put("orders", orders);
+      return Response.json({ ok: true, marcados });
+    }
+
+    // Tramita un pedido ya pagado como si hubiera entrado en la fecha dada
+    // (Jennifer, 2026-09-28, BEZEN12205: pagado hoy pero dado por gestionado
+    // por el corte del 23/09 cuando aún no estaba pagado).
+    if (url.pathname === "/orders/admin/tramitar-como-nuevo" && request.method === "POST") {
+      const { orderId, fecha } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const existing = orders[orderId];
+      if (!existing) return new Response("not found", { status: 404 });
+      if (existing.agencia) return Response.json({ ok: false, error: "Ya está tramitado." }, { status: 409 });
+      existing.vistoSinPagar = true;
+      existing.fechaTramitacion = fecha || new Date().toISOString();
+      delete existing.inventoryProcessed;
+      await this.processInventory(existing);
+      orders[orderId] = existing;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json(existing);
     }
 
     if (url.pathname === "/orders/unprocess" && request.method === "POST") {
@@ -853,18 +907,34 @@ export class OrdersStore {
   }
 
   async processInventory(order, force, seurSplitDecision) {
+    // Pedido visto sin pagar (Jennifer, 2026-09-28, caso BEZEN12205:
+    // transferencia de un pedido del 16/09 recibida el 28/09): cuando pase a
+    // PAGADO se tramita como si hubiera entrado ese día, para que no se
+    // cuele entre lo ya pedido a fábrica con su fecha antigua.
+    const pagado = order.paymentStatus === "PAGADO";
+    if (!pagado) order.vistoSinPagar = true;
     // Ver SHOPIFY_PROCESAMIENTO_DESDE arriba del fichero — solo aplica a
     // Shopify (los marketplaces ya tienen su propia puerta, PROCESAMIENTO_
-    // DESDE en index.js, con otro esquema de numeración).
+    // DESDE en index.js, con otro esquema de numeración). Un pedido antiguo
+    // SIN PAGAR no se da por gestionado (antes sí, y al pagarse ya no se
+    // tramitaba nunca); si se paga más tarde, se tramita con fecha de ese día.
     if (!force && order.platform === "Shopify" && Number(order.orderNumber) < SHOPIFY_PROCESAMIENTO_DESDE) {
-      order.inventoryProcessed = true;
-      return;
+      if (!pagado) return;
+      if (!order.vistoSinPagar) {
+        order.inventoryProcessed = true;
+        return;
+      }
+    }
+    let fechaParaTramitar = order.orderDate;
+    if (pagado && order.vistoSinPagar) {
+      if (!order.fechaTramitacion) order.fechaTramitacion = new Date().toISOString();
+      fechaParaTramitar = order.fechaTramitacion;
     }
     const id = this.env.INVENTORY_STORE.idFromName("main");
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, items: order.items || [], force, orderDate: order.orderDate, services: order.services || "", paymentStatus: order.paymentStatus, seurSplitDecision }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, items: order.items || [], force, orderDate: fechaParaTramitar, services: order.services || "", paymentStatus: order.paymentStatus, seurSplitDecision }),
     });
     const { agencia, pendingManufacture, needsReview, reviewReasons, paused, seurMixedPending, seurMixedInfo, seurReady } = await res.json();
     // Pedido de 2+ colchones SEUR con disponibilidad mixta (Jennifer,

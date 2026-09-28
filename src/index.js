@@ -6908,6 +6908,14 @@ async function handleFetch(request, env) {
       return Response.json({ ok: true, orderNumber: order.order_number });
     }
 
+    const adminPedidosMatch = url.pathname.match(/^\/api\/pedidos\/shopify\/admin\/(marcar-sin-pagar|tramitar-como-nuevo)$/);
+    if (adminPedidosMatch && request.method === "POST") {
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/orders/admin/" + adminPedidosMatch[1], { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
     if (url.pathname === "/api/pedidos/shopify/force-process" && request.method === "POST") {
       const body = await request.text();
       const id = env.ORDERS_STORE.idFromName("shopify");
