@@ -703,7 +703,9 @@ const CANAPE_RECIPES = {
   },
   magnum: {
     modelo: "MAGNUM",
-    tapaBase: "Tapa con borde Deluxe (mismo color elegido)",
+    // "{color}" se sustituye por el color de fábrica real (Jennifer,
+    // 2026-09-28: no "mismo color elegido", sino p. ej. "Argos Negro").
+    tapaBase: "Tapa con borde Deluxe {color}",
     tirador: "Dos tirador natural",
     extra: ["BORDE DELUXE", "SISTEMA MÓVIL"],
     colores: {
@@ -849,7 +851,7 @@ function buildCanapeMercancia(title, colorRaw, talla, servicesText) {
     tirador = tapaExtras.includes("TAPA PARTIDA") ? recipe.tiradorTapaPartida : recipe.tiradorDefault;
   }
   if (modelo === "INITIAL DELUXE") extras.push("BORDE DELUXE");
-  const tapa = modelo === "INITIAL DELUXE" ? "Tapa con borde Deluxe + rejilla" : (modelo === "INITIAL" ? "Tapa entera en rejilla" : recipe.tapaBase);
+  const tapa = modelo === "INITIAL DELUXE" ? "Tapa con borde Deluxe + rejilla" : (modelo === "INITIAL" ? "Tapa entera en rejilla" : recipe.tapaBase.replace("{color}", entry.color));
 
   const partes = [
     `MODELO: ${modelo}`,
