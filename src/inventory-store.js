@@ -581,27 +581,41 @@ async function nextGestoComercialReferencia(state) {
   return "GC-" + String(siguiente).padStart(3, "0");
 }
 
+// Corte con el sistema antiguo (Jennifer, 2026-09-25): TODA referencia
+// nueva lleva "N" delante (contador reiniciado a 0, ver nextReferenciaNumero
+// tras el reset), para distinguir a simple vista un pedido del "nuevo
+// comienzo" de uno del sistema anterior. Además, el sufijo "FUR" ya NO
+// depende del tipo de artículo (antes solo "fur"/"zenit"/"astra" lo
+// llevaban, "numero" nunca) — depende de si ESE artículo concreto sale
+// junto con Furniture o no, para poder distinguir a golpe de vista una
+// almohada/colchón que va con la tapicería de Furniture (lleva FUR) de una
+// que sale independiente por SEUR (sin FUR) — antes ambas se veían iguales.
+// `vaFurniture` lo decide el llamador (ver applyStockUsage/processSale):
+// true para tapicería siempre, para un colchón/almohada que viaja en un
+// pedido con agencia FURNITURE, o para un modelo con exceptionFurniture
+// (ej. Látex Natura, que nunca sale por SEUR).
 // Devuelve { referencia, needsReview, reason } — needsReview cuando no se
 // puede formar la referencia completa (tipo sin clasificar, o color sin
 // letra asignada): se asigna igualmente el número (para no dejar huecos en
 // el correlativo) pero sin prefijo/sufijo, y Jennifer la corrige a mano.
-function buildReferencia(numero, referenciaTipo, color) {
-  if (referenciaTipo === "numero") return { referencia: numero, needsReview: false };
-  if (referenciaTipo === "fur") return { referencia: numero + "FUR", needsReview: false };
+function buildReferencia(numero, referenciaTipo, color, vaFurniture) {
+  const fur = vaFurniture ? "FUR" : "";
+  if (referenciaTipo === "numero") return { referencia: "N" + numero + fur, needsReview: false };
+  if (referenciaTipo === "fur") return { referencia: "N" + numero + "FUR", needsReview: false };
   if (referenciaTipo === "zenit" || referenciaTipo === "astra") {
     const letra = REFERENCIA_COLOR_LETTERS[normalizeKey(color)];
     if (!letra) {
       return {
-        referencia: numero,
+        referencia: "N" + numero,
         needsReview: true,
         reason: `No sé qué letra de color usar para "${color || "(sin color)"}" en la referencia de Polival (nº ${numero}) — dime la letra o corrige la referencia a mano.`,
       };
     }
     const prefijo = referenciaTipo === "zenit" ? "M" : "ASTRA";
-    return { referencia: prefijo + letra + numero, needsReview: false };
+    return { referencia: "N" + prefijo + letra + numero + "FUR", needsReview: false };
   }
   return {
-    referencia: numero,
+    referencia: "N" + numero + fur,
     needsReview: true,
     reason: `No tengo clasificado cómo referenciar este artículo para Polival (nº ${numero}) — dime si sigue el número solo, "FUR", o el patrón de canapé de madera, o corrige la referencia a mano.`,
   };
@@ -743,7 +757,9 @@ const CANAPE_RECIPES = {
 // segmento del pack.
 const TELA_COLORES_UNIFICADOS = {
   cacao: { color: "Tela Duna Cocoa", rejilla: "Wengué" },
-  beige: { color: "Duna Lino", rejilla: "Tierra" },
+  // Beige es Duna Alpaca en SPACE DELUXE y Canapé Fijo (Jennifer,
+  // 2026-09-28); el INITIAL DELUXE tiene su propia tabla con Duna Lino.
+  beige: { color: "Duna Alpaca", rejilla: "Tierra" },
   "gris antracita": { color: "Duna Onix", rejilla: "Grafito" },
   "gris niebla": { color: "Duna Koala", rejilla: "Grafito" },
   oliva: { color: "Duna Oliva", rejilla: "Negra" },
@@ -843,6 +859,8 @@ function buildCanapeMercancia(title, colorRaw, talla, servicesText) {
   ];
   if (tirador) partes.push(`TIRADOR: ${tirador}`);
   if (extras.length) partes.push(`EXTRA: ${extras.join(" + ")}`);
+  // El INITIAL (y el INITIAL DELUXE) siempre lleva patas (Jennifer, 2026-09-28).
+  if (recipeKey === "initial") partes.push("PATAS A 12.5CM COLOR NATURAL");
   return { texto: partes.join(" · "), needsReview: false };
 }
 
@@ -922,7 +940,9 @@ export function matchCabeceroRecipeKey(title) {
 // para cabeceros vendidos sueltos (no en pack) y trae el "Medida final" que
 // ya calcula Shopify — dentro de un pack no hay ese dato, así que se usa la
 // talla del pack tal cual y se avisa de que puede no ser la medida final real.
-function buildCabeceroMercancia(title, colorResuelto, tallaResuelta, rawVariantTitle) {
+// conInitial: el pedido lleva un canapé INITIAL (ver cabeceroConInitial en
+// processSale) — decide la tela Beige.
+function buildCabeceroMercancia(title, colorResuelto, tallaResuelta, rawVariantTitle, conInitial = false) {
   const recipeKey = matchCabeceroRecipeKey(title);
   if (!recipeKey) {
     return { texto: "", needsReview: true, reason: `No tengo la receta de fabricación para "${title}" — dime el modelo/acabado de fábrica o rellena "Mercancía para pedir a fábrica" a mano.` };
@@ -947,7 +967,13 @@ function buildCabeceroMercancia(title, colorResuelto, tallaResuelta, rawVariantT
     }
   }
   const colorKey = normalizeKey(color);
-  const acabado = recipe.colores ? recipe.colores[colorKey] : null;
+  let acabado = recipe.colores ? recipe.colores[colorKey] : null;
+  // Tela Beige a juego del canapé (Jennifer, 2026-09-28): con INITIAL →
+  // Duna Lino; con SPACE DELUXE o suelto → Duna Alpaca. Aura (SIENNA) es
+  // polipiel, no le afecta.
+  if (colorKey === "beige" && recipe.colores === CABECERO_ACABADOS_COMUNES) {
+    acabado = conInitial ? "Duna Lino" : "Duna Alpaca";
+  }
   if (!acabado) {
     return { texto: "", needsReview: true, reason: `No tengo mapeado el acabado "${color || "(sin color)"}" para "${title}" en la receta de fábrica — dime el nombre de fábrica y corrige "Mercancía para pedir a fábrica" a mano.` };
   }
@@ -976,6 +1002,37 @@ function buildSimpleMercancia(title, talla) {
     return { texto: "", needsReview: true, reason: `No tengo el nombre de fábrica para "${title}" — dime cómo se pide o rellena "Mercancía para pedir a fábrica" a mano.` };
   }
   return { texto: `${found.nombre}${talla ? " · MEDIDA: " + talla : ""}`, needsReview: false };
+}
+
+// Colchones que sí tienen receta de fábrica (Jennifer, 2026-09-25) — solo
+// los "exceptionFurniture" que pasan por Polival (Látex Natura y su
+// Premium), el resto de colchones van por Luso/New y no llevan esto. Los
+// dos modelos comparten título base ("Colchón de Látex Natural Natura"),
+// así que se busca por STOCK MODEL exacto, nunca por substring (para no
+// confundir el normal con el Premium).
+const COLCHON_FABRICA_NOMBRES = {
+  "Colchón de Látex Natural Natura": "LATEX NATURA N15 H18",
+  "Colchón de Látex Natural Natura Premium": "LATEX NATURA N18 H21",
+};
+function buildColchonMercancia(stockModel, talla) {
+  const nombre = COLCHON_FABRICA_NOMBRES[stockModel];
+  if (!nombre) {
+    return { texto: "", needsReview: true, reason: `No tengo el nombre de fábrica para "${stockModel}" — dime cómo se pide o rellena "Mercancía para pedir a fábrica" a mano.` };
+  }
+  return { texto: `${nombre}${talla ? " · MEDIDA: " + talla : ""}`, needsReview: false };
+}
+
+// Canapé Fijo (Jennifer, 2026-09-25, caso real BEZEN12232, modelo "Base
+// Alpha"): el color de este modelo usa la MISMA correlación que ya existe
+// para los canapés de tela (TELA_COLORES_UNIFICADOS, ej. "Oceanic" -> "Duna
+// Tulum") — reusada tal cual, sin duplicar la tabla de colores.
+const CANAPE_FIJO_MODELO = "BASE ALPHA";
+function buildCanapeFijoMercancia(colorRaw, talla) {
+  const entry = TELA_COLORES_UNIFICADOS[normalizeColorKey(colorRaw)];
+  if (!entry) {
+    return { texto: "", needsReview: true, reason: `No tengo la correlación de color de fábrica para "${colorRaw || "(sin color)"}" en Canapé Fijo — dime el color de fábrica o rellena "Mercancía para pedir a fábrica" a mano.` };
+  }
+  return { texto: `MODELO - ${CANAPE_FIJO_MODELO} · MEDIDA: ${talla} · COLOR: ${entry.color}`, needsReview: false };
 }
 
 function longestCommonPrefix(strings) {
@@ -1046,7 +1103,7 @@ function nextRefSuffix(current) {
 // Empuja un pendiente nuevo (idempotente por id) — compartido entre la
 // venta normal (applyStockUsage) y los productos "no llevamos stock"
 // (addNoStockBackorder).
-function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, color, tipo, cantidad, orderDate, esPack, proveedor, needsDecision, referencia, mercanciaFabrica, estado, recibidoFabrica, refSuffix, platform, orderRef, reposicion, piezaTexto, gestoComercial, agenciaReposicion, recogida, recogidaDestino }) {
+function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, color, tipo, cantidad, orderDate, esPack, proveedor, needsDecision, referencia, mercanciaFabrica, estado, recibidoFabrica, refSuffix, platform, orderRef, reposicion, piezaTexto, gestoComercial, agenciaReposicion, recogida, recogidaDestino, tipoEnvio }) {
   if (backorders.some((b) => b.id === id)) return;
   backorders.push({
     id,
@@ -1075,13 +1132,17 @@ function pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla
     // (ver applyStockUsage). "servido" = el pedido del cliente ya se envió.
     estado: estado || "pendiente",
     recibidoFabrica: !!recibidoFabrica,
-    // Solo tiene sentido para colchones dentro de un pack con tapicería:
-    // referencia FURBEZEN (tiene que salir junto con la tapicería) o
-    // FPKBEZEN (puede salir independiente), por defecto FPK hasta que se
-    // indique lo contrario o se sepa una fecha de camión cercana. Ver
-    // updateBackorderPlan.
+    // Solo tiene sentido para colchones dentro de un pack con tapicería, o
+    // colchón suelto con tapicería en el mismo pedido: referencia FURBEZEN
+    // (tiene que salir junto con la tapicería) o FPKBEZEN (puede salir
+    // independiente), por defecto FPK hasta que se indique lo contrario o
+    // se sepa una fecha de camión cercana. Ver updateBackorderPlan. Un
+    // colchón `exceptionFurniture` (ej. Látex Natura, Jennifer 2026-09-25:
+    // "nunca puede ser FPK porque siempre va por Furniture") fuerza FUR
+    // desde el llamador — no hay decisión real que tomar ahí, así que
+    // tampoco debe mostrar el aviso/etiqueta de FPK en Furniture.
     esPack: !!esPack,
-    tipoEnvio: "FPK",
+    tipoEnvio: tipoEnvio || "FPK",
     fechaEstimadaLlegada: null,
     // A qué proveedor pedirlo: POLIVAL / LUSO / NEW. null si el modelo no
     // coincide con ningún reparto conocido — queda para asignar a mano en
@@ -1881,6 +1942,42 @@ export class InventoryStore {
       return this.clearBackorders();
     }
 
+    // Corte con el sistema antiguo de referencias de Polival (Jennifer,
+    // 2026-09-25): reinicia el correlativo a 0 para que el próximo pedido
+    // que se procese saque "N001..." — no toca ningún pendiente ya creado
+    // (esos se corrigen a mano por su propia id, ver /backorders/set-campo).
+    if (url.pathname === "/admin/reset-polival-counter" && method === "POST") {
+      await this.state.storage.put("polivalReferenciaCounter", 0);
+      return Response.json({ ok: true });
+    }
+
+    // Fija el correlativo a un valor concreto (Jennifer, 2026-09-28): tras el
+    // corte del 25/09 se renumeraron a mano N001..N010 pero el contador se
+    // quedó en 0, y los pedidos nuevos volvieron a empezar por 001. El
+    // próximo pedido saca valor+1.
+    if (url.pathname === "/admin/set-polival-counter" && method === "POST") {
+      const { valor } = await request.json();
+      if (!Number.isInteger(valor) || valor < 0) return new Response("valor inválido", { status: 400 });
+      await this.state.storage.put("polivalReferenciaCounter", valor);
+      return Response.json({ ok: true, valor });
+    }
+
+    // Corrección puntual de un pendiente ya creado (Jennifer, 2026-09-25,
+    // corte de numeración de Polival): permite fijar `referencia` y/o
+    // `mercanciaFabrica` a mano por id, sin volver a pasar por el motor de
+    // stock/agencia (evita duplicar backorders — pushBackorder no
+    // sobreescribe uno con la misma id).
+    if (url.pathname === "/backorders/set-campo" && method === "POST") {
+      const { id, referencia, mercanciaFabrica } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const entry = backorders.find((b) => b.id === id);
+      if (!entry) return new Response("not found", { status: 404 });
+      if (referencia !== undefined) entry.referencia = referencia;
+      if (mercanciaFabrica !== undefined) entry.mercanciaFabrica = mercanciaFabrica;
+      await this.state.storage.put("backorders", backorders);
+      return Response.json(entry);
+    }
+
     if (url.pathname === "/admin/crear-pendiente-manual" && method === "POST") {
       return this.crearPendienteManual(await request.json());
     }
@@ -2244,7 +2341,7 @@ export class InventoryStore {
   // el faltante solo se apunta en Pendientes de fabricante, sin tocar esa
   // columna. El excedente de vendidoPendiente se libera cuando el pedido
   // que lo generó se marca como enviado (ver settleShipment).
-  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, refSuffix, platform, orderRef) {
+  async applyStockUsage(stock, backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, refSuffix, platform, orderRef, agencia) {
     // Congelado de stock (Jennifer, 2026-09-23): "vamos a dar de alta las
     // unidades... pero no quiero que se descuente nada por ahora, yo te
     // voy a decir en qué momento vas a empezar a descontar". Mientras
@@ -2318,7 +2415,8 @@ export class InventoryStore {
       let mercanciaFabrica = null;
       if (proveedor === "POLIVAL") {
         const numero = await nextReferenciaNumero(this.state);
-        const built = buildReferencia(numero, item.product.referenciaTipo, item.color);
+        const vaFurniture = item.tipo === "tapiceria" || item.product.exceptionFurniture || agencia === "FURNITURE";
+        const built = buildReferencia(numero, item.product.referenciaTipo, item.color, vaFurniture);
         referencia = built.referencia;
         if (built.needsReview) reviewNotes.push(built.reason);
         if (item.product.product_type === "Almohada" || item.product.product_type === "Topper") {
@@ -2345,6 +2443,7 @@ export class InventoryStore {
         refSuffix,
         platform,
         orderRef,
+        tipoEnvio: item.tipo === "colchon" && item.product.exceptionFurniture ? "FUR" : undefined,
       });
     }
     stock[key] = row;
@@ -2376,6 +2475,7 @@ export class InventoryStore {
       mercanciaFabrica,
       platform,
       orderRef,
+      tipoEnvio: item.tipo === "colchon" && item.product.exceptionFurniture ? "FUR" : undefined,
     });
   }
 
@@ -3053,7 +3153,11 @@ export class InventoryStore {
       let referencia = null;
       if (proveedor === "POLIVAL") {
         const numero = await nextReferenciaNumero(this.state);
-        const built = buildReferencia(numero, resolved.product.referenciaTipo, resolved.color);
+        // Sin acceso aquí al `agencia` real del pedido (herramienta manual,
+        // fuera del flujo normal de processSale) — mismo criterio salvo esa
+        // parte; Jennifer puede corregir la referencia a mano si hiciera falta.
+        const vaFurniture = resolved.tipo === "tapiceria" || resolved.product.exceptionFurniture;
+        const built = buildReferencia(numero, resolved.product.referenciaTipo, resolved.color, vaFurniture);
         referencia = built.referencia;
       }
       // Igual que hace el motor normal (processSale) para canapés/cabeceros
@@ -3065,6 +3169,12 @@ export class InventoryStore {
         mercanciaFabrica = built.texto;
       } else if (proveedor === "POLIVAL" && resolved.product.product_type === "Cabecero") {
         const built = buildCabeceroMercancia(resolved.product.title, resolved.color, resolved.talla, "");
+        mercanciaFabrica = built.texto;
+      } else if (proveedor === "POLIVAL" && resolved.product.product_type === "Canapé fijo") {
+        const built = buildCanapeFijoMercancia(resolved.color, resolved.talla);
+        mercanciaFabrica = built.texto;
+      } else if (proveedor === "POLIVAL" && resolved.product.product_type === "Colchones") {
+        const built = buildColchonMercancia(resolved.product.stockModel, resolved.talla);
         mercanciaFabrica = built.texto;
       }
       this.addNoStockBackorder(backorders, resolved, orderId, orderNumber, !!esPack, orderDate, proveedor, false, referencia, mercanciaFabrica, platform, orderRef);
@@ -3145,6 +3255,10 @@ export class InventoryStore {
       mercanciaFabrica = buildCanapeMercancia(product.title, color, talla, "").texto || null;
     } else if (product.product_type === "Cabecero") {
       mercanciaFabrica = buildCabeceroMercancia(product.title, color, talla, "").texto || null;
+    } else if (product.product_type === "Canapé fijo") {
+      mercanciaFabrica = buildCanapeFijoMercancia(color, talla).texto || null;
+    } else if (product.product_type === "Colchones") {
+      mercanciaFabrica = buildColchonMercancia(product.stockModel, talla).texto || null;
     }
     if (!mercanciaFabrica) {
       mercanciaFabrica = product.stockModel + (talla ? " - MEDIDA: " + talla : "") + (color ? " - COLOR: " + color : "");
@@ -3762,6 +3876,10 @@ export class InventoryStore {
     }
 
     const hasTapiceria = flat.some((c) => c.tipo === "tapiceria");
+    // El cabecero se hace a juego del canapé del mismo pedido (Jennifer,
+    // 2026-09-28): con INITIAL la tela Beige es Duna Lino; con SPACE DELUXE
+    // o suelto, Duna Alpaca.
+    const cabeceroConInitial = flat.some((c) => c.product && c.product.product_type === "Canapé" && matchCanapeRecipeKey(c.product.title) === "initial");
     let agencia;
     let pendingManufacture = null;
 
@@ -3855,17 +3973,20 @@ export class InventoryStore {
         let referencia = null;
         if (proveedor === "POLIVAL") {
           const numero = await nextReferenciaNumero(this.state);
-          const built = buildReferencia(numero, item.product.referenciaTipo, item.color);
+          const vaFurniture = item.tipo === "tapiceria" || item.product.exceptionFurniture || agencia === "FURNITURE";
+          const built = buildReferencia(numero, item.product.referenciaTipo, item.color, vaFurniture);
           referencia = built.referencia;
           if (built.needsReview) {
             needsReview = true;
             reviewReasons.push(built.reason);
           }
         }
-        // "Mercancía para pedir a fábrica" (Jennifer, 2026-08-25): se
-        // calcula sola por receta para canapés y para los cabeceros ya
-        // clasificados (Aura); el resto (almohadas, topper, cabeceros sin
-        // receta, bases, canapé fijo) sigue en blanco/editable a mano.
+        // "Mercancía para pedir a fábrica" (Jennifer, 2026-08-25, ampliado
+        // 2026-09-25 con Canapé fijo y Colchones exceptionFurniture): se
+        // calcula sola por receta para canapés, cabeceros ya clasificados
+        // (Aura), Canapé fijo (Base Alpha) y Látex Natura/Premium; el resto
+        // (almohadas, topper, cabeceros sin receta, bases) sigue en
+        // blanco/editable a mano.
         let mercanciaFabrica = null;
         if (proveedor === "POLIVAL" && item.product.product_type === "Canapé") {
           const built = buildCanapeMercancia(item.product.title, item.color, item.talla, services);
@@ -3875,7 +3996,21 @@ export class InventoryStore {
             reviewReasons.push(built.reason);
           }
         } else if (proveedor === "POLIVAL" && item.product.product_type === "Cabecero") {
-          const built = buildCabeceroMercancia(item.product.title, item.color, item.talla, item.variantTitle);
+          const built = buildCabeceroMercancia(item.product.title, item.color, item.talla, item.variantTitle, cabeceroConInitial);
+          mercanciaFabrica = built.texto;
+          if (built.needsReview) {
+            needsReview = true;
+            reviewReasons.push(built.reason);
+          }
+        } else if (proveedor === "POLIVAL" && item.product.product_type === "Canapé fijo") {
+          const built = buildCanapeFijoMercancia(item.color, item.talla);
+          mercanciaFabrica = built.texto;
+          if (built.needsReview) {
+            needsReview = true;
+            reviewReasons.push(built.reason);
+          }
+        } else if (proveedor === "POLIVAL" && item.product.product_type === "Colchones") {
+          const built = buildColchonMercancia(item.product.stockModel, item.talla);
           mercanciaFabrica = built.texto;
           if (built.needsReview) {
             needsReview = true;
@@ -3893,7 +4028,7 @@ export class InventoryStore {
 
       if (!proveedor) needsReview = true;
       const refSuffix = agencia === "SEUR" && item.tipo === "colchon" ? seurRefSuffix : "";
-      const { falta, covered, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, refSuffix, platform, orderRef);
+      const { falta, covered, reviewNotes } = await this.applyStockUsage(stock, backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, refSuffix, platform, orderRef, agencia);
       if (agencia === "SEUR") seurCubierto += covered;
       if (reviewNotes.length) {
         needsReview = true;

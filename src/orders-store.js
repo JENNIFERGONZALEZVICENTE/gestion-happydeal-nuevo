@@ -33,7 +33,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno"];
 
 // Cargas de Furniture (Jennifer, 2026-08-26): cargan miércoles y viernes,
 // así que la "próxima carga" siempre es el miércoles o viernes más cercano
@@ -342,6 +342,32 @@ export class OrdersStore {
       await this.state.storage.put("orders", orders);
       this.broadcast();
       return Response.json(existing);
+    }
+
+    // Marcar "gestionado por otra vía" por plataforma (Jennifer, 2026-09-25,
+    // caso real Leroy Merlin + Conforama ES: "estos pedidos no están
+    // pendientes realmente porque se han tramitado por otra vía... tenerlos
+    // en el listado de Furniture como pendientes solo puede hacer que los
+    // vuelva a sacar por error"). NO toca `agencia`, `inventoryProcessed`,
+    // `needsReview`, `cargaId` ni nada de stock/backorders — solo pone
+    // `gestionadoExterno:true`, que renderFurniture() usa para no
+    // enseñarlos (ver filtro `todasFurniture`). El pedido sigue existiendo
+    // tal cual, con su agencia real — es puramente "no lo muestres aquí,
+    // ya está resuelto". Preservado en mergeCustomFields (PRESERVED_FIELDS)
+    // para que no se pierda si se vuelve a subir el fichero.
+    if (url.pathname === "/orders/marcar-gestionado-externo" && request.method === "POST") {
+      const { platform } = await request.json();
+      if (!platform) return Response.json({ ok: false, error: "Falta platform." }, { status: 400 });
+      const orders = (await this.state.storage.get("orders")) || {};
+      let marcados = 0;
+      for (const order of Object.values(orders)) {
+        if (order.platform !== platform || order.agencia !== "FURNITURE" || order.gestionadoExterno) continue;
+        order.gestionadoExterno = true;
+        marcados++;
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, marcados });
     }
 
     if (url.pathname === "/orders/meta" && request.method === "POST") {

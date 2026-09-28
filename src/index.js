@@ -33,7 +33,14 @@ const PROCESAMIENTO_DESDE = {
   // Maison/Worten. Conforama Francia no tenía ningún pedido tras el 13/09
   // (el más reciente era del 06/09), así que se amplió más, al 01/09.
   Conforama: "2026-09-01",
-  "Conforama ES": "2026-09-13",
+  // Subida a 2026-09-21 (Jennifer, 2026-09-25): el último pedido que
+  // gestionó Ariadna a mano fue MP9992626400274607-A (único pedido de esa
+  // fecha en el fichero real subido ese día, verificado sin ambigüedad de
+  // orden dentro del mismo día) — a partir de ahí (inclusive) es cuando
+  // empieza a tener sentido que el motor normal se encargue; todo lo
+  // anterior ya está gestionado y no debe volver a descontar stock ni pedir
+  // a proveedor. Antes: "2026-09-13".
+  "Conforama ES": "2026-09-21",
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para procesar todo el
   // histórico real de prueba (95 pedidos desde el 24/06).
   "Leroy Merlin": "2026-06-24",
@@ -603,6 +610,17 @@ function extractTallaFromText(text) {
   const m = String(text || "").match(/(\d{2,3})\s*[xX]\s*(\d{2,3})/);
   return m ? `${m[1]}X${m[2]}` : "";
 }
+// A diferencia de Shopify, un pedido de marketplace no trae el color en un
+// campo aparte (solo la talla, ver resolveMarketplaceItem) — pero el texto
+// del pedido a veces sí lo dice de forma legible, ej. "... | Color Cerezo |
+// ..." (Jennifer, 2026-09-25, caso real Carrefour 76401664-A: salía "(sin
+// color)" en la referencia de Polival y la receta de fábrica, aunque el
+// propio pedido decía el color). Solo se usa si encaja este patrón exacto —
+// si no aparece así, se sigue sin color como hasta ahora, no se adivina.
+function extractColorFromText(text) {
+  const m = String(text || "").match(/\|\s*Color\s+([^|]+?)\s*\|/i);
+  return m ? m[1].trim() : "";
+}
 // Número de pedido interno a partir de la referencia real del marketplace
 // (Jennifer, 2026-09-21, caso real Conforama ES: referencias con letras,
 // ej. "MP6172617500191839-A" — `Number(...)` de eso da NaN, y los 76
@@ -671,10 +689,27 @@ function resolveMarketplaceItem(e, catalogMap) {
   const skuMostrado = viaFallback && match
     ? `${match.product.skuPrefix || ""}${match.talla || ""}`
     : (skuUsado || e.sku);
+  // Color leído del texto del pedido si aparece (ver extractColorFromText):
+  // se antepone a la talla con el mismo formato "Color / Talla" que ya usa
+  // Shopify en variant_title, para poder reusar tal cual extractColor() en
+  // inventory-store.js sin duplicar esa lógica aquí.
+  const colorTexto = match ? extractColorFromText(e.product) : "";
+  const variantTitle = colorTexto ? `${colorTexto} / ${match.talla || ""}` : (match ? match.talla || "" : "");
   const item = match
-    ? { productId: match.product.productId, sku: skuMostrado || "", variantTitle: match.talla || "", qty: e.qty || 1 }
+    ? { productId: match.product.productId, sku: skuMostrado || "", variantTitle, qty: e.qty || 1 }
     : { productId: null, sku: e.sku || "", variantTitle: "", qty: e.qty || 1 };
-  return { item, skuMostrado, matched: !!match };
+  // "M" delante del código de un canapé/cabecero/base en marketplace
+  // (Jennifer, 2026-09-25, caso real Carrefour 76401664-A, SKU
+  // "MCANMONCER150X190"): significa que el cliente compró CON montaje —
+  // Shopify lo manda como properties aparte, pero un marketplace lo mete
+  // pegado delante del propio código. Ningún prefijo real de tapicería del
+  // Catálogo empieza por "M" (comprobado), así que no hay ambigüedad. Solo
+  // aplica a tapicería — un colchón con SKU que por casualidad empezara por
+  // "M" no tiene montaje como concepto.
+  const TAPICERIA_TYPES_MARKETPLACE = new Set(["Canapé", "Canapé fijo", "Base", "Cabecero"]);
+  const montaje = !!(match && TAPICERIA_TYPES_MARKETPLACE.has(match.product.product_type)
+    && /^M/i.test(String(skuUsado || e.sku || "").trim()));
+  return { item, skuMostrado, matched: !!match, montaje };
 }
 
 // `entriesGrupo`: todas las filas del fichero que comparten el mismo
@@ -693,11 +728,16 @@ function mapMarketplaceOrder(entriesGrupo, catalogMap, platform) {
   const items = [];
   const productParts = [];
   const skuParts = [];
+  const serviceParts = [];
   for (const e of entriesGrupo) {
-    const { item, skuMostrado } = resolveMarketplaceItem(e, catalogMap);
+    const { item, skuMostrado, montaje } = resolveMarketplaceItem(e, catalogMap);
     items.push(item);
     productParts.push(e.product);
     skuParts.push(skuMostrado || e.sku || "");
+    // Mismo formato que usa Shopify en "services" (ver mapOrder) para que
+    // tieneMontajeFurniture() lo reconozca tal cual, sin duplicar esa lógica
+    // aquí (ver resolveMarketplaceItem).
+    if (montaje) serviceParts.push("Montaje: Con Montaje");
   }
   const prefijo = MARKETPLACE_ID_PREFIX[platform] || "MKT";
   return {
@@ -725,7 +765,7 @@ function mapMarketplaceOrder(entriesGrupo, catalogMap, platform) {
     // de Shopify para "Producto comprado") — igual para SKU, así la
     // columna SKU de la tabla sigue siendo útil aunque haya más de uno.
     product: productParts.join(", "),
-    services: "",
+    services: serviceParts.join(" · "),
     // Todos los pedidos de estos marketplaces se tratan como pagados
     // (Jennifer, 2026-09-17) — no hay un estado de pago fila a fila fiable
     // como en Shopify.
@@ -1506,6 +1546,7 @@ function renderPage() {
   .furniture-item-fpk { color: #92400e; }
   .fpk-tag { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #fef3c7; color: #92400e; }
   .furniture-ya-salio-tag { display: block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #dbeafe; color: #1e40af; }
+  .furniture-pendiente-tag { display: block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #fef3c7; color: #92400e; }
   .carga-abierta-box .toolbar { padding: 1rem 1rem 0.25rem; }
   .carga-abierta-box .table-wrap { max-height: 320px; }
   #furniture-pendientes-toolbar { padding-top: 1.5rem; }
@@ -1516,7 +1557,7 @@ function renderPage() {
   .carga-historial-card summary { padding: 0.75rem 1rem; cursor: pointer; font-weight: 600; color: var(--brand-dark); background: var(--panel); list-style: none; }
   .carga-historial-card summary::-webkit-details-marker { display: none; }
   .sacar-carga-btn { padding: 5px 10px; font-size: 12px; background: transparent; color: #991b1b; border: 1px solid #991b1b; }
-  #pendientes-filter-row th, #furniture-filter-row th { padding: 4px 8px; background: var(--panel); position: sticky; top: 34px; }
+  #pendientes-filter-row th, #furniture-filter-row th { padding: 8px; background: #eef2f0; position: sticky; top: 34px; z-index: 2; border-top: 1px solid var(--border) !important; border-bottom: 3px solid var(--brand) !important; }
   #pendientes-filter-row input, #furniture-filter-row input { width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12.5px; font-weight: 400; text-transform: none; border: 1px solid var(--border); border-radius: 4px; }
   .pedido-generado-tag { display: block; font-size: 13px; font-weight: 600; color: #146138; margin-top: 4px; }
   .reposicion-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #fef3c7; color: #92400e; }
@@ -1815,9 +1856,11 @@ function renderPage() {
 <div id="view-pendientes" style="display:none">
   <div class="toolbar">
     <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-ocultar-recibidos"> Ocultar ya recibidos de fábrica</label>
+    <button type="button" id="descargar-excel-pendientes-btn" class="secondary">Descargar Excel (todos los proveedores)</button>
   </div>
   <div class="toolbar" id="pendientes-toolbar" style="display:none">
     <button type="button" id="generar-pedido-btn" disabled>Generar pedido a fábrica (PDF)</button>
+    <button type="button" id="generar-pedido-excel-btn" disabled>Generar pedido a fábrica (Excel)</button>
     <span id="seleccion-count" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="pendientes-count" class="inventario-count"></div>
@@ -2297,7 +2340,23 @@ function trackingEntryHtml(label, seguimiento, estado, title) {
     : "";
   return \`<div class="tracking-entry">\${linkHtml} \${estadoHtml}</div>\`;
 }
+// Conforama ES (Jennifer, 2026-09-25): un pedido "Pendiente de verificación
+// de fraude" o "Cancelado" nunca pasa por el motor (ver
+// MARKETPLACE_ESTADOS_ELEGIBLES en el Worker) y por tanto nunca tiene
+// seguimiento real de Furniture/SEUR que mostrar aquí — en vez de dejar la
+// columna vacía ("—"), se enseña el estado real de Mirakl tal cual, para
+// saber de un vistazo por qué no hay seguimiento sin tener que abrir el
+// pedido. El pedido cancelado NUNCA se quita del listado (solo se marca
+// así en esta columna) — sigue viéndose en Pedidos como cualquier otro.
+function estadoSeguimientoEspecial(estado) {
+  const e = String(estado || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  if (e.includes("cancelad")) return "CANCELADO";
+  if (e.includes("verificacion de fraude")) return "VERIFICACIÓN DE FRAUDE";
+  return null;
+}
 function trackingCell(order) {
+  const especial = estadoSeguimientoEspecial(order.estado);
+  if (especial) return \`<span class="tracking-link tracking-sin-link">\${especial}</span>\`;
   const furniture = (order.furnitureTracking || []).map(e => {
     const label = TRACKING_TIPO_LABEL[e.tipo] || "Furniture";
     const title = escapeAttr(e.fechaPrevista ? "Fecha prevista: " + e.fechaPrevista : "");
@@ -2640,6 +2699,45 @@ document.getElementById("pendientes-referencia-search").addEventListener("input"
 document.getElementById("pendientes-pedido-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-sku-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-ocultar-recibidos").addEventListener("change", renderPendientes);
+// Si la ventana cambia de tamaño el texto de la cabecera puede pasar a 1 o 2
+// líneas y cambiar de alto — se re-mide (Jennifer, 2026-09-25, ver
+// sincronizarTopFilaFiltro).
+window.addEventListener("resize", () => {
+  sincronizarTopFilaFiltro("pendientes-table", "pendientes-filter-row");
+  sincronizarTopFilaFiltro("furniture-pendientes-table", "furniture-filter-row");
+});
+// Excel de todos los pendientes de proveedor (Jennifer, 2026-09-25): "por si
+// tengo que hacer algo con ellos con el excel" — descarga TODOS los
+// pendientes de Polival/Luso/New de golpe, sin importar la pestaña o los
+// filtros de texto que haya puestos en pantalla ahora mismo (a diferencia de
+// la tabla, que sí filtra). Mismas columnas que ya se ven en pantalla, más
+// "Proveedor" para poder distinguirlos una vez mezclados en una sola hoja.
+document.getElementById("descargar-excel-pendientes-btn").addEventListener("click", () => {
+  const filas = backorders
+    .filter(b => b.estado === "pendiente" && ["POLIVAL", "LUSO", "NEW"].includes(b.proveedor))
+    .sort((a, b) => (a.proveedor === b.proveedor ? parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha) : a.proveedor.localeCompare(b.proveedor)))
+    .map(b => ({
+      Proveedor: b.proveedor,
+      Pedido: refLabel(b) + (b.refSuffix || ""),
+      Plataforma: b.platform || "Shopify",
+      Modelo: b.stockModel,
+      Color: b.color || "",
+      Talla: b.talla,
+      SKU: skuDePendiente(b),
+      Cantidad: b.cantidad,
+      "Ref. Polival": b.referencia || "",
+      "FUR/FPK": b.esPack && b.tipo === "colchon" ? (b.tipoEnvio || "") : "",
+      "Mercancía para pedir a fábrica": b.mercanciaFabrica || "",
+      "Fecha del pedido": b.fecha || "",
+      "Pedido a fábrica": b.pedidoGenerado ? "Sí" + (b.fechaPedidoFabrica ? " (" + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") + ")" : "") : "No",
+      "Recibido de fábrica": b.recibidoFabrica ? "Sí" + (b.fechaRecibido ? " (" + new Date(b.fechaRecibido).toLocaleDateString("es-ES") + ")" : "") : "No",
+    }));
+  const ws = XLSX.utils.json_to_sheet(filas);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Pendientes proveedor");
+  const fecha = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, "Pendientes_Proveedores_" + fecha + ".xlsx");
+});
 document.getElementById("furniture-pedido-search").addEventListener("input", renderFurniture);
 document.getElementById("furniture-referencia-search").addEventListener("input", renderFurniture);
 document.getElementById("color-filter").addEventListener("change", applyFilter);
@@ -2976,6 +3074,40 @@ function skuDePendiente(b) {
   const p = catalogoProducts.find(x => x.stockModel === b.stockModel);
   if (!p || !p.skuPrefix) return "—";
   return p.skuPrefix + (b.talla || "");
+}
+
+// ¿El pedido de este colchón SUELTO (no pack) lleva también tapicería como
+// artículo aparte? (Jennifer, 2026-09-25, caso real BEZEN12173/12133): antes
+// esto solo se veía yendo a Logística > Furniture — un colchón suelto
+// "siempre por SEUR" (regla dictada 2026-09-18) no tenía ni aviso ni forma de
+// decidir mandarlo junto con la tapicería. Mismos tipos de producto que ya
+// usa InventoryStore (TYPE_MAP en inventory-store.js) para no inventar una
+// clasificación nueva.
+const TAPICERIA_PRODUCT_TYPES_FRONT = new Set(["Canapé", "Canapé fijo", "Base", "Cabecero"]);
+function ordenTieneTapiceria(orderNumber) {
+  const order = allOrders.find(o => o.orderNumber === orderNumber);
+  if (!order) return false;
+  return (order.items || []).some(it => {
+    const p = catalogoProducts.find(cp => cp.productId === it.productId);
+    return p && TAPICERIA_PRODUCT_TYPES_FRONT.has(p.product_type);
+  });
+}
+
+// La fila de filtros (Pendientes/Furniture) va sticky justo debajo de la
+// cabecera de columnas, también sticky — un "top" fijo en CSS (34px) no
+// siempre coincide con la altura REAL de la cabecera (depende de si el
+// texto de alguna columna ocupa 1 o 2 líneas, fuente ya cargada o no, etc.),
+// y si se queda corto la fila de filtros tapa un poco la fila de datos justo
+// debajo, cortando el texto (Jennifer, 2026-09-25, caso real: "Modelo" en la
+// primera fila de Luso/New). Se mide la altura real de la cabecera después
+// de pintar la tabla y se aplica ese valor exacto en vez de adivinarlo.
+function sincronizarTopFilaFiltro(tablaId, filaFiltroId) {
+  const cabecera = document.querySelector("#" + tablaId + " thead tr:first-child");
+  const filaFiltro = document.getElementById(filaFiltroId);
+  if (!cabecera || !filaFiltro) return;
+  const alto = Math.ceil(cabecera.getBoundingClientRect().height);
+  if (!alto) return;
+  filaFiltro.querySelectorAll("th").forEach(th => { th.style.top = alto + "px"; });
 }
 
 // TARIFAS (Jennifer, 2026-09-22): precio de venta calculado por talla para
@@ -3453,30 +3585,48 @@ function renderPendientes() {
     else if (mismoAnterior && mismoSiguiente) grupoClass = "fila-grupo-medio";
     else if (mismoAnterior && !mismoSiguiente) grupoClass = "fila-grupo-fin";
     const esPackColchon = b.esPack && b.tipo === "colchon";
-    const tipoEnvioSelect = esPackColchon
+    // Colchón SUELTO (no pack) cuyo pedido también lleva tapicería aparte
+    // (Jennifer, 2026-09-25): misma decisión que ya existía para el colchón
+    // de un pack (¿junto con Furniture o independiente por SEUR?), ahora
+    // también disponible aquí — antes un colchón suelto iba "siempre por
+    // SEUR" sin poder elegir. Reusa el mismo campo/selector/ruta (tipoEnvio),
+    // sin inventar un mecanismo nuevo.
+    const esColchonSueltoConTapiceria = b.tipo === "colchon" && !b.esPack && ordenTieneTapiceria(b.orderNumber);
+    const mostrarSelectorEnvio = esPackColchon || esColchonSueltoConTapiceria;
+    const tipoEnvioSelect = mostrarSelectorEnvio
       ? \`<select class="tipo-envio-select" data-id="\${b.id}">
            <option value="FPK"\${b.tipoEnvio === "FPK" ? " selected" : ""}>FPK\${refLabel(b)} (independiente)</option>
            <option value="FUR"\${b.tipoEnvio === "FUR" ? " selected" : ""}>FUR\${refLabel(b)} (junto)</option>
          </select>\`
       : "";
-    // Aviso si la tapicería de este mismo pedido ya salió por Furniture
-    // (Jennifer, 2026-08-27): si el colchón sigue marcado FPK aquí pero la
-    // carga de su pedido ya está cerrada, hay que revisarlo — o se manda
-    // ya independiente o se ha quedado descolgado.
-    const pedidoDelColchon = esPackColchon ? allOrders.find(o => o.orderNumber === b.orderNumber) : null;
+    // Estado de la tapicería de este mismo pedido en Furniture (Jennifer,
+    // 2026-08-27, ampliado 2026-09-25): antes solo avisaba cuando la
+    // tapicería YA había salido con el colchón todavía marcado FPK aquí
+    // (para detectar un FPK que se quedó descolgado). Jennifer pidió
+    // también lo contrario — verlo desde Luso/New cuando la tapicería
+    // TODAVÍA no ha salido, para poder decidir si esperar y mandarlo junto
+    // (FUR) o dejarlo independiente (FPK) sin tener que irse a mirar
+    // Logística > Furniture aparte (casos reales BEZEN12225, BEZEN12173).
+    // Se cubren los 3 estados posibles: ya enviada (carga cerrada),
+    // programada pero sin enviar todavía (carga abierta), o ni siquiera
+    // programada en ninguna carga (sin cargaId).
+    const pedidoDelColchon = mostrarSelectorEnvio ? allOrders.find(o => o.orderNumber === b.orderNumber) : null;
     const cargaDelColchon = pedidoDelColchon?.cargaId ? allCargas.find(c => c.id === pedidoDelColchon.cargaId) : null;
-    const furnitureYaSalioTag = cargaDelColchon?.estado === "cerrada"
+    const furnitureEstadoTag = !mostrarSelectorEnvio ? ""
+      : cargaDelColchon?.estado === "cerrada"
       ? \`<span class="furniture-ya-salio-tag">ℹ Furniture de este pedido ya salió (\${new Date(cargaDelColchon.fechaCierre).toLocaleDateString("es-ES")})</span>\`
-      : "";
+      : cargaDelColchon?.estado === "abierta"
+      ? \`<span class="furniture-pendiente-tag">⏳ Tapicería en carga de Furniture del \${new Date(cargaDelColchon.fecha + "T00:00:00Z").toLocaleDateString("es-ES")}, todavía sin enviar</span>\`
+      : \`<span class="furniture-pendiente-tag">⏳ Tapicería sin programar todavía en ninguna carga de Furniture</span>\`;
     // En "Pendiente de decisión" se puede corregir directamente lo que
     // aplique (FUR/FPK si es un colchón de pack) y además responder a la
     // pregunta de texto (ej. confirmar qué artículo era del catálogo).
     const referenciaCell = isDecisionTab
-      ? \`\${tipoEnvioSelect}\${furnitureYaSalioTag}<button type="button" class="responder-btn" data-order="\${b.orderNumber}">Responder dudas</button>\`
-      : (tipoEnvioSelect ? tipoEnvioSelect + furnitureYaSalioTag : "—");
+      ? \`\${tipoEnvioSelect}\${furnitureEstadoTag}<button type="button" class="responder-btn" data-order="\${b.orderNumber}">Responder dudas</button>\`
+      : (tipoEnvioSelect ? tipoEnvioSelect + furnitureEstadoTag : "—");
     const fechaCell = !showCamionCol
       ? ""
-      : esPackColchon
+      : mostrarSelectorEnvio
       ? \`<td><input type="date" class="fecha-camion-input" data-id="\${b.id}" value="\${b.fechaEstimadaLlegada ? b.fechaEstimadaLlegada.slice(0, 10) : ""}"></td>\`
       : "<td>—</td>";
     // Un pedido cancelado (Jennifer, 2026-08-26) se queda visible en rojo
@@ -3510,8 +3660,12 @@ function renderPendientes() {
     // reposición de colchón por FURNITURE es la excepción: aunque sea tipo
     // "colchon", NO debe mostrar este botón — va por la línea independiente
     // de Furniture (con posible recogida), con el botón normal "Marcar
-    // recibido" en su lugar.
-    const esColchonSeur = ((b.tipo === "colchon" && !b.esPack) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
+    // recibido" en su lugar. Un colchón suelto marcado FUR (Jennifer,
+    // 2026-09-25: quiere poder mandarlo junto con la tapicería de su mismo
+    // pedido) tampoco va por SEUR — se trata igual que el colchón de un pack
+    // en FUR, "Marcar recibido" normal para que luego lo recoja
+    // buildFurnitureExport en la carga de Furniture de ese pedido.
+    const esColchonSeur = ((b.tipo === "colchon" && !b.esPack && !(esColchonSueltoConTapiceria && b.tipoEnvio === "FUR")) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
     // Sustituir por otro modelo que sí hay en stock (Jennifer, 2026-09-18):
     // vale tanto para colchón suelto como de pack, mientras siga
     // "pendiente" — una vez preparado o sustituido ya no aplica. El propio
@@ -3544,6 +3698,7 @@ function renderPendientes() {
   }).join("");
   document.getElementById("pendientes-count").textContent = pendientes.length + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)";
   actualizarSeleccionUI();
+  sincronizarTopFilaFiltro("pendientes-table", "pendientes-filter-row");
 
   tbody.querySelectorAll(".pendiente-check").forEach(chk => {
     chk.addEventListener("change", () => {
@@ -3602,6 +3757,7 @@ function renderPendientes() {
 function actualizarSeleccionUI() {
   const n = pedidoFabricaSeleccion.size;
   document.getElementById("generar-pedido-btn").disabled = n === 0;
+  document.getElementById("generar-pedido-excel-btn").disabled = n === 0;
   document.getElementById("seleccion-count").textContent = n > 0 ? n + " seleccionados" : "";
 }
 
@@ -3646,10 +3802,68 @@ function formatMercanciaSinReceta(b) {
   const unidad = (b.cantidad || 1) > 1 ? "UNIDADES" : "UNIDAD";
   return modeloConTalla(b) + " - " + (b.cantidad || 1) + " " + unidad;
 }
-document.getElementById("generar-pedido-btn").addEventListener("click", async () => {
-  const seleccionados = backorders.filter(b => pedidoFabricaSeleccion.has(b.id));
-  if (!seleccionados.length) return;
+// Cabecera + filas del pedido a fábrica, compartidas por el PDF y el Excel
+// (Jennifer, 2026-09-28: el PDF no se puede editar si algo sale mal, quiere
+// también un Excel editable con el mismo contenido).
+function filasPedidoFabrica(seleccionados) {
+  // Luso/New (colchones sueltos, sin referencia de Polival): tabla propia
+  // de "Modelo" + "Cantidad", sin columna Referencia — Jennifer,
+  // 2026-09-21: "no necesito que aparezca la columna referencia". Polival
+  // sigue con Referencia + el texto completo de fabricación, que sí lo
+  // necesita (modelo/medida/color/tapa/tirador).
+  if (currentProveedorFilter === "polival") {
+    // Una fila por ARTÍCULO, con su referencia a la izquierda (Jennifer,
+    // 2026-09-28: con "N001FUR / N002FUR" en una sola celda no se veía qué
+    // referencia iba con cada artículo). Los artículos del mismo pedido van
+    // seguidos (antes, 2026-08-25, compartían recuadro) — grupoDeFila
+    // permite al PDF sombrear cada pedido por igual.
+    const grupos = new Map();
+    seleccionados.forEach(b => {
+      if (!grupos.has(b.orderNumber)) grupos.set(b.orderNumber, []);
+      grupos.get(b.orderNumber).push(b);
+    });
+    const filas = [];
+    const grupoDeFila = [];
+    // Posición donde empieza "N UNIDADES" en el texto de cada fila (-1 si es
+    // una sola unidad) — va en negrita (Jennifer, 2026-09-28).
+    const negritaDesde = [];
+    [...grupos.values()].forEach((items, g) => {
+      items.forEach(b => {
+        // Producto primero y referencia a la DERECHA (Jennifer, 2026-09-28:
+        // "la referencia siempre tiene que ir en la parte de la derecha").
+        // El texto de fabricación no lleva la cantidad (Jennifer, 2026-09-28,
+        // caso BEZEN12239: 2 almohadas salían como una) — se añade si hay
+        // más de una unidad. formatMercanciaSinReceta ya la incluye.
+        const cantidad = b.cantidad || 1;
+        const texto = b.mercanciaFabrica || b.nombreFabricacion;
+        const mercancia = texto
+          ? (cantidad > 1 ? texto + " · " + cantidad + " UNIDADES" : texto)
+          : formatMercanciaSinReceta(b);
+        filas.push([mercancia, b.referencia || "—"]);
+        grupoDeFila.push(g);
+        negritaDesde.push(cantidad > 1 ? mercancia.lastIndexOf(cantidad + " UNIDADES") : -1);
+      });
+    });
+    return { head: ["Mercancía para pedir a fábrica", "Referencia"], filas, grupoDeFila, negritaDesde };
+  }
+  // Agrupado por MODELO+TALLA en vez de por pedido (Jennifer, 2026-09-21:
+  // "si varios de esos pedidos son del mismo modelo, ¿habría opción de
+  // que lo agrupes?") — al proveedor le da igual de qué cliente venga
+  // cada colchón, así que se suman las cantidades en una sola línea.
+  const grupos = new Map();
+  seleccionados.forEach(b => {
+    const clave = modeloConTalla(b);
+    if (!grupos.has(clave)) grupos.set(clave, 0);
+    grupos.set(clave, grupos.get(clave) + (b.cantidad || 1));
+  });
+  const filas = [...grupos.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([modelo, cantidad]) => [modelo, cantidad]);
+  return { head: ["Modelo", "Cantidad"], filas };
+}
 
+function descargarPedidoFabricaPdf(seleccionados) {
+  const { head, filas, grupoDeFila, negritaDesde } = filasPedidoFabrica(seleccionados);
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF();
   // Sin el nombre del proveedor en el título (Jennifer, 2026-09-21: "no
@@ -3660,50 +3874,33 @@ document.getElementById("generar-pedido-btn").addEventListener("click", async ()
   doc.setFontSize(10);
   doc.text(new Date().toLocaleDateString("es-ES"), 14, 22);
 
-  // Luso/New (colchones sueltos, sin referencia de Polival): tabla propia
-  // de "Modelo" + "Cantidad", sin columna Referencia — Jennifer,
-  // 2026-09-21: "no necesito que aparezca la columna referencia". Polival
-  // sigue con Referencia + el texto completo de fabricación, que sí lo
-  // necesita (modelo/medida/color/tapa/tirador).
   if (currentProveedorFilter === "polival") {
-    // Varios artículos del mismo PEDIDO van en el mismo recuadro (misma
-    // fila) — a petición de Jennifer, 2026-08-25. Aquí sí importa mantener
-    // el pedido agrupado, porque cada uno lleva su propia referencia y su
-    // propio texto de fabricación (color, tapa, tirador...).
-    const grupos = new Map();
-    seleccionados.forEach(b => {
-      if (!grupos.has(b.orderNumber)) grupos.set(b.orderNumber, []);
-      grupos.get(b.orderNumber).push(b);
-    });
-    const filas = [...grupos.values()].map(items => [
-      items.map(b => b.referencia || "—").join(" / "),
-      items.map(b => b.mercanciaFabrica || b.nombreFabricacion || formatMercanciaSinReceta(b)).join("\\n\\n"),
-    ]);
     doc.autoTable({
-      head: [["Referencia", "Mercancía para pedir a fábrica"]],
+      head: [head],
       body: filas,
       startY: 28,
+      theme: "grid",
       styles: { fontSize: 10, cellPadding: 3, valign: "middle" },
       headStyles: { fillColor: [31, 138, 76] },
-      columnStyles: { 0: { cellWidth: 30 } },
+      columnStyles: { 1: { cellWidth: 38, fontStyle: "bold" } },
+      // Mismo sombreado para todos los artículos de un mismo pedido,
+      // alternando entre pedidos.
+      didParseCell: data => {
+        if (data.section === "body" && grupoDeFila[data.row.index] % 2 === 1) {
+          data.cell.styles.fillColor = [234, 244, 238];
+        }
+        // autoTable no admite negrita solo en un trozo de la celda: con más
+        // de una unidad va en negrita toda la descripción.
+        if (data.section === "body" && data.column.index === 0 && negritaDesde[data.row.index] >= 0) {
+          data.cell.styles.fontStyle = "bold";
+          data.cell.styles.textColor = [200, 0, 0];
+        }
+      },
     });
   } else {
-    // Agrupado por MODELO+TALLA en vez de por pedido (Jennifer, 2026-09-21:
-    // "si varios de esos pedidos son del mismo modelo, ¿habría opción de
-    // que lo agrupes?") — al proveedor le da igual de qué cliente venga
-    // cada colchón, así que se suman las cantidades en una sola línea.
-    const grupos = new Map();
-    seleccionados.forEach(b => {
-      const clave = modeloConTalla(b);
-      if (!grupos.has(clave)) grupos.set(clave, 0);
-      grupos.set(clave, grupos.get(clave) + (b.cantidad || 1));
-    });
-    const filas = [...grupos.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([modelo, cantidad]) => [modelo, String(cantidad)]);
     doc.autoTable({
-      head: [["Modelo", "Cantidad"]],
-      body: filas,
+      head: [head],
+      body: filas.map(([modelo, cantidad]) => [modelo, String(cantidad)]),
       startY: 28,
       // Cuadrícula completa (borde en todas las celdas), a petición de
       // Jennifer, 2026-09-21 ("hazlo en modo tabla") — el tema por defecto
@@ -3716,6 +3913,119 @@ document.getElementById("generar-pedido-btn").addEventListener("click", async ()
   }
 
   doc.save("pedido-" + currentProveedorFilter + "-" + new Date().toISOString().slice(0, 10) + ".pdf");
+}
+
+// ExcelJS solo se carga al descargar el pedido a fábrica en Excel: SheetJS
+// (el XLSX que ya usa la página) no escribe formato de celda, y aquí hace
+// falta ajuste de texto, bordes y configuración de impresión.
+let excelJsPromesa = null;
+function cargarExcelJs() {
+  if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+  if (!excelJsPromesa) {
+    excelJsPromesa = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js";
+      s.onload = () => resolve(window.ExcelJS);
+      s.onerror = () => { excelJsPromesa = null; reject(new Error("No se pudo cargar ExcelJS")); };
+      document.head.appendChild(s);
+    });
+  }
+  return excelJsPromesa;
+}
+
+// Excel listo para imprimir (Jennifer, 2026-09-28): el texto largo pasa a
+// varias líneas dentro de la celda y todo el ancho cabe en un A4 vertical.
+async function descargarPedidoFabricaExcel(seleccionados) {
+  const { head, filas, grupoDeFila, negritaDesde } = filasPedidoFabrica(seleccionados);
+  const ExcelJS = await cargarExcelJs();
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Pedido a fábrica", {
+    pageSetup: {
+      paperSize: 9, // A4
+      orientation: "portrait",
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      horizontalCentered: true,
+      margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 },
+    },
+  });
+
+  const esPolival = currentProveedorFilter === "polival";
+  // Anchos pensados para que la suma quepa en un A4 vertical sin reducir la letra.
+  const anchos = esPolival ? [70, 16] : [70, 12];
+  ws.columns = anchos.map(width => ({ width }));
+
+  ws.getCell("A1").value = "Pedido a fábrica";
+  ws.getCell("A1").font = { bold: true, size: 14 };
+  ws.getCell("A2").value = new Date().toLocaleDateString("es-ES");
+  ws.addRow([]);
+
+  const borde = { style: "thin", color: { argb: "FF999999" } };
+  const bordes = { top: borde, left: borde, bottom: borde, right: borde };
+
+  const cabecera = ws.addRow(head);
+  cabecera.eachCell(c => {
+    c.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F8A4C" } };
+    c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    c.border = bordes;
+  });
+  // La cabecera se repite arriba en cada página impresa.
+  ws.pageSetup.printTitlesRow = cabecera.number + ":" + cabecera.number;
+
+  filas.forEach((fila, i) => {
+    const row = ws.addRow(fila);
+    // Alto calculado a mano: Excel no reajusta solo la altura de una fila
+    // con texto ajustado al abrir un fichero generado.
+    const lineas = Math.max(...fila.map((v, col) => String(v).split("\\n").reduce(
+      (n, trozo) => n + Math.max(1, Math.ceil(trozo.length / (anchos[col] - 2))), 0)));
+    row.height = Math.max(1, lineas) * 15 + 4;
+    row.eachCell({ includeEmpty: true }, (c, col) => {
+      c.alignment = { vertical: "middle", horizontal: col === 1 ? "left" : "center", wrapText: true };
+      c.border = bordes;
+      if (esPolival && col === 2) c.font = { bold: true };
+      // "N UNIDADES" en negrita y rojo, el resto del texto normal.
+      const desde = negritaDesde ? negritaDesde[i] : -1;
+      if (col === 1 && desde >= 0) {
+        const texto = String(c.value);
+        c.value = { richText: [
+          { text: texto.slice(0, desde) },
+          { text: texto.slice(desde), font: { bold: true, color: { argb: "FFC80000" } } },
+        ] };
+      }
+      if (grupoDeFila && grupoDeFila[i] % 2 === 1) {
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEAF4EE" } };
+      }
+    });
+  });
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "pedido-" + currentProveedorFilter + "-" + new Date().toISOString().slice(0, 10) + ".xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function generarPedidoFabrica(formato) {
+  const seleccionados = backorders.filter(b => pedidoFabricaSeleccion.has(b.id));
+  if (!seleccionados.length) return;
+
+  if (formato === "excel") {
+    // Si falla la descarga, no se marcan como pedidos a fábrica.
+    try {
+      await descargarPedidoFabricaExcel(seleccionados);
+    } catch (err) {
+      alert("No se pudo generar el Excel: " + err.message);
+      return;
+    }
+  } else {
+    descargarPedidoFabricaPdf(seleccionados);
+  }
 
   await fetch("/api/inventario/pendientes/mark-ordered", {
     method: "POST",
@@ -3724,7 +4034,9 @@ document.getElementById("generar-pedido-btn").addEventListener("click", async ()
   });
   pedidoFabricaSeleccion.clear();
   loadPendientes();
-});
+}
+document.getElementById("generar-pedido-btn").addEventListener("click", () => generarPedidoFabrica("pdf"));
+document.getElementById("generar-pedido-excel-btn").addEventListener("click", () => generarPedidoFabrica("excel"));
 
 async function resolverPendiente(id) {
   const before = backorders.find(x => x.id === id);
@@ -3922,12 +4234,13 @@ function furnitureRowCells(o) {
   const items = backordersPorPedido(o.id);
   const itemsHtml = items.length
     ? items.map(b => {
-        // Colchón de pack marcado FPK (Jennifer, 2026-08-27): por defecto
-        // sale independiente por SEUR, sin esperar a la tapicería — pero
-        // se sigue mostrando aquí (en vez de ocultarlo) para que quede
-        // claro que ese pedido lo tiene, por si al final coincide con la
-        // tapicería y le interesa mandarlo junto en la carga.
-        const esFpk = b.esPack && b.tipo === "colchon" && b.tipoEnvio === "FPK";
+        // Colchón marcado FPK (Jennifer, 2026-08-27, ampliado 2026-09-25 a
+        // colchón suelto además de pack): por defecto sale independiente
+        // por SEUR, sin esperar a la tapicería — pero se sigue mostrando
+        // aquí (en vez de ocultarlo) para que quede claro que ese pedido lo
+        // tiene, por si al final coincide con la tapicería y le interesa
+        // mandarlo junto en la carga.
+        const esFpk = b.tipo === "colchon" && b.tipoEnvio === "FPK";
         return \`
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
@@ -3980,7 +4293,7 @@ function renderFurniture() {
   document.getElementById("cerrar-carga-btn").disabled = !cargaAbierta;
   document.getElementById("descargar-carga-btn").disabled = !cargaAbierta;
 
-  const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && o.shippingStatus !== "fulfilled");
+  const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && o.shippingStatus !== "fulfilled" && !o.gestionadoExterno);
   const enCarga = cargaAbierta ? todasFurniture.filter(o => o.cargaId === cargaAbierta.id) : [];
   const busquedaPedido = document.getElementById("furniture-pedido-search").value.trim().toLowerCase();
   const busquedaReferencia = document.getElementById("furniture-referencia-search").value.trim().toLowerCase();
@@ -4126,6 +4439,7 @@ function renderFurniture() {
     });
   });
   actualizarFurnitureSeleccionUI();
+  sincronizarTopFilaFiltro("furniture-pendientes-table", "furniture-filter-row");
 
   document.querySelectorAll(".item-recibido-check").forEach(chk => {
     chk.addEventListener("change", async () => {
@@ -4644,9 +4958,17 @@ async function loadMarketplacePedidos(platformId) {
 function renderMarketplace(platformId) {
   const orders = marketplaceOrdersByPlatform[platformId] || [];
   const q = document.getElementById(platformId + "-search").value.trim().toLowerCase();
-  const filtered = orders.filter(o =>
-    !q || (o.orderRef || "").toLowerCase().includes(q) || (o.name || "").toLowerCase().includes(q)
-  );
+  // El backend devuelve todo ordenado por orderNumber (correcto para
+  // Shopify, correlativo real) pero un marketplace como Conforama ES usa
+  // referencias que NO son un correlativo cronológico (ej. "40630979H-B"
+  // puede ser numéricamente menor que pedidos bastante más antiguos) —
+  // mismo fallo real ya conocido en Polival/Furniture (Jennifer,
+  // 2026-09-21/25: "estos pedidos no se ordenan por número de pedido, sino
+  // por la fecha de realización"). Se reordena aquí por la fecha real,
+  // más reciente primero (misma convención que la tabla de Shopify).
+  const filtered = orders
+    .filter(o => !q || (o.orderRef || "").toLowerCase().includes(q) || (o.name || "").toLowerCase().includes(q))
+    .sort((a, b) => parseFechaGenerica(b.orderDate) - parseFechaGenerica(a.orderDate));
   document.getElementById(platformId + "-count").textContent = filtered.length + " pedidos";
   const sinMatch = orders.filter(o => !o.skuMatched);
   const avisoEl = document.getElementById(platformId + "-sku-aviso");
@@ -4657,7 +4979,7 @@ function renderMarketplace(platformId) {
     avisoEl.style.display = "none";
   }
   document.querySelector("#" + platformId + "-table tbody").innerHTML = filtered.map(o => \`
-    <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
+    <tr\${(o.cancelado || estadoSeguimientoEspecial(o.estado) === "CANCELADO") ? ' class="fila-cancelada"' : ""}>
       <td class="bell-cell">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}</td>
       <td>\${o.orderRef}</td>
       <td>\${o.orderDate || ""}</td>
@@ -5801,17 +6123,23 @@ async function buildFurnitureExport(env, cargaId) {
     const tapaPartida = tapaPartidaFurniture(o.services);
     const observaciones = observacionesRetiradaFurniture(o.services);
     const telefono = limpiarTelefonoFurniture(o.phone);
-    // Igual que en el desglose de Furniture: un colchón de pack marcado
-    // "FPK" sale independiente por SEUR, no entra en esta etiqueta. Las
-    // reposiciones NUNCA entran aquí (Jennifer, 2026-09-21: tienen su
-    // propia línea independiente, con su propia carga — ver más abajo,
-    // reposicionesEnCarga — así que no dependen de si el resto del pedido
-    // está en esta carga o no).
+    // Igual que en el desglose de Furniture: un colchón marcado "FPK" sale
+    // independiente por SEUR, no entra en esta exportación. Ampliado
+    // 2026-09-25 (caso real BEZEN12173): antes solo se comprobaba para un
+    // colchón DE PACK (b.esPack) — un colchón SUELTO cuyo pedido también
+    // lleva tapicería se colaba aquí sin comprobar tipoEnvio en absoluto
+    // (icluido incluso mientras seguía en FPK, el valor por defecto), así
+    // que podía acabar en la etiqueta de Furniture sin que Jennifer lo
+    // hubiera decidido — ahora un colchón (pack o suelto) solo entra aquí
+    // si está marcado explícitamente FUR. Las reposiciones NUNCA entran
+    // aquí (Jennifer, 2026-09-21: tienen su propia línea independiente, con
+    // su propia carga — ver más abajo, reposicionesEnCarga — así que no
+    // dependen de si el resto del pedido está en esta carga o no).
     const backordersPedido = backorders.filter((b) => b.orderId === o.id
       && (b.estado === "pendiente" || b.estado === "cubierto")
       && !b.reposicion
       && !b.gestoComercial
-      && !(b.esPack && b.tipo === "colchon" && b.tipoEnvio === "FPK"));
+      && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
 
     const descripciones = backordersPedido.length
       ? backordersPedido.flatMap((b) => descripcionesBackorder(b, o.product, tapaPartida))
@@ -6376,6 +6704,18 @@ async function handleFetch(request, env) {
       return proxyInventory(env, "/admin/reset-stock", request);
     }
 
+    if (url.pathname === "/api/inventario/admin/reset-polival-counter" && request.method === "POST") {
+      return proxyInventory(env, "/admin/reset-polival-counter", request);
+    }
+
+    if (url.pathname === "/api/inventario/admin/set-polival-counter" && request.method === "POST") {
+      return proxyInventory(env, "/admin/set-polival-counter", request);
+    }
+
+    if (url.pathname === "/api/inventario/pendientes/set-campo" && request.method === "POST") {
+      return proxyInventory(env, "/backorders/set-campo", request);
+    }
+
     if (url.pathname === "/api/inventario/admin/clear-backorders" && request.method === "POST") {
       return proxyInventory(env, "/admin/clear-backorders", request);
     }
@@ -6573,6 +6913,14 @@ async function handleFetch(request, env) {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/orders/force-process", { method: "POST", body });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/pedidos/shopify/marcar-gestionado-externo" && request.method === "POST") {
+      const body = await request.text();
+      const id = env.ORDERS_STORE.idFromName("shopify");
+      const stub = env.ORDERS_STORE.get(id);
+      const res = await stub.fetch("https://do/orders/marcar-gestionado-externo", { method: "POST", body });
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
