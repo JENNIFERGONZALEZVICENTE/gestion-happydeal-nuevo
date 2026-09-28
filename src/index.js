@@ -4325,20 +4325,21 @@ function descargarPedidoFabricaPdf(seleccionados) {
   // Sin el nombre del proveedor en el título (Jennifer, 2026-09-21: "no
   // quiero que ponga luso") — se mantiene genérico "Pedido a fábrica" para
   // cualquier proveedor.
-  doc.setFontSize(14);
-  doc.text("Pedido a fábrica", 14, 16);
-  doc.setFontSize(10);
-  doc.text(new Date().toLocaleDateString("es-ES"), 14, 22);
+  // Letra más grande (Jennifer, 2026-09-28: en Polival la veían muy pequeña).
+  doc.setFontSize(17);
+  doc.text("Pedido a fábrica", 14, 17);
+  doc.setFontSize(12);
+  doc.text(new Date().toLocaleDateString("es-ES"), 14, 24);
 
   if (currentProveedorFilter === "polival") {
     doc.autoTable({
       head: [head],
       body: filas,
-      startY: 28,
+      startY: 30,
       theme: "grid",
-      styles: { fontSize: 10, cellPadding: 3, valign: "middle" },
-      headStyles: { fillColor: [31, 138, 76] },
-      columnStyles: { 1: { cellWidth: 38, fontStyle: "bold" } },
+      styles: { fontSize: 13, cellPadding: 3.5, valign: "middle" },
+      headStyles: { fillColor: [31, 138, 76], fontSize: 13 },
+      columnStyles: { 1: { cellWidth: 45, fontStyle: "bold" } },
       // Mismo sombreado para todos los artículos de un mismo pedido,
       // alternando entre pedidos.
       didParseCell: data => {
@@ -4357,14 +4358,14 @@ function descargarPedidoFabricaPdf(seleccionados) {
     doc.autoTable({
       head: [head],
       body: filas.map(([modelo, cantidad]) => [modelo, String(cantidad)]),
-      startY: 28,
+      startY: 30,
       // Cuadrícula completa (borde en todas las celdas), a petición de
       // Jennifer, 2026-09-21 ("hazlo en modo tabla") — el tema por defecto
       // de autoTable solo raya filas alternas, no pone borde por celda.
       theme: "grid",
-      styles: { fontSize: 10, cellPadding: 3, valign: "middle" },
-      headStyles: { fillColor: [31, 138, 76] },
-      columnStyles: { 1: { cellWidth: 30, halign: "center" } },
+      styles: { fontSize: 13, cellPadding: 3.5, valign: "middle" },
+      headStyles: { fillColor: [31, 138, 76], fontSize: 13 },
+      columnStyles: { 1: { cellWidth: 34, halign: "center" } },
     });
   }
 
@@ -4413,8 +4414,11 @@ async function descargarPedidoFabricaExcel(seleccionados) {
   ws.columns = anchos.map(width => ({ width }));
 
   ws.getCell("A1").value = "Pedido a fábrica";
-  ws.getCell("A1").font = { bold: true, size: 14 };
+  // Letra más grande (Jennifer, 2026-09-28: en Polival la veían muy pequeña).
+  const TAM = 14;
+  ws.getCell("A1").font = { bold: true, size: 18 };
   ws.getCell("A2").value = new Date().toLocaleDateString("es-ES");
+  ws.getCell("A2").font = { size: 12 };
   ws.addRow([]);
 
   const borde = { style: "thin", color: { argb: "FF999999" } };
@@ -4422,7 +4426,7 @@ async function descargarPedidoFabricaExcel(seleccionados) {
 
   const cabecera = ws.addRow(head);
   cabecera.eachCell(c => {
-    c.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    c.font = { bold: true, size: TAM, color: { argb: "FFFFFFFF" } };
     c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F8A4C" } };
     c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
     c.border = bordes;
@@ -4435,19 +4439,19 @@ async function descargarPedidoFabricaExcel(seleccionados) {
     // Alto calculado a mano: Excel no reajusta solo la altura de una fila
     // con texto ajustado al abrir un fichero generado.
     const lineas = Math.max(...fila.map((v, col) => String(v).split("\\n").reduce(
-      (n, trozo) => n + Math.max(1, Math.ceil(trozo.length / (anchos[col] - 2))), 0)));
-    row.height = Math.max(1, lineas) * 15 + 4;
+      (n, trozo) => n + Math.max(1, Math.ceil(trozo.length / ((anchos[col] - 2) * 11 / TAM))), 0)));
+    row.height = Math.max(1, lineas) * (TAM * 1.35) + 6;
     row.eachCell({ includeEmpty: true }, (c, col) => {
       c.alignment = { vertical: "middle", horizontal: col === 1 ? "left" : "center", wrapText: true };
       c.border = bordes;
-      if (esPolival && col === 2) c.font = { bold: true };
+      c.font = { size: TAM, bold: esPolival && col === 2 };
       // "N UNIDADES" en negrita y rojo, el resto del texto normal.
       const desde = negritaDesde ? negritaDesde[i] : -1;
       if (col === 1 && desde >= 0) {
         const texto = String(c.value);
         c.value = { richText: [
-          { text: texto.slice(0, desde) },
-          { text: texto.slice(desde), font: { bold: true, color: { argb: "FFC80000" } } },
+          { text: texto.slice(0, desde), font: { size: TAM } },
+          { text: texto.slice(desde), font: { size: TAM, bold: true, color: { argb: "FFC80000" } } },
         ] };
       }
       if (grupoDeFila && grupoDeFila[i] % 2 === 1) {
