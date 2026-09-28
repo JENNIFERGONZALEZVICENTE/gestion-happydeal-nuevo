@@ -1891,8 +1891,8 @@ export class InventoryStore {
     }
     const sustituirMatch = url.pathname.match(/^\/backorders\/([^/]+)\/sustituir$/);
     if (sustituirMatch && method === "POST") {
-      const { query, mode, talla, fecha } = await request.json();
-      return this.substituteBackorder(decodeURIComponent(sustituirMatch[1]), { query, mode, talla, fecha });
+      const { query, mode, talla, fecha, transformar } = await request.json();
+      return this.substituteBackorder(decodeURIComponent(sustituirMatch[1]), { query, mode, talla, fecha, transformar });
     }
     const planMatch = url.pathname.match(/^\/backorders\/([^/]+)\/plan$/);
     if (planMatch && method === "POST") {
@@ -2853,8 +2853,16 @@ export class InventoryStore {
       .filter((row) => row.talla === entry.talla && row.cantidad > 0 && row.stockModel !== entry.stockModel && colchonModelos.has(row.stockModel))
       .map((row) => ({ stockModel: row.stockModel, cantidad: row.cantidad }))
       .sort((a, b) => b.cantidad - a.cantidad);
+    // Transformar (Jennifer, 2026-09-28): el MISMO modelo en otra medida con
+    // stock real, que se adapta a la medida vendida (ej. un Zen Natural
+    // 160x190 transformado en el 150x190 pendiente).
+    const tallaNum = (t) => (t || "").split("X").map(Number);
+    const transformables = Object.values(stock)
+      .filter((row) => row.stockModel === entry.stockModel && row.talla !== entry.talla && row.cantidad > 0)
+      .map((row) => ({ talla: row.talla, cantidad: row.cantidad }))
+      .sort((a, b) => tallaNum(a.talla)[0] - tallaNum(b.talla)[0] || tallaNum(a.talla)[1] - tallaNum(b.talla)[1]);
     const viaSeur = await this.decideSustitucionViaSeur(entry);
-    return Response.json({ talla: entry.talla, alternativas, viaSeur });
+    return Response.json({ talla: entry.talla, alternativas, transformables, viaSeur });
   }
 
   // Sustituir un pendiente de colchón (suelto o de pack) por otro modelo
@@ -2865,7 +2873,11 @@ export class InventoryStore {
   // REAL del modelo sustituto (nunca negativo, igual que el resto del
   // sistema). El destino (SEUR con fecha, o "cubierto" para salir con la
   // tapicería) lo decide decideSustitucionViaSeur.
-  async substituteBackorder(id, { query, mode, talla, fecha }) {
+  // transformar (Jennifer, 2026-09-28): en vez de otro modelo, se usa el
+  // MISMO modelo de OTRA medida (`talla` = medida de origen) y se adapta a
+  // la vendida — se descuenta el stock de la medida de origen, pero el
+  // pendiente sigue siendo de la medida que recibe el cliente.
+  async substituteBackorder(id, { query, mode, talla, fecha, transformar }) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
@@ -2879,7 +2891,7 @@ export class InventoryStore {
     // Stock (resolveStockModel) — así no hace falta escribir el nombre
     // exacto del modelo sustituto.
     const products = await this.load("products", {});
-    const stockModel = resolveStockModel(query, mode, products);
+    const stockModel = transformar ? entry.stockModel : resolveStockModel(query, mode, products);
     if (!stockModel) {
       return Response.json({ ok: false, error: "No se ha encontrado ningún modelo que coincida con \"" + query + "\"." }, { status: 404 });
     }
@@ -2888,6 +2900,10 @@ export class InventoryStore {
       return Response.json({ ok: false, error: "Indica una talla válida." }, { status: 400 });
     }
     talla = tallaNorm;
+    if (transformar && talla === entry.talla) {
+      return Response.json({ ok: false, error: "Para transformar, elige una medida distinta de la vendida." }, { status: 400 });
+    }
+    const origenMovimiento = transformar ? "transformacion" : "sustitucion";
 
     const viaSeur = await this.decideSustitucionViaSeur(entry);
     let carga = null;
@@ -2898,6 +2914,12 @@ export class InventoryStore {
 
     const congelado = await this.load("stockCongelado", false);
     const stock = await this.load("stock", {});
+    if (transformar) {
+      const origen = stock[stockKey(stockModel, talla)];
+      if (!origen || origen.cantidad < entry.cantidad) {
+        return Response.json({ ok: false, error: `No hay stock de ${stockModel} ${talla} para transformar.` }, { status: 409 });
+      }
+    }
 
     const oldKey = stockKey(entry.stockModel, entry.talla);
     const oldRow = stock[oldKey];
@@ -2908,7 +2930,7 @@ export class InventoryStore {
       await this.logMovement({
         stockModel: entry.stockModel, talla: entry.talla, campo: "vendidoPendiente",
         delta: oldRow.vendidoPendiente - antesOld, resultante: oldRow.vendidoPendiente,
-        origen: "sustitucion", orderNumber: entry.orderNumber,
+        origen: origenMovimiento, orderNumber: entry.orderNumber,
         platform: entry.platform, orderRef: entry.orderRef,
       });
     }
@@ -2921,14 +2943,21 @@ export class InventoryStore {
     await this.logMovement({
       stockModel, talla, campo: "cantidad",
       delta: newRow.cantidad - antesNew, resultante: newRow.cantidad,
-      origen: "sustitucion", orderNumber: entry.orderNumber,
+      origen: origenMovimiento, orderNumber: entry.orderNumber,
       platform: entry.platform, orderRef: entry.orderRef,
     });
 
-    entry.stockModelOriginal = entry.stockModel;
-    entry.tallaOriginal = entry.talla;
-    entry.stockModel = stockModel;
-    entry.talla = talla;
+    if (transformar) {
+      // El cliente recibe la medida que compró: el pendiente no cambia de
+      // modelo ni de medida, solo se apunta de dónde salió.
+      entry.transformadoDesde = talla;
+      entry.fechaTransformacion = new Date().toISOString();
+    } else {
+      entry.stockModelOriginal = entry.stockModel;
+      entry.tallaOriginal = entry.talla;
+      entry.stockModel = stockModel;
+      entry.talla = talla;
+    }
     entry.recibidoFabrica = true;
     entry.fechaRecibido = new Date().toISOString();
     if (viaSeur) {

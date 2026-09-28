@@ -1186,6 +1186,7 @@ function renderPage() {
   .badge.pendiente { background: #fef3c7; color: #92400e; }
   .badge.pago-pendiente { background: #fee2e2; color: #991b1b; }
   .badge.reembolsado { background: #ede9fe; color: #5b21b6; }
+  .transformado-tag { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 6px; background: #e0e7ff; color: #3730a3; font-size: 11px; font-weight: 600; white-space: nowrap; }
   .grupo-envio-item-ref { font-size: 11px; font-weight: 700; color: #92400e; }
   .grupo-envio-tag {
     display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 6px;
@@ -2153,6 +2154,8 @@ function renderPage() {
     <h3>Sustituir por otro modelo</h3>
     <p id="sustituir-modal-texto" style="color:var(--muted);font-size:13px"></p>
     <div id="sustituir-alternativas-list" style="margin-bottom:0.75rem"></div>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 4px">O transformar uno del mismo modelo de otra medida:</p>
+    <div id="sustituir-transformar-list" style="margin-bottom:0.75rem"></div>
     <p style="color:var(--muted);font-size:12.5px;margin:0 0 4px">O escribe otro modelo (misma talla):</p>
     <input id="sustituir-query" type="text" list="stock-models-datalist" placeholder="Nombre del modelo..." autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
     <div class="modal-actions">
@@ -3803,7 +3806,7 @@ function renderPendientes() {
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}</td>
       <td>\${b.color || "—"}</td>
-      <td>\${b.talla}</td>
+      <td>\${b.talla}\${b.transformadoDesde ? '<br><span class="transformado-tag" title="Transformado de un colchón de otra medida que había en stock">Transformado desde ' + b.transformadoDesde + '</span>' : ""}</td>
       \${skuCell}
       <td>\${b.cantidad}</td>
       \${refPolivalCell}
@@ -4246,7 +4249,7 @@ async function updateBackorderPlan(id, patch) {
   loadPendientes();
 }
 
-const HISTORIAL_ORIGEN_LABELS = { manual: "Manual", venta: "Venta", envio: "Envío", camion: "Camión (proveedor)" };
+const HISTORIAL_ORIGEN_LABELS = { manual: "Manual", venta: "Venta", envio: "Envío", camion: "Camión (proveedor)", sustitucion: "Sustitución", transformacion: "Transformación" };
 const HISTORIAL_CAMPO_LABELS = { cantidad: "Stock real", vendidoPendiente: "Vendido pendiente", pedidoProveedor: "Pedido a proveedor" };
 
 let historialMovimientos = [];
@@ -5576,8 +5579,12 @@ let seurFechaModalBackorderId = null;
 // busca al vuelo — ver abrirSustituirDesdePedido).
 let sustituirBackorder = null;
 let sustituirViaSeur = true;
+// Transformar (Jennifer, 2026-09-28): medida de origen elegida (mismo
+// modelo), o null si se sustituye por otro modelo.
+let sustituirTransformarTalla = null;
 async function abrirModalSustituir(b) {
   sustituirBackorder = b;
+  sustituirTransformarTalla = null;
   const esPackTexto = b.esPack ? " (dentro de un pack, va " + b.tipoEnvio + ")" : "";
   document.getElementById("sustituir-modal-texto").textContent = refLabel(b) + " — pedido: " + b.cantidad + "x " + b.stockModel + " (" + b.talla + ")" + esPackTexto + ". Elige el sustituto:";
   document.getElementById("sustituir-query").value = "";
@@ -5609,14 +5616,29 @@ async function abrirModalSustituir(b) {
   listEl.innerHTML = alternativas.length
     ? alternativas.map(a => \`<button type="button" class="alternativa-opcion" data-modelo="\${escapeAttr(a.stockModel)}"><span>\${a.stockModel}</span><span class="alternativa-stock">\${a.cantidad} en stock</span></button>\`).join("")
     : '<p style="color:var(--muted);font-size:13px">No hay otro colchón con stock real en esta talla ahora mismo.</p>';
+  const transEl = document.getElementById("sustituir-transformar-list");
+  const transformables = data.transformables || [];
+  transEl.innerHTML = transformables.length
+    ? transformables.map(t => \`<button type="button" class="alternativa-opcion transformar-opcion" data-talla="\${escapeAttr(t.talla)}"><span>\${escapeAttr(b.stockModel)} \${t.talla} → \${b.talla}</span><span class="alternativa-stock">\${t.cantidad} en stock</span></button>\`).join("")
+    : '<p style="color:var(--muted);font-size:13px">No hay stock de este modelo en otras medidas.</p>';
+  const todasOpciones = () => document.querySelectorAll("#sustituir-modal-overlay .alternativa-opcion");
+  const activarBotones = () => { directoBtn.disabled = false; hoyBtn.disabled = false; mananaBtn.disabled = false; };
   listEl.querySelectorAll(".alternativa-opcion").forEach(btn => {
     btn.addEventListener("click", () => {
-      listEl.querySelectorAll(".alternativa-opcion").forEach(x => x.classList.remove("selected"));
+      todasOpciones().forEach(x => x.classList.remove("selected"));
       btn.classList.add("selected");
+      sustituirTransformarTalla = null;
       document.getElementById("sustituir-query").value = btn.dataset.modelo;
-      directoBtn.disabled = false;
-      hoyBtn.disabled = false;
-      mananaBtn.disabled = false;
+      activarBotones();
+    });
+  });
+  transEl.querySelectorAll(".transformar-opcion").forEach(btn => {
+    btn.addEventListener("click", () => {
+      todasOpciones().forEach(x => x.classList.remove("selected"));
+      btn.classList.add("selected");
+      sustituirTransformarTalla = btn.dataset.talla;
+      document.getElementById("sustituir-query").value = "";
+      activarBotones();
     });
   });
 }
@@ -5876,20 +5898,25 @@ document.getElementById("sustituir-modal-overlay").addEventListener("click", (e)
 });
 document.getElementById("sustituir-query").addEventListener("input", () => {
   const has = document.getElementById("sustituir-query").value.trim().length > 0;
+  sustituirTransformarTalla = null;
   document.getElementById("sustituir-directo-btn").disabled = !has;
   document.getElementById("sustituir-hoy-btn").disabled = !has;
   document.getElementById("sustituir-manana-btn").disabled = !has;
-  document.querySelectorAll("#sustituir-alternativas-list .alternativa-opcion").forEach(x => x.classList.remove("selected"));
+  document.querySelectorAll("#sustituir-modal-overlay .alternativa-opcion").forEach(x => x.classList.remove("selected"));
 });
 async function confirmarSustituir(fecha) {
   if (!sustituirBackorder) return;
-  const query = document.getElementById("sustituir-query").value.trim();
-  if (!query) return;
   const b = sustituirBackorder;
+  const transformarDesde = sustituirTransformarTalla;
+  const query = document.getElementById("sustituir-query").value.trim();
+  if (!query && !transformarDesde) return;
+  if (transformarDesde && !confirm("¿Transformar un " + b.stockModel + " " + transformarDesde + " en " + b.talla + " para " + refLabel(b) + "?\\n\\nSe descuenta " + (b.cantidad || 1) + " del stock de " + transformarDesde + " y el pedido queda listo para salir.")) return;
   const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/sustituir", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ query, mode: "name", talla: b.talla, fecha }),
+    body: JSON.stringify(transformarDesde
+      ? { transformar: true, talla: transformarDesde, fecha }
+      : { query, mode: "name", talla: b.talla, fecha }),
   });
   const data = await res.json();
   cerrarModalSustituir();
