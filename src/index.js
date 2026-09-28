@@ -926,9 +926,15 @@ async function avisarAlmacenTransformacion(env, entry) {
     fecha: new Date().toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" }),
   });
   try {
-    const res = await fetch(env.ALMACEN_AVISO_URL, {
+    // Apps Script responde con un 302 a otra URL donde está el resultado.
+    // Con un cuerpo grande (la etiqueta adjunta), seguir la redirección de
+    // forma automática devuelve una página de error de Google aunque el
+    // email SÍ se haya enviado (visto en la prueba real del 28/09) — así
+    // que la redirección se sigue a mano, con un GET aparte.
+    let res = await fetch(env.ALMACEN_AVISO_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
+      redirect: "manual",
       body: JSON.stringify({
         secreto: env.ALMACEN_AVISO_SECRET,
         asunto: `Transformación de colchón — ${pedido}`,
@@ -936,6 +942,8 @@ async function avisarAlmacenTransformacion(env, entry) {
         adjunto: { nombre: `Etiqueta transformacion ${pedido}.pdf`, base64: base64DeBytes(etiqueta) },
       }),
     });
+    const destino = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+    if (destino) res = await fetch(destino);
     const r = await res.json().catch(() => ({}));
     return r.ok ? { ok: true } : { ok: false, reason: r.error || "status_" + res.status };
   } catch (e) {
