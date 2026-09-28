@@ -974,6 +974,8 @@ const PLATFORMS = [
 // entrar como ellas.
 const USERS = ["JENNIFER", "SERGIO"];
 const COLOR_ACCESS_USERS = ["SERGIO"];
+// Botón "Pagado por transferencia – tramitar ya" (Jennifer, 2026-09-28).
+const PAGO_MANUAL_USERS = ["JENNIFER"];
 const COLOR_META = {
   rojo: { label: "Cancelado", bg: "#fee2e2", text: "#991b1b", dot: "#ef4444" },
   verde: { label: "Entregado", bg: "#dcfce7", text: "#146138", dot: "#22c55e" },
@@ -1184,6 +1186,13 @@ function renderPage() {
   .badge.pendiente { background: #fef3c7; color: #92400e; }
   .badge.pago-pendiente { background: #fee2e2; color: #991b1b; }
   .badge.reembolsado { background: #ede9fe; color: #5b21b6; }
+  .badge.pago-manual-tag { background: #dcfce7; color: #146138; margin-top: 4px; font-size: 11px; }
+  .pago-manual-btn {
+    margin-top: 4px; padding: 3px 8px; font-size: 11px; font-weight: 600; cursor: pointer;
+    border: 1px solid var(--brand); border-radius: 6px; background: #fff; color: var(--brand); white-space: nowrap;
+  }
+  .pago-manual-btn:hover { background: var(--brand); color: #fff; }
+  .pago-manual-btn:disabled { opacity: 0.6; cursor: default; }
   .badge.fulfilled { background: #dcfce7; color: #146138; }
   .badge.partial { background: #dbeafe; color: #1e40af; }
   .badge.agencia-seur { background: #e0e7ff; color: #3730a3; }
@@ -1861,6 +1870,7 @@ function renderPage() {
   <div class="toolbar" id="pendientes-toolbar" style="display:none">
     <button type="button" id="generar-pedido-btn" disabled>Generar pedido a fábrica (PDF)</button>
     <button type="button" id="generar-pedido-excel-btn" disabled>Generar pedido a fábrica (Excel)</button>
+    <button type="button" id="marcar-ya-pedido-btn" class="secondary" disabled title="Ya se ha pedido a fábrica por otra vía: se marca como pedido sin descargar nada">Marcar como ya pedido</button>
     <span id="seleccion-count" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="pendientes-count" class="inventario-count"></div>
@@ -2171,6 +2181,7 @@ let allOrders = [];
 const platforms = ${JSON.stringify(PLATFORMS)};
 const USERS = ${JSON.stringify(USERS)};
 const COLOR_ACCESS_USERS = ${JSON.stringify(COLOR_ACCESS_USERS)};
+const PAGO_MANUAL_USERS = ${JSON.stringify(PAGO_MANUAL_USERS)};
 const COLOR_META = ${JSON.stringify(COLOR_META)};
 const BASE_HEAD = ["","Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Estado de pago","Situación de envío","Agencia","Seguimiento","Precio","Notas"];
 
@@ -2242,6 +2253,20 @@ function statusBadge(status) {
 function paymentStatusBadge(paymentStatus) {
   const cls = paymentStatus === "PAGADO" ? "fulfilled" : paymentStatus === "REEMBOLSADO" ? "reembolsado" : "pago-pendiente";
   return \`<span class="badge \${cls}">\${paymentStatus || "PENDIENTE DE PAGO"}</span>\`;
+}
+
+// Pago confirmado a mano (Jennifer, 2026-09-28): transferencia recibida pero
+// aún sin marcar como pagada en Shopify — se tramita ya, con fecha de hoy.
+// Cuando luego se marque pagado en Shopify no se vuelve a tramitar.
+function pagoManualCell(o) {
+  let html = paymentStatusBadge(o.paymentStatus);
+  if (o.pagoConfirmadoManual) {
+    const p = o.pagoConfirmadoManual;
+    html += \`<br><span class="badge pago-manual-tag" title="Tramitado por \${escapeAttr(p.usuario || "")} el \${new Date(p.fecha).toLocaleString("es-ES")}">Pago confirmado a mano</span>\`;
+  } else if (o.paymentStatus === "PENDIENTE DE PAGO" && !o.agencia && !o.cancelado && PAGO_MANUAL_USERS.includes(currentUser)) {
+    html += \`<br><button type="button" class="pago-manual-btn" data-pago-manual-id="\${o.id}" title="El cliente ya ha pagado (p. ej. por transferencia) aunque no esté marcado en Shopify: tramitar ya con fecha de hoy">Pagado – tramitar ya</button>\`;
+  }
+  return html;
 }
 
 function isReviewAnswered(order) {
@@ -2437,7 +2462,7 @@ function render(orders) {
       <td>\${o.product}</td>
       <td class="services">\${o.services}</td>
       <td>\${o.paymentMethod}</td>
-      <td>\${paymentStatusBadge(o.paymentStatus)}</td>
+      <td>\${pagoManualCell(o)}</td>
       <td>\${statusBadge(o.shippingStatus)}</td>
       <td>\${agenciaBadge(o)}</td>
       <td>\${trackingCell(o)}</td>
@@ -2627,6 +2652,26 @@ document.querySelector("#orders tbody").addEventListener("click", (e) => {
   const btn = e.target.closest("[data-gesto-comercial-order-id]");
   if (!btn) return;
   abrirGestoComercialDesdePedido(btn.dataset.gestoComercialOrderId);
+});
+document.querySelector("#orders tbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-pago-manual-id]");
+  if (!btn) return;
+  const order = allOrders.find(o => String(o.id) === btn.dataset.pagoManualId);
+  if (!order) return;
+  if (!confirm("¿Confirmas que el cliente ya ha pagado " + refLabel(order) + "?\\n\\nSe tramitará ahora con fecha de hoy y aparecerá en Proveedores para pedirlo a fábrica. Cuando se marque como pagado en Shopify no se volverá a tramitar.")) return;
+  btn.disabled = true;
+  btn.textContent = "Tramitando…";
+  const res = await fetch("/api/pedidos/shopify/admin/tramitar-pagado-manual", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderId: order.id, usuario: currentUser }),
+  });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.inventoryProcessed) {
+    alert("No se ha podido tramitar: " + (r.error || "revisa el pedido (quizá el procesamiento está en pausa)."));
+  }
+  await loadOrders();
+  loadPendientes();
 });
 document.querySelector("#orders tbody").addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-cancel-id]");
@@ -3758,6 +3803,7 @@ function actualizarSeleccionUI() {
   const n = pedidoFabricaSeleccion.size;
   document.getElementById("generar-pedido-btn").disabled = n === 0;
   document.getElementById("generar-pedido-excel-btn").disabled = n === 0;
+  document.getElementById("marcar-ya-pedido-btn").disabled = n === 0;
   document.getElementById("seleccion-count").textContent = n > 0 ? n + " seleccionados" : "";
 }
 
@@ -4037,6 +4083,21 @@ async function generarPedidoFabrica(formato) {
 }
 document.getElementById("generar-pedido-btn").addEventListener("click", () => generarPedidoFabrica("pdf"));
 document.getElementById("generar-pedido-excel-btn").addEventListener("click", () => generarPedidoFabrica("excel"));
+// Ya pedido a fábrica por otra vía (Jennifer, 2026-09-28): se marca como
+// pedido sin generar PDF/Excel, para que no se vuelva a pedir.
+document.getElementById("marcar-ya-pedido-btn").addEventListener("click", async () => {
+  const seleccionados = backorders.filter(b => pedidoFabricaSeleccion.has(b.id));
+  if (!seleccionados.length) return;
+  const refs = seleccionados.map(b => b.referencia || refLabel(b)).join(", ");
+  if (!confirm("¿Marcar como ya pedidos a fábrica (" + seleccionados.length + "): " + refs + "?\\n\\nNo se descarga nada.")) return;
+  await fetch("/api/inventario/pendientes/mark-ordered", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ids: seleccionados.map(b => b.id) }),
+  });
+  pedidoFabricaSeleccion.clear();
+  loadPendientes();
+});
 
 async function resolverPendiente(id) {
   const before = backorders.find(x => x.id === id);
@@ -6908,7 +6969,7 @@ async function handleFetch(request, env) {
       return Response.json({ ok: true, orderNumber: order.order_number });
     }
 
-    const adminPedidosMatch = url.pathname.match(/^\/api\/pedidos\/shopify\/admin\/(marcar-sin-pagar|tramitar-como-nuevo)$/);
+    const adminPedidosMatch = url.pathname.match(/^\/api\/pedidos\/shopify\/admin\/(marcar-sin-pagar|tramitar-como-nuevo|tramitar-pagado-manual)$/);
     if (adminPedidosMatch && request.method === "POST") {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);

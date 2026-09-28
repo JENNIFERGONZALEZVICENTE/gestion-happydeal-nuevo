@@ -33,7 +33,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -339,6 +339,38 @@ export class OrdersStore {
       existing.fechaTramitacion = fecha || new Date().toISOString();
       delete existing.inventoryProcessed;
       await this.processInventory(existing);
+      orders[orderId] = existing;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json(existing);
+    }
+
+    // Botón "Pagado – tramitar ya" (Jennifer, 2026-09-28): el cliente ya ha
+    // pagado (transferencia) pero en Shopify sigue pendiente. Se tramita ya
+    // con fecha de hoy; al marcarse luego pagado en Shopify no se repite
+    // porque queda inventoryProcessed.
+    if (url.pathname === "/orders/admin/tramitar-pagado-manual" && request.method === "POST") {
+      const { orderId, usuario } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const existing = orders[orderId];
+      if (!existing) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      if (existing.agencia || existing.inventoryProcessed && existing.paymentStatus === "PAGADO") {
+        return Response.json({ ok: false, error: "Este pedido ya está tramitado." }, { status: 409 });
+      }
+      existing.pagoConfirmadoManual = { usuario: usuario || null, fecha: new Date().toISOString() };
+      existing.vistoSinPagar = true;
+      existing.fechaTramitacion = existing.pagoConfirmadoManual.fecha;
+      delete existing.inventoryProcessed;
+      await this.processInventory(existing);
+      if (!existing.inventoryProcessed) {
+        // No se pudo tramitar (pausa general, etc.): se deshace la marca
+        // para que el botón siga disponible.
+        delete existing.pagoConfirmadoManual;
+        delete existing.fechaTramitacion;
+        orders[orderId] = existing;
+        await this.state.storage.put("orders", orders);
+        return Response.json({ ok: false, error: "El procesamiento de pedidos está en pausa o el pedido necesita revisión." }, { status: 409 });
+      }
       orders[orderId] = existing;
       await this.state.storage.put("orders", orders);
       this.broadcast();
@@ -911,7 +943,9 @@ export class OrdersStore {
     // transferencia de un pedido del 16/09 recibida el 28/09): cuando pase a
     // PAGADO se tramita como si hubiera entrado ese día, para que no se
     // cuele entre lo ya pedido a fábrica con su fecha antigua.
-    const pagado = order.paymentStatus === "PAGADO";
+    // pagoConfirmadoManual: Jennifer confirmó el pago a mano desde la app
+    // (transferencia recibida sin marcar aún en Shopify) — cuenta como pagado.
+    const pagado = order.paymentStatus === "PAGADO" || !!order.pagoConfirmadoManual;
     if (!pagado) order.vistoSinPagar = true;
     // Ver SHOPIFY_PROCESAMIENTO_DESDE arriba del fichero — solo aplica a
     // Shopify (los marketplaces ya tienen su propia puerta, PROCESAMIENTO_
@@ -934,7 +968,7 @@ export class OrdersStore {
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, items: order.items || [], force, orderDate: fechaParaTramitar, services: order.services || "", paymentStatus: order.paymentStatus, seurSplitDecision }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, items: order.items || [], force, orderDate: fechaParaTramitar, services: order.services || "", paymentStatus: pagado ? "PAGADO" : order.paymentStatus, seurSplitDecision }),
     });
     const { agencia, pendingManufacture, needsReview, reviewReasons, paused, seurMixedPending, seurMixedInfo, seurReady } = await res.json();
     // Pedido de 2+ colchones SEUR con disponibilidad mixta (Jennifer,
