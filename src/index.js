@@ -1186,6 +1186,7 @@ function renderPage() {
   .badge.pendiente { background: #fef3c7; color: #92400e; }
   .badge.pago-pendiente { background: #fee2e2; color: #991b1b; }
   .badge.reembolsado { background: #ede9fe; color: #5b21b6; }
+  .grupo-envio-item-ref { font-size: 11px; font-weight: 700; color: #92400e; }
   .grupo-envio-tag {
     display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 6px;
     background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; white-space: nowrap;
@@ -3200,7 +3201,9 @@ function ordenTieneTapiceria(orderNumber) {
 // grupoEnvio = id del pedido principal.
 function pedidosDelGrupo(order) {
   if (!order || !order.grupoEnvio) return order ? [order] : [];
-  return allOrders.filter(o => o.grupoEnvio === order.grupoEnvio);
+  // El principal primero, luego el resto por fecha.
+  return allOrders.filter(o => o.grupoEnvio === order.grupoEnvio)
+    .sort((a, b) => (b.id === order.grupoEnvio) - (a.id === order.grupoEnvio) || parseFechaGenerica(a.orderDate) - parseFechaGenerica(b.orderDate));
 }
 function grupoEnvioTag(order) {
   if (!order.grupoEnvio) return "";
@@ -4365,8 +4368,24 @@ function backordersPorPedido(orderId) {
   return backorders.filter(b => b.orderId === orderId && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial);
 }
 
+// Envío conjunto (Jennifer, 2026-09-28): en Furniture el grupo es UNA sola
+// línea, la del pedido principal, con los artículos de todos sus pedidos
+// ("el colchón no aparece en la línea del pedido BEZEN12205"). Los demás
+// pedidos del grupo no salen como línea propia mientras el principal siga
+// pendiente de envío.
+function esMiembroSecundario(o) {
+  return !!o.grupoEnvio && o.grupoEnvio !== o.id
+    && allOrders.some(p => p.id === o.grupoEnvio && p.shippingStatus !== "fulfilled");
+}
+
 function furnitureRowCells(o) {
-  const items = backordersPorPedido(o.id);
+  const grupo = pedidosDelGrupo(o);
+  const items = grupo.flatMap(p => backordersPorPedido(p.id));
+  const refDeOtroPedido = b => b.orderId !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(allOrders.find(p => p.id === b.orderId) || {}) + '</span> ' : "";
+  const productoGrupo = grupo.length > 1
+    ? grupo.map(p => (p.id !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(p) + '</span> ' : "") + p.product).join("<br>")
+    : o.product;
+  const serviciosGrupo = grupo.map(p => p.services).filter(Boolean).join(" · ");
   const itemsHtml = items.length
     ? items.map(b => {
         // Colchón marcado FPK (Jennifer, 2026-08-27, ampliado 2026-09-25 a
@@ -4379,7 +4398,7 @@ function furnitureRowCells(o) {
         return \`
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
-          \${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}
+          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}
         </label>
       \`;
       }).join("")
@@ -4388,8 +4407,8 @@ function furnitureRowCells(o) {
     <td>\${refLabel(o)}\${grupoEnvioTag(o)}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name}</td>
-    <td>\${o.product}</td>
-    <td class="services">\${o.services}</td>
+    <td>\${productoGrupo}</td>
+    <td class="services">\${serviciosGrupo}</td>
     <td class="furniture-items-cell">\${itemsHtml}</td>
     <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
   \`;
@@ -4428,7 +4447,7 @@ function renderFurniture() {
   document.getElementById("cerrar-carga-btn").disabled = !cargaAbierta;
   document.getElementById("descargar-carga-btn").disabled = !cargaAbierta;
 
-  const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && o.shippingStatus !== "fulfilled" && !o.gestionadoExterno);
+  const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && o.shippingStatus !== "fulfilled" && !o.gestionadoExterno && !esMiembroSecundario(o));
   const enCarga = cargaAbierta ? todasFurniture.filter(o => o.cargaId === cargaAbierta.id) : [];
   const busquedaPedido = document.getElementById("furniture-pedido-search").value.trim().toLowerCase();
   const busquedaReferencia = document.getElementById("furniture-referencia-search").value.trim().toLowerCase();
@@ -4443,12 +4462,14 @@ function renderFurniture() {
     if (o.cargaId) return false;
     // Mismo arreglo que en Proveedores pendientes (Jennifer, 2026-09-21):
     // buscar por la referencia real del marketplace, no solo BEZEN+número.
+    // En un envío conjunto se busca en todos sus pedidos (la línea es una).
+    const grupo = pedidosDelGrupo(o);
     if (busquedaPedido) {
-      const encajaBezen = ("bezen" + o.orderNumber).toLowerCase().includes(busquedaPedido);
-      const encajaOrderRef = (o.orderRef || "").toLowerCase().includes(busquedaPedido);
-      if (!encajaBezen && !encajaOrderRef) return false;
+      const encaja = grupo.some(p => ("bezen" + p.orderNumber).toLowerCase().includes(busquedaPedido)
+        || (p.orderRef || "").toLowerCase().includes(busquedaPedido));
+      if (!encaja) return false;
     }
-    if (busquedaReferencia && !referenciasPorPedido(o.id).toLowerCase().includes(busquedaReferencia)) return false;
+    if (busquedaReferencia && !grupo.some(p => referenciasPorPedido(p.id).toLowerCase().includes(busquedaReferencia))) return false;
     return true;
   }).sort((a, b) => parseFechaGenerica(a.orderDate) - parseFechaGenerica(b.orderDate));
 
@@ -4508,7 +4529,7 @@ function renderFurniture() {
       renderFurniture();
     });
   });
-  const paraTenerEnCuenta = allOrders.filter(o => o.paraTenerEnCuenta);
+  const paraTenerEnCuenta = allOrders.filter(o => o.paraTenerEnCuenta && !esMiembroSecundario(o));
   document.getElementById("tener-en-cuenta-count").textContent = paraTenerEnCuenta.length + " pedidos marcados";
   document.querySelector("#tener-en-cuenta-table tbody").innerHTML = paraTenerEnCuenta.map(o => \`
     <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
