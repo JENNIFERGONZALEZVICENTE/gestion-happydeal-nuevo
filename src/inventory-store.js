@@ -3038,7 +3038,10 @@ export class InventoryStore {
   // directamente (sin pasar por el motor de stock/agencia — Jennifer ya
   // sabe y dice qué falta). No expuesta en UI, mismo id que generaría
   // addNoStockBackorder si hubiera podido procesarse solo.
-  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo }) {
+  // `refSuffix` (Jennifer, 2026-09-29, Conforama ES 40451996M-A: una unidad
+  // ya salió y la otra queda pendiente): número pegado al final de la
+  // referencia del pedido en los ficheros de envío, ej. "3".
+  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo, refSuffix }) {
     if (!orderId || !stockModel || !talla || !proveedor) {
       return Response.json({ ok: false, error: "Faltan orderId, stockModel, talla o proveedor." }, { status: 400 });
     }
@@ -3058,6 +3061,7 @@ export class InventoryStore {
       referencia: referencia || null,
       platform,
       orderRef,
+      refSuffix: refSuffix ? String(refSuffix) : "",
     });
     await this.state.storage.put("backorders", backorders);
     return Response.json({ ok: true, id: `${orderId}-${key}` });
