@@ -2097,6 +2097,7 @@ function renderPage() {
     <div class="toolbar">
       <h3 id="carga-abierta-titulo" style="margin:0">Carga</h3>
       <button type="button" id="descargar-carga-btn" class="secondary" disabled>Descargar Excel Furniture</button>
+      <button type="button" id="listado-almacen-btn" class="secondary listado-almacen-btn" disabled>Listado almacén</button>
       <button type="button" id="cerrar-carga-btn" disabled>Cerrar carga</button>
       <button type="button" id="tracking-upload-btn" class="secondary">Actualizar seguimiento Furniture</button>
       <input type="file" id="tracking-upload-input" accept=".xls,.htm,.html" style="display:none" />
@@ -5139,6 +5140,7 @@ function renderFurniture() {
   document.getElementById("carga-abierta-titulo").textContent = formatCargaTitulo(cargaAbierta);
   document.getElementById("cerrar-carga-btn").disabled = !cargaAbierta;
   document.getElementById("descargar-carga-btn").disabled = !cargaAbierta;
+  document.getElementById("listado-almacen-btn").disabled = !cargaAbierta;
 
   const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && o.shippingStatus !== "fulfilled" && !o.gestionadoExterno && !esMiembroSecundario(o));
   // Todo lo que está en la carga abierta se ve en ella, aunque en Shopify ya
@@ -5394,6 +5396,75 @@ document.getElementById("anadir-carga-btn").addEventListener("click", async () =
   furnitureSeleccion.clear();
   reposicionSeleccion.clear();
   renderFurniture();
+});
+
+// Listado para el almacén (Jennifer, 2026-09-29): Excel imprimible con solo
+// pedido, referencia de fábrica, producto, unidades y montaje.
+async function descargarListadoAlmacen(cargaId) {
+  const res = await fetch("/api/cargas/almacen?cargaId=" + encodeURIComponent(cargaId));
+  if (!res.ok) { alert("No se pudo sacar el listado: " + await res.text()); return; }
+  const { carga, filas } = await res.json();
+  const ExcelJS = await cargarExcelJs();
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Almacén", {
+    pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true,
+      margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 } },
+  });
+  const TAM = 13;
+  const anchos = [16, 13, 52, 7, 11];
+  ws.columns = anchos.map(width => ({ width }));
+  ws.getCell("A1").value = "Carga Furniture — " + formatCargaTitulo(carga);
+  ws.getCell("A1").font = { bold: true, size: 18 };
+  ws.getCell("A2").value = filas.length + " artículos · " + new Set(filas.map(f => f.pedido)).size + " pedidos";
+  ws.getCell("A2").font = { size: 12 };
+  ws.addRow([]);
+  const borde = { style: "thin", color: { argb: "FF999999" } };
+  const bordes = { top: borde, left: borde, bottom: borde, right: borde };
+  const cabecera = ws.addRow(["Pedido", "Ref. fábrica", "Producto", "Uds", "Montaje"]);
+  cabecera.eachCell(c => {
+    c.font = { bold: true, size: TAM, color: { argb: "FFFFFFFF" } };
+    c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F8A4C" } };
+    c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    c.border = bordes;
+  });
+  ws.pageSetup.printTitlesRow = cabecera.number + ":" + cabecera.number;
+
+  let grupo = -1, anterior = null, inicio = 0;
+  const cerrarGrupo = (fin) => { if (anterior !== null && fin > inicio) ws.mergeCells(inicio, 1, fin, 1); };
+  filas.forEach((f) => {
+    if (f.pedido !== anterior) { cerrarGrupo(ws.rowCount); grupo++; anterior = f.pedido; inicio = ws.rowCount + 1; }
+    const row = ws.addRow([f.pedido, f.referencia, f.producto, f.cantidad, f.montaje ? "SÍ" : "NO"]);
+    const lineas = Math.max(1, Math.ceil(f.producto.length / ((anchos[2] - 2) * 11 / TAM)));
+    row.height = lineas * (TAM * 1.35) + 6;
+    row.eachCell({ includeEmpty: true }, (c, col) => {
+      c.alignment = { vertical: "middle", horizontal: col === 3 ? "left" : "center", wrapText: true };
+      c.border = bordes;
+      c.font = { size: TAM, bold: col === 1 || col === 2 || (col === 5 && f.montaje), color: col === 5 && f.montaje ? { argb: "FFC80000" } : undefined };
+      if (grupo % 2 === 1) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEAF4EE" } };
+    });
+  });
+  cerrarGrupo(ws.rowCount);
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "Almacen_" + carga.fecha + ".xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".listado-almacen-btn");
+  if (!btn) return;
+  const cargaId = btn.dataset.id || (cargaAbierta && cargaAbierta.id);
+  if (!cargaId) return;
+  btn.disabled = true;
+  try { await descargarListadoAlmacen(cargaId); }
+  catch (err) { alert("No se pudo generar el Excel: " + err.message); }
+  finally { btn.disabled = false; }
 });
 
 document.getElementById("descargar-carga-btn").addEventListener("click", () => {
@@ -5998,6 +6069,7 @@ function renderHistorialCargas(cargas) {
       <summary>\${formatCargaTitulo(c)} — \${pedidos.length} pedidos — cerrada el \${new Date(c.fechaCierre).toLocaleDateString("es-ES")}</summary>
       <div class="toolbar" style="padding:0 1rem 0.5rem">
         <a class="secondary" href="/api/cargas/export?cargaId=\${encodeURIComponent(c.id)}" style="text-decoration:none">Descargar Excel Furniture</a>
+        <button type="button" class="secondary listado-almacen-btn" data-id="\${c.id}">Listado almacén</button>
       </div>
       <div class="table-wrap">
         <table>
@@ -7236,6 +7308,71 @@ async function buildFurnitureExport(env, cargaId) {
   return { rows, carga };
 }
 
+// === Listado para el almacén (Jennifer, 2026-09-29) ===
+// Lo que se mete en una carga de Furniture, para que lo preparen: solo
+// producto, referencia de fábrica y si lleva montaje — nada de dirección,
+// teléfono ni bultos. Un artículo por fila (no por bulto), con el pedido
+// para saber qué va junto (colchones y almohadas no llevan referencia).
+function productoAlmacen(b, productoTexto, services) {
+  const stockModel = b.stockModel || "";
+  const t = stockModel.toLowerCase();
+  const color = (b.color || "").replace(/^(tela|polipiel)\s*-\s*/i, "");
+  if (t.includes("canap")) {
+    const rule = matchCanapeRule(stockModel);
+    const medida = parseMedidaFurniture(b.talla);
+    const gemelo = b.formato160 ? b.formato160 === "GEMELOS" : !!(medida && esGemeloFurniture(medida, productoTexto));
+    const extras = [];
+    if (gemelo) extras.push("GEMELOS");
+    else if (b.formato160 === "PARTIDO") extras.push("PARTIDO");
+    else if (tapaPartidaFurniture(services)) extras.push("TAPA PARTIDA");
+    if (tapaReforzadaFurniture(services)) extras.push("TAPA REFORZADA");
+    return [rule ? rule.modelo : stockModel, b.talla, color].filter(Boolean).join(" ") + (extras.length ? " · " + extras.join(" · ") : "");
+  }
+  const piezas = piezasBackorder({ ...b, cantidad: 1, referencia: "" }, productoTexto, false, services);
+  if (t.includes("base") && piezas[1]) return piezas[0].texto + " + " + piezas[1].texto;
+  return piezas[0] ? piezas[0].texto : stockModel;
+}
+
+async function buildListadoAlmacen(env, cargaId) {
+  const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  const [orders, cargas, backorders] = await Promise.all([
+    ordersStub.fetch("https://do/orders").then((r) => r.json()),
+    ordersStub.fetch("https://do/cargas").then((r) => r.json()),
+    inventoryStub(env).fetch("https://do/backorders").then((r) => r.json()),
+  ]);
+  const carga = cargaId ? cargas.find((c) => c.id === cargaId) : cargas.find((c) => c.estado === "abierta");
+  if (!carga) return { error: "No hay carga abierta." };
+
+  // Mismo orden y mismos artículos que el fichero de Furniture.
+  const clavePedido = (o) => String(o.grupoEnvio || o.id);
+  const pedidos = orders.filter((o) => o.cargaId === carga.id)
+    .sort((a, b) => clavePedido(a).localeCompare(clavePedido(b)) || (a.id === a.grupoEnvio ? -1 : b.id === b.grupoEnvio ? 1 : 0));
+  const filas = [];
+  const fila = (pedido, o, referencia, producto, cantidad) =>
+    filas.push({ pedido, referencia: referencia || "", producto, cantidad: cantidad || 1, montaje: tieneMontajeFurniture(o.services) });
+
+  for (const o of pedidos) {
+    const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
+    const lineas = backorders.filter((b) => b.orderId === o.id
+      && (b.estado === "pendiente" || b.estado === "cubierto")
+      && !b.reposicion && !b.gestoComercial && !b.envioAparte
+      && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
+    if (!lineas.length) { fila(referenciaPedido(envio), o, "", o.product || "", 1); continue; }
+    for (const b of lineas) fila(referenciaPedido(envio), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad);
+  }
+  for (const b of backorders.filter((b) => b.reposicion && b.estado === "pendiente" && b.cargaId === carga.id && !(b.tipo === "colchon" && b.agenciaReposicion === "SEUR"))) {
+    const o = orders.find((x) => x.id === b.orderId);
+    if (o) fila("REP" + referenciaPedido(o), o, b.referencia, "REPOSICIÓN: " + [b.stockModel, b.talla, b.color].filter(Boolean).join(" "), b.cantidad);
+  }
+  for (const b of backorders.filter((b) => b.envioAparte && (b.estado === "pendiente" || b.estado === "cubierto") && b.cargaId === carga.id)) {
+    const o = orders.find((x) => x.id === b.orderId);
+    if (!o) continue;
+    const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
+    fila(referenciaPedido(envio) + (b.refSuffix || ""), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad);
+  }
+  return { carga, filas };
+}
+
 // === Fichero de envíos a SEUR (Jennifer, 2026-09-08) ===
 // Dictado columna por columna contra dos ficheros reales que subió
 // (63235.xlsx nacional, 48297.xlsx internacional): A REF · B NOMBRE ·
@@ -8254,6 +8391,12 @@ async function handleFetch(request, env) {
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/cargas/close", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/cargas/almacen" && request.method === "GET") {
+      const result = await buildListadoAlmacen(env, url.searchParams.get("cargaId") || null);
+      if (result.error) return new Response(result.error, { status: 400 });
+      return new Response(JSON.stringify(result), { headers: { "content-type": "application/json; charset=utf-8" } });
     }
 
     if (url.pathname === "/api/cargas/export" && request.method === "GET") {
