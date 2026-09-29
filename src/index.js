@@ -942,7 +942,7 @@ async function reservarStockManual(env, entry) {
   const pedido = referenciaPedidoAlmacen(entry);
   let bultos;
   if (entry.tipo === "tapiceria") {
-    const piezas = piezasBackorder(entry, (o && o.product) || "", tapaPartidaFurniture((o && o.services) || ""));
+    const piezas = piezasBackorder(entry, (o && o.product) || "", tapaPartidaFurniture((o && o.services) || ""), (o && o.services) || "");
     bultos = piezas.map((p) => {
       // p.texto = "<referencia> <parte> <resto>": para la etiqueta, el
       // artículo sin referencia ni parte, y la parte en grande aparte.
@@ -7008,7 +7008,24 @@ function extraerMedidaDeMercancia(mercanciaFabrica) {
 // (descripcionesBackorder, más abajo, solo se queda con "texto") como por
 // el desplegable de reposición (Jennifer, 2026-09-21, necesita "parte" —
 // el nombre corto de la pieza — para usarlo como Modelo de la reposición).
-function piezasBackorder(b, productoTexto, tapaPartida) {
+// "Tapa de Canapé: Tapa Reforzada" (Jennifer, 2026-09-29: "quiero que
+// aparezca" en las etiquetas de Furniture) — la tapa sale como "TAPA
+// REFORZADA" (también "TAPA REFORZADA ½" en gemelos).
+function tapaReforzadaFurniture(services) {
+  const m = /Tapa de Canapé:\s*([^·]+)/i.exec(services || "");
+  return !!(m && m[1].trim().toLowerCase().startsWith("tapa reforzada"));
+}
+function marcarTapaReforzada(piezas) {
+  return piezas.map((p) => {
+    if (!/^TAPA\b/.test(p.parte) || /REFORZADA|PARTIDA/.test(p.parte)) return p;
+    const parte = p.parte.replace(/^TAPA/, "TAPA REFORZADA");
+    return { parte, texto: p.texto.replace(p.parte, parte) };
+  });
+}
+
+// `servicios` (opcional): el texto de servicios del pedido, para detectar
+// la tapa reforzada.
+function piezasBackorder(b, productoTexto, tapaPartida, servicios) {
   const stockModel = b.stockModel || "";
   const t = stockModel.toLowerCase();
   const referencia = b.referencia || "";
@@ -7024,7 +7041,8 @@ function piezasBackorder(b, productoTexto, tapaPartida) {
     // Si Jennifer ha elegido el formato de un canapé de 160 (2026-09-28),
     // manda sobre lo que diga la variante de Shopify.
     const gemelo = b.formato160 ? b.formato160 === "GEMELOS" : esGemeloFurniture(medida, productoTexto);
-    return rule.gen(rule.modelo, medida, color, referencia, tapaPartida, gemelo);
+    const piezas = rule.gen(rule.modelo, medida, color, referencia, tapaPartida, gemelo);
+    return tapaReforzadaFurniture(servicios) ? marcarTapaReforzada(piezas) : piezas;
   }
   if (t.includes("cabecero")) {
     const medidaTxt = extraerMedidaDeMercancia(b.mercanciaFabrica) || b.talla || "";
@@ -7051,8 +7069,8 @@ function piezasBackorder(b, productoTexto, tapaPartida) {
 
 // Solo el texto completo de cada bulto — la exportación real de Furniture
 // no necesita "parte" por separado, así que no cambia en nada.
-function descripcionesBackorder(b, productoTexto, tapaPartida) {
-  return piezasBackorder(b, productoTexto, tapaPartida).map((p) => p.texto);
+function descripcionesBackorder(b, productoTexto, tapaPartida, servicios) {
+  return piezasBackorder(b, productoTexto, tapaPartida, servicios).map((p) => p.texto);
 }
 
 function csvEscapeFurniture(value) {
@@ -7123,7 +7141,7 @@ async function buildFurnitureExport(env, cargaId) {
       && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
 
     const descripciones = backordersPedido.length
-      ? backordersPedido.flatMap((b) => descripcionesBackorder(b, o.product, tapaPartida))
+      ? backordersPedido.flatMap((b) => descripcionesBackorder(b, o.product, tapaPartida, o.services))
       : [o.product || ""];
 
     for (const descrip of descripciones) {
@@ -7198,7 +7216,7 @@ async function buildFurnitureExport(env, cargaId) {
     const montaje = tieneMontajeFurniture(o.services);
     const telefono = limpiarTelefonoFurniture(envio.phone);
     const observaciones = "Resto del pedido " + referenciaPedido(o) + " (segundo envío)";
-    for (const descrip of descripcionesBackorder(b, o.product, tapaPartidaFurniture(o.services))) {
+    for (const descrip of descripcionesBackorder(b, o.product, tapaPartidaFurniture(o.services), o.services)) {
       rows.push([
         fechaTexto, "", referenciaPedido(envio) + (b.refSuffix || ""), envio.name, envio.furnitureAddress || envio.address || "",
         envio.postalCode || "", envio.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
@@ -7952,7 +7970,7 @@ async function handleFetch(request, env) {
       // es lo que se guarda como Modelo de la reposición; "texto" es la
       // línea completa (con modelo/medida/color) que se ve en el
       // desplegable y que se apunta en "Mercancía para pedir a fábrica".
-      const piezas = piezasBackorder(b, productoTexto, tapaPartida);
+      const piezas = piezasBackorder(b, productoTexto, tapaPartida, services);
       // tipo también se manda al cliente (Jennifer, 2026-09-22): si es
       // "colchon", el modal tiene que preguntar SEUR/FURNITURE y, si es
       // FURNITURE, si hay recogida del colchón dañado — ver
