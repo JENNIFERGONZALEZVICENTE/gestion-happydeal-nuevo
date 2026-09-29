@@ -4292,9 +4292,12 @@ function filasPedidoFabrica(seleccionados) {
         // más de una unidad. formatMercanciaSinReceta ya la incluye.
         const cantidad = b.cantidad || 1;
         const texto = b.mercanciaFabrica || b.nombreFabricacion;
-        const mercancia = texto
+        // Cada dato en su línea (MODELO / MEDIDA / COLOR / TAPA / TIRADOR /
+        // EXTRA...) para que Polival lo lea más ordenado (Jennifer,
+        // 2026-09-29). Solo en el PDF/Excel: el texto guardado no cambia.
+        const mercancia = (texto
           ? (cantidad > 1 ? texto + " · " + cantidad + " UNIDADES" : texto)
-          : formatMercanciaSinReceta(b);
+          : formatMercanciaSinReceta(b)).split(" · ").join("\\n");
         filas.push([mercancia, b.referencia || "—"]);
         grupoDeFila.push(g);
         negritaDesde.push(cantidad > 1 ? mercancia.lastIndexOf(cantidad + " UNIDADES") : -1);
