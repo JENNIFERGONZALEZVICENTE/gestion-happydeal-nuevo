@@ -199,11 +199,15 @@ export class OrdersStore {
       const incoming = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const notasParaFulfillar = [];
+      // Cuántos se tramitan de verdad en esta pasada (Jennifer, 2026-09-29:
+      // el aviso contaba también los que ya estaban tramitados de antes).
+      let tramitadosAhora = 0;
       for (const order of incoming) {
         const existing = orders[order.id];
         if (!existing || !existing.inventoryProcessed) {
           if (existing) order.vistoSinPagar = existing.vistoSinPagar;
           await this.processInventory(order);
+          if (order.inventoryProcessed) tramitadosAhora++;
         }
         if (order.shippingStatus === "fulfilled" && existing?.shippingStatus !== "fulfilled") {
           await this.settleShipment(order.id);
@@ -214,7 +218,7 @@ export class OrdersStore {
       }
       await this.state.storage.put("orders", orders);
       this.broadcast();
-      return Response.json({ ok: true, notasParaFulfillar });
+      return Response.json({ ok: true, notasParaFulfillar, tramitadosAhora });
     }
 
     if (url.pathname === "/orders/upsert" && request.method === "POST") {

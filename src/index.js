@@ -46,7 +46,11 @@ const PROCESAMIENTO_DESDE = {
   // empieza a tener sentido que el motor normal se encargue; todo lo
   // anterior ya está gestionado y no debe volver a descontar stock ni pedir
   // a proveedor. Antes: "2026-09-13".
-  "Conforama ES": "2026-09-21",
+  // Desactivado (Jennifer, 2026-09-29): "no quiero que gestiones nada nuevo
+  // porque ya se ha gestionado todo de manera manual" — el fichero solo
+  // actualiza el listado. Para reactivar, poner la fecha desde la que tramitar
+  // (antes: "2026-09-21").
+  "Conforama ES": "2099-12-31",
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para procesar todo el
   // histórico real de prueba (95 pedidos desde el 24/06).
   "Leroy Merlin": "2026-06-24",
@@ -5941,7 +5945,7 @@ function initMarketplacePlatform(platformId) {
       body: JSON.stringify({ entries }),
     });
     const data = await res.json();
-    statusEl.textContent = data.actualizados + " pedidos actualizados · " + data.procesados + " procesados con descuento de stock" + (data.sinMatch ? " · " + data.sinMatch + " con SKU sin reconocer" : "");
+    statusEl.textContent = data.actualizados + " pedidos actualizados · " + data.procesados + " tramitados ahora (nuevos, con descuento de stock)" + (data.sinMatch ? " · " + data.sinMatch + " con SKU sin reconocer" : "");
     await loadMarketplacePedidos(platformId);
     loadOrders(); // refresca el aviso rojo de fecha límite del menú
   });
@@ -7787,10 +7791,14 @@ async function handleFetch(request, env) {
       const cutoff = PROCESAMIENTO_DESDE[platform];
       const conMotor = orders.filter((o) => marketplaceFechaDesde(o.orderDate, cutoff) && marketplaceEstadoElegible(o));
       const sinMotor = orders.filter((o) => !(marketplaceFechaDesde(o.orderDate, cutoff) && marketplaceEstadoElegible(o)));
-      if (conMotor.length) await stub.fetch("https://do/orders/import", { method: "POST", body: JSON.stringify(conMotor) });
+      let tramitadosAhora = 0;
+      if (conMotor.length) {
+        const r = await stub.fetch("https://do/orders/import", { method: "POST", body: JSON.stringify(conMotor) }).then((x) => x.json()).catch(() => ({}));
+        tramitadosAhora = r.tramitadosAhora || 0;
+      }
       if (sinMotor.length) await stub.fetch("https://do/orders/import-simple", { method: "POST", body: JSON.stringify(sinMotor) });
       const sinMatch = orders.filter((o) => !o.skuMatched).length;
-      return Response.json({ ok: true, actualizados: orders.length, procesados: conMotor.length, sinMatch });
+      return Response.json({ ok: true, actualizados: orders.length, procesados: tramitadosAhora, sinMatch });
     }
 
     const marketplacePedidosMatch = url.pathname.match(/^\/api\/(carrefour|maison-du-monde|worten|conforama|conforama-es|leroy-merlin)\/pedidos$/);
