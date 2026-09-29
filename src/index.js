@@ -34,12 +34,11 @@ const PROCESAMIENTO_DESDE = {
   // verdad estas dos tiendas con pedidos reales, igual que se hizo con
   // Maison/Worten. Conforama Francia no tenía ningún pedido tras el 13/09
   // (el más reciente era del 06/09), así que se amplió más, al 01/09.
-  // DESACTIVADO (Jennifer, 2026-09-29): al subir el fichero de Conforama
-  // (Francia) para tenerlo actualizado, tramitó 2 pedidos que ya se habían
-  // gestionado por otra vía — "no quiero que descuentes nada". Fecha lejana
-  // = el fichero solo actualiza la lista, sin tocar stock ni proveedores,
-  // hasta que ella diga desde cuándo activarlo. Antes: "2026-09-01".
-  Conforama: "2099-12-31",
+  // Jennifer, 2026-09-29: se tramita a partir del último pedido que entró,
+  // 20071165501-A (28/09/2026 14:40, único pedido de ese día) — todo lo
+  // anterior ya se gestionó por otra vía y no debe descontar nada. (Un rato
+  // antes estuvo desactivado con "2099-12-31"; antes de eso "2026-09-01".)
+  Conforama: "2026-09-28",
   // Subida a 2026-09-21 (Jennifer, 2026-09-25): el último pedido que
   // gestionó Ariadna a mano fue MP9992626400274607-A (único pedido de esa
   // fecha en el fichero real subido ese día, verificado sin ambigüedad de
