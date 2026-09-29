@@ -5141,7 +5141,12 @@ function renderFurniture() {
   document.getElementById("descargar-carga-btn").disabled = !cargaAbierta;
 
   const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && o.shippingStatus !== "fulfilled" && !o.gestionadoExterno && !esMiembroSecundario(o));
-  const enCarga = cargaAbierta ? todasFurniture.filter(o => o.cargaId === cargaAbierta.id) : [];
+  // Todo lo que está en la carga abierta se ve en ella, aunque en Shopify ya
+  // figure como enviado (Jennifer, 2026-09-29, caso BEZEN12194: marcado como
+  // enviado en el sistema antiguo pero sale en esta carga).
+  const enCarga = cargaAbierta
+    ? allOrders.filter(o => o.agencia === "FURNITURE" && o.cargaId === cargaAbierta.id && !o.gestionadoExterno && !esMiembroSecundario(o))
+    : [];
   const busquedaPedido = document.getElementById("furniture-pedido-search").value.trim().toLowerCase();
   const busquedaReferencia = document.getElementById("furniture-referencia-search").value.trim().toLowerCase();
   // Al revés que Polival: aquí Jennifer quiere los más antiguos arriba, para
