@@ -1281,6 +1281,9 @@ function renderPage() {
   .cancelar-linea-btn:hover { color: #b91c1c; border-color: #b91c1c; background: #fff; }
   .cancelar-pendiente-btn { margin-top: 4px; padding: 2px 8px; font-size: 11px; background: #fff; color: #b91c1c; border: 1px solid #fca5a5; border-radius: 6px; cursor: pointer; }
   .cancelar-pendiente-btn:hover { background: #b91c1c; color: #fff; }
+  .fila-pendiente-cancelada td { color: #9ca3af; }
+  .fila-pendiente-cancelada textarea { opacity: 0.5; pointer-events: none; }
+  .cancelado-tag { display: inline-block; padding: 2px 8px; border-radius: 6px; background: #fee2e2; color: #991b1b; font-size: 12px; font-weight: 700; white-space: nowrap; }
   .linea-cancelada-tag { margin-top: 3px; font-size: 11px; font-weight: 700; color: #991b1b; }
   .elegir-unidades-lista { display: flex; flex-direction: column; gap: 6px; margin: 0.5rem 0 0.75rem; }
   .elegir-unidades-fila { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
@@ -2031,6 +2034,7 @@ function renderPage() {
 <div id="view-pendientes" style="display:none">
   <div class="toolbar">
     <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-ocultar-recibidos"> Ocultar ya recibidos de fábrica</label>
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-mostrar-cancelados"> Mostrar cancelados</label>
     <button type="button" id="descargar-excel-pendientes-btn" class="secondary">Descargar Excel (todos los proveedores)</button>
   </div>
   <div class="toolbar" id="pendientes-toolbar" style="display:none">
@@ -3180,6 +3184,15 @@ document.getElementById("pendientes-referencia-search").addEventListener("input"
 document.getElementById("pendientes-pedido-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-sku-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-ocultar-recibidos").addEventListener("change", renderPendientes);
+// "Mostrar cancelados" se recuerda en este navegador (Jennifer, 2026-09-29).
+(() => {
+  const chk = document.getElementById("pendientes-mostrar-cancelados");
+  try { chk.checked = localStorage.getItem("hd_mostrar_cancelados") === "1"; } catch (e) { /* sin localStorage */ }
+  chk.addEventListener("change", () => {
+    try { localStorage.setItem("hd_mostrar_cancelados", chk.checked ? "1" : "0"); } catch (e) { /* sin localStorage */ }
+    renderPendientes();
+  });
+})();
 // Si la ventana cambia de tamaño el texto de la cabecera puede pasar a 1 o 2
 // líneas y cambiar de alto — se re-mide (Jennifer, 2026-09-25, ver
 // sincronizarTopFilaFiltro).
@@ -4207,8 +4220,9 @@ function renderPendientes() {
   // filtrar por modelo solo, por medida sola, o por los dos juntos.
   const busquedaSku = document.getElementById("pendientes-sku-search").value.trim().toLowerCase();
   const ocultarRecibidos = document.getElementById("pendientes-ocultar-recibidos").checked;
+  const mostrarCancelados = document.getElementById("pendientes-mostrar-cancelados").checked;
   const pendientes = backorders.filter(b => {
-    if (b.estado !== "pendiente") return false;
+    if (b.estado !== "pendiente" && !(mostrarCancelados && b.estado === "cancelado")) return false;
     if (ocultarRecibidos && b.recibidoFabrica) return false;
     if (busquedaReferencia && !(b.referencia || "").toLowerCase().includes(busquedaReferencia)) return false;
     if (busquedaSku && !skuDePendiente(b).toLowerCase().includes(busquedaSku)) return false;
@@ -4373,15 +4387,21 @@ function renderPendientes() {
     const sustituirBtnHtml = b.tipo === "colchon" && b.estado === "pendiente"
       ? \`<button type="button" class="secondary sustituir-btn" data-id="\${b.id}" style="margin-left:4px">Sustituir modelo</button>\`
       : "";
-    const resolverCell = esColchonSeur
+    // Cancelado (Jennifer, 2026-09-29): se ve solo con "Mostrar cancelados",
+    // en gris y sin botones.
+    const esCancelado = b.estado === "cancelado";
+    const resolverCell = esCancelado
+      ? \`<span class="cancelado-tag">✕ CANCELADO\${b.fechaCancelado ? " " + new Date(b.fechaCancelado).toLocaleDateString("es-ES") : ""}</span>\`
+      : esColchonSeur
       ? \`<button type="button" class="resolver-seur-btn" data-id="\${b.id}">Preparar para SEUR</button>\${sustituirBtnHtml}\`
       : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${sustituirBtnHtml}\`;
+    const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button></div>\`;
     return \`
-    <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado ? "fila-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
-      \${checkCell}
+    <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
+      \${esCancelado ? "<td></td>" : checkCell}
       <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
-      <td>\${b.stockModel}\${pedidoTag}\${abiertoTagHtml(b)}\${formatoHtml}<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button></div></td>
+      <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
       <td>\${b.talla}\${b.transformadoDesde ? '<br><span class="transformado-tag" title="Transformado de un colchón de otra medida que había en stock">Transformado desde ' + b.transformadoDesde + '</span>' : ""}</td>
       \${skuCell}
@@ -4395,7 +4415,8 @@ function renderPendientes() {
     </tr>
   \`;
   }).join("");
-  document.getElementById("pendientes-count").textContent = pendientes.length + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)";
+  const nCancelados = pendientes.filter(b => b.estado === "cancelado").length;
+  document.getElementById("pendientes-count").textContent = (pendientes.length - nCancelados) + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)" + (nCancelados ? " · " + nCancelados + " cancelados a la vista" : "");
   actualizarSeleccionUI();
   sincronizarTopFilaFiltro("pendientes-table", "pendientes-filter-row");
 
