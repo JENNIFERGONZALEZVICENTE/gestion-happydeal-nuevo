@@ -29,7 +29,10 @@ const PROCESAMIENTO_DESDE = {
   // verdad el cruce de seguimiento de Furniture/SEUR contra pedidos reales
   // de estas dos tiendas, no solo los que lleguen desde hoy.
   "Maison Du Monde": "2026-09-13",
-  Worten: "2026-09-13",
+  // Desactivado (Jennifer, 2026-09-29): "con la información que suba no
+  // hagas nada de nada, solo que se actualicen los pedidos" — los
+  // pendientes los dice ella a mano. Antes: "2026-09-13".
+  Worten: "2099-12-31",
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para poder probar de
   // verdad estas dos tiendas con pedidos reales, igual que se hizo con
   // Maison/Worten. Conforama Francia no tenía ningún pedido tras el 13/09
