@@ -6784,7 +6784,9 @@ initUser();
 
 const FURNITURE_CSV_HEADERS = [
   "FECHA", "A COBRAR", "DOC. VENTA", "NOM. CLIENTE", "DIRECCIÓN", "C. POSTAL", "POBLACIÓN",
-  "DESCRIP.", "CANTIDAD", "CENTRO", "TELÉFONO1", "TELÉFONO 2", "OBSERVACIONES", "USADO", "RAEE",
+  // N = "USADO/RAEE" en UNA sola columna (Jennifer, 2026-09-29: la columna
+  // O "RAEE" sobraba y desajustaba todo el fichero).
+  "DESCRIP.", "CANTIDAD", "CENTRO", "TELÉFONO1", "TELÉFONO 2", "OBSERVACIONES", "USADO/RAEE",
   "ARRASTRE", "VERIFICADO", "PLANIFICADO", "LLAMADO", "CAMIÓN", "CARGADO", "HORA INICIO", "HORA FIN",
   "EAN", "PROCEDENCIA", "TIPOSERVICIO", "BULTOS", "VOLUM", "KILOS", "NUMERO_RESERVA", "EMAIL", "PROVINCIA", "VALOR MERCANCÍA",
 ];
@@ -7080,8 +7082,8 @@ async function buildFurnitureExport(env, cargaId) {
       rows.push([
         fechaTexto, "", referenciaPedido(envio), envio.name, envio.furnitureAddress || envio.address || "",
         envio.postalCode || "", envio.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
-        "", "", "", "", "", "", "", "", "", "", "", "",
-        montaje ? "Subida a piso y montaje" : "Subida a piso", "1", "", "", "",
+        "", "", "", "", "", "", "", "", "", "", "",
+        montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
         envio.email || o.email || "", provinciaPorCp(envio.postalCode), "",
       ]);
     }
@@ -7130,8 +7132,8 @@ async function buildFurnitureExport(env, cargaId) {
     rows.push([
       fechaTexto, "", "REP" + referenciaPedido(o), o.name, o.furnitureAddress || o.address || "",
       o.postalCode || "", o.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
-      "", "", "", "", "", "", "", "", "", "", "", "",
-      montaje ? "Subida a piso y montaje" : "Subida a piso", "1", "", "", "",
+      "", "", "", "", "", "", "", "", "", "", "",
+      montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
       o.email || "", provinciaPorCp(o.postalCode), "",
     ]);
   }
