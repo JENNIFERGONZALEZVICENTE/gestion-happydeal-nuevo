@@ -8108,6 +8108,22 @@ async function handleFetch(request, env) {
       return new Response(await res.text(), { headers: { "content-type": "application/json" } });
     }
 
+    // Herramientas de mantenimiento (Jennifer, 2026-09-29, caso BEZEN12157),
+    // no expuestas en la UI.
+    if (url.pathname === "/api/cargas/set-fecha" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/cargas/set-fecha", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname === "/api/inventario/admin/cargar-furniture-manual" && request.method === "POST") {
+      return proxyInventory(env, "/admin/cargar-furniture-manual", request);
+    }
+    if (url.pathname === "/api/pedidos/admin/pasar-a-furniture" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/pasar-a-furniture", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
     if (url.pathname === "/api/cargas/seur/add" && request.method === "POST") {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do/cargas/seur/add", { method: "POST", body: await request.text() });

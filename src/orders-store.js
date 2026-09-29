@@ -724,6 +724,22 @@ export class OrdersStore {
       return Response.json({ ok: true, carga: abierta, añadidos });
     }
 
+    // Cambiar la fecha de una carga (Jennifer, 2026-09-29: la carga abierta
+    // de Furniture se quedó con fecha 25/09 por error, era la del 30/09).
+    if (url.pathname === "/cargas/set-fecha" && request.method === "POST") {
+      const { cargaId, fecha } = await request.json();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha || "")) return Response.json({ ok: false, error: "Fecha no válida (AAAA-MM-DD)." }, { status: 400 });
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const carga = cargas.find((c) => c.id === cargaId);
+      if (!carga) return Response.json({ ok: false, error: "Carga no encontrada." }, { status: 404 });
+      carga.fechaAnterior = carga.fecha;
+      carga.fecha = fecha;
+      carga.dia = DIAS_SEMANA[new Date(fecha + "T12:00:00").getDay()];
+      await this.state.storage.put("cargas", cargas);
+      this.broadcast();
+      return Response.json({ ok: true, carga });
+    }
+
     // Volver a meter en una carga de SEUR (hoy/mañana) un pedido que se sacó
     // a mano (Jennifer, 2026-09-29: "quitar las cosas de la carga como en
     // Furniture").

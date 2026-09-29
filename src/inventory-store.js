@@ -1987,6 +1987,33 @@ export class InventoryStore {
       const quedanEnCarga = backorders.some(esDeSeur);
       return Response.json({ ok: true, afectados, quedanEnCarga });
     }
+    // Pedido del sistema antiguo que ya está entero en el almacén y sale por
+    // Furniture (Jennifer, 2026-09-29, caso BEZEN12157): se registran sus
+    // artículos como YA LISTOS ("cubierto", recibido), con las referencias
+    // que ella da, sin pasar por ningún proveedor y SIN tocar el stock — así
+    // la carga de Furniture sabe sus bultos. Idempotente por id.
+    if (url.pathname === "/admin/cargar-furniture-manual" && method === "POST") {
+      const { orderId, orderNumber, platform, orderRef, orderDate, articulos } = await request.json();
+      if (!orderId || !Array.isArray(articulos) || !articulos.length) return Response.json({ ok: false, error: "Faltan orderId o artículos." }, { status: 400 });
+      const backorders = await this.load("backorders", []);
+      const creados = [];
+      for (const a of articulos) {
+        const id = `${orderId}-${stockKey(a.stockModel, a.talla)}-manual`;
+        if (backorders.some((b) => b.id === id)) continue;
+        pushBackorder(backorders, {
+          id, orderId, orderNumber, platform, orderRef, orderDate,
+          stockModel: a.stockModel, talla: a.talla, color: a.color || "", tipo: a.tipo,
+          cantidad: a.cantidad || 1, esPack: !!a.esPack, proveedor: a.proveedor || null,
+          referencia: a.referencia || null, estado: "cubierto", recibidoFabrica: true,
+          tipoEnvio: a.tipo === "colchon" ? "FUR" : undefined,
+        });
+        const b = backorders.find((x) => x.id === id);
+        b.cargaManual = true;
+        creados.push(b);
+      }
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, creados });
+    }
     // Cancelar unidades de un pendiente (Jennifer, 2026-09-29: el cliente
     // cancela una unidad de un pedido de varias).
     const cancelarUnidadesMatch = url.pathname.match(/^\/backorders\/([^/]+)\/cancelar-unidades$/);
