@@ -604,6 +604,26 @@ export class OrdersStore {
       return Response.json({ ok: true, marcados });
     }
 
+    // Pedidos gestionados a mano (Jennifer, 2026-09-29, Conforama ES): pone
+    // la agencia y los marca como tramitados SIN pasar por el motor de stock
+    // — el pendiente al proveedor se crea aparte (crear-pendiente-manual).
+    // Sin agencia no entrarían en las cargas ni en el fichero de SEUR.
+    if (url.pathname === "/orders/admin/set-agencia" && request.method === "POST") {
+      const { ids, agencia } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const hechos = [];
+      for (const id of ids || []) {
+        const o = orders[id];
+        if (!o) continue;
+        o.agencia = agencia;
+        o.inventoryProcessed = true;
+        hechos.push(id);
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, hechos });
+    }
+
     if (url.pathname === "/orders/meta" && request.method === "POST") {
       const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta, needsReview } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};

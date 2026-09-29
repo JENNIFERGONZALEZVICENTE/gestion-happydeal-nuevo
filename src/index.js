@@ -7688,6 +7688,12 @@ async function handleFetch(request, env) {
     // directas contra la API de Shopify) — para que un seguimiento
     // posterior del mismo pedido sepa que tiene que actualizar el
     // fulfillment existente en vez de intentar crear uno nuevo.
+    if (url.pathname === "/api/pedidos/admin/set-agencia" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/admin/set-agencia", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
     if (url.pathname === "/api/pedidos/shopify/admin/shopify-fulfilled" && request.method === "POST") {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
