@@ -35,7 +35,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -477,6 +477,29 @@ export class OrdersStore {
         this.broadcast();
       }
       return Response.json({ ok: true, agencia: order.agencia });
+    }
+
+    // Unidades canceladas de un pedido (Jennifer, 2026-09-29): se apuntan en
+    // `lineasCanceladas` (se ven tachadas en el pedido). Si se cancelan
+    // desde el pedido TODAS las unidades de todas sus líneas, el pedido
+    // entero queda cancelado.
+    if (url.pathname === "/orders/cancelar-linea" && request.method === "POST") {
+      const { orderId, itemIndex, unidades, texto, desde, usuario } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      order.lineasCanceladas = order.lineasCanceladas || [];
+      order.lineasCanceladas.push({
+        itemIndex: Number.isInteger(itemIndex) ? itemIndex : null,
+        unidades: Math.max(1, Math.floor(Number(unidades) || 1)),
+        texto: texto || "", desde: desde || "pedido", usuario: usuario || null, fecha: new Date().toISOString(),
+      });
+      const items = order.items || [];
+      const canceladasPorItem = (i) => order.lineasCanceladas.filter((l) => l.itemIndex === i).reduce((s, l) => s + l.unidades, 0);
+      if (items.length && items.every((it, i) => canceladasPorItem(i) >= (it.qty || 1))) order.cancelado = true;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, cancelado: !!order.cancelado, lineasCanceladas: order.lineasCanceladas });
     }
 
     // "No ha salido" (Jennifer, 2026-09-29): el pedido sale de su carga de

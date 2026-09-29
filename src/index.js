@@ -1277,6 +1277,14 @@ function renderPage() {
     display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 6px;
     background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; white-space: nowrap;
   }
+  .cancelar-linea-btn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: #6b7280; font-size: 14px; cursor: pointer; }
+  .cancelar-linea-btn:hover { color: #b91c1c; border-color: #b91c1c; background: #fff; }
+  .cancelar-pendiente-btn { margin-top: 4px; padding: 2px 8px; font-size: 11px; background: #fff; color: #b91c1c; border: 1px solid #fca5a5; border-radius: 6px; cursor: pointer; }
+  .cancelar-pendiente-btn:hover { background: #b91c1c; color: #fff; }
+  .linea-cancelada-tag { margin-top: 3px; font-size: 11px; font-weight: 700; color: #991b1b; }
+  .elegir-unidades-lista { display: flex; flex-direction: column; gap: 6px; margin: 0.5rem 0 0.75rem; }
+  .elegir-unidades-fila { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+  .elegir-unidades-fila input[type=number] { width: 56px; padding: 3px 6px; }
   .no-salio-btn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 1px solid #fca5a5; border-radius: 6px; background: #fff; color: #b91c1c; font-size: 14px; font-weight: 700; cursor: pointer; }
   .no-salio-btn:hover { background: #b91c1c; color: #fff; }
   .juntar-envio-btn {
@@ -2557,6 +2565,46 @@ function noSalioButton(order) {
   if (!colchonesSeurDelPedido(order).length) return "";
   return \`<button type="button" class="no-salio-btn" data-no-salio-id="\${escapeAttr(String(order.id))}" title="El colchón NO ha salido: vuelve a pendiente en su proveedor con la referencia siguiente (…2)">↩</button>\`;
 }
+// Ventana para elegir unidades (Jennifer, 2026-09-29): "No ha salido" de
+// solo una parte del pedido, o cancelar unidades concretas. filas: [{ key,
+// label, max }] -> Promise<[{ key, unidades }] | null>.
+function elegirUnidades({ titulo, texto, filas, boton, peligro }) {
+  return new Promise(resolve => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay open";
+    overlay.innerHTML = \`<div class="modal-box">
+      <h3>\${escapeAttr(titulo)}</h3>
+      <p style="color:var(--muted);font-size:13px">\${escapeAttr(texto)}</p>
+      <div class="elegir-unidades-lista">\${filas.map((f, i) => \`
+        <label class="elegir-unidades-fila">
+          <input type="checkbox" data-i="\${i}"\${filas.length === 1 ? " checked" : ""}>
+          <span>\${escapeAttr(f.label)}</span>
+          \${f.max > 1 ? \`<input type="number" min="1" max="\${f.max}" value="\${f.max}" data-n="\${i}" title="Unidades"> de \${f.max}\` : ""}
+        </label>\`).join("")}</div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-accion="cancelar">Volver</button>
+        <button type="button" data-accion="ok"\${peligro ? ' style="background:#b91c1c"' : ""}>\${escapeAttr(boton)}</button>
+      </div>
+    </div>\`;
+    document.body.appendChild(overlay);
+    const cerrar = (valor) => { overlay.remove(); resolve(valor); };
+    overlay.addEventListener("click", (ev) => {
+      if (ev.target === overlay || ev.target.dataset.accion === "cancelar") return cerrar(null);
+      if (ev.target.dataset.accion !== "ok") return;
+      const elegidas = [];
+      overlay.querySelectorAll("input[type=checkbox]").forEach(chk => {
+        if (!chk.checked) return;
+        const i = Number(chk.dataset.i);
+        const inp = overlay.querySelector('input[data-n="' + i + '"]');
+        const n = inp ? Math.min(filas[i].max, Math.max(1, Math.floor(Number(inp.value) || 1))) : 1;
+        elegidas.push({ key: filas[i].key, unidades: n });
+      });
+      if (!elegidas.length) { alert("Marca al menos una."); return; }
+      cerrar(elegidas);
+    });
+  });
+}
+
 document.addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-no-salio-id]");
   if (!btn) return;
@@ -2565,21 +2613,118 @@ document.addEventListener("click", async (e) => {
   const order = allOrders.find(o => String(o.id) === btn.dataset.noSalioId);
   if (!order) return;
   const colchones = colchonesSeurDelPedido(order);
-  const texto = colchones.map(b => (b.cantidad || 1) + "x " + nombreCortoModelo(b.stockModel) + " " + b.talla + " (" + (b.proveedor || "?") + ")").join(", ");
-  if (!confirm("¿El colchón de " + refLabel(order) + " NO ha salido?\\n\\n" + texto
-    + "\\n\\nVuelve a pendiente en su proveedor con la referencia siguiente (…2), sale de la carga de SEUR y la etiqueta ya registrada queda anulada. El stock no se devuelve (se entiende que no estaba).")) return;
+  // Qué unidades NO han salido (el resto sigue en la carga).
+  const elegidas = await elegirUnidades({
+    titulo: "¿Qué no ha salido? · " + refLabel(order),
+    texto: "Marca lo que NO ha salido: vuelve a pendiente en su proveedor con la referencia siguiente (…2). Lo que no marques sigue en la carga de SEUR. El stock no se devuelve (se entiende que no estaba).",
+    filas: colchones.map(b => ({ key: b.id, label: nombreCortoModelo(b.stockModel) + " " + b.talla + " (" + (b.proveedor || "?") + ")", max: b.cantidad || 1 })),
+    boton: "No ha salido",
+  });
+  if (!elegidas) return;
   const res = await fetch("/api/pedidos/no-salio", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: order.id }),
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderId: order.id, seleccion: elegidas.map(x => ({ id: x.key, unidades: x.unidades })) }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) { alert(data.error || "No se ha podido marcar como no salido."); return; }
-  alert("Hecho: " + refLabel(order) + " vuelve a pendiente en " + [...new Set(data.afectados.map(b => b.proveedor))].join("/") + " con la referencia " + refLabel(order) + data.afectados[0].refSuffix + ".");
+  alert("Hecho: " + data.afectados.map(b => b.cantidad + "x " + nombreCortoModelo(b.stockModel) + " " + b.talla).join(", ")
+    + " vuelve a pendiente en " + [...new Set(data.afectados.map(b => b.proveedor))].join("/") + " con la referencia " + refLabel(order) + data.afectados[0].refSuffix + "."
+    + (data.quedanEnCarga ? " El resto del pedido sigue en la carga de SEUR." : ""));
   backorders = await (await fetch("/api/inventario/pendientes")).json();
   await loadOrders();
   if (document.getElementById("view-seur").style.display !== "none") loadSeur();
   for (const p of platforms) {
     if (p.id !== "shopify" && document.getElementById("view-" + p.id) && document.getElementById("view-" + p.id).style.display !== "none") loadMarketplacePedidos(p.id);
   }
+}, true);
+
+// Cancelar unidades (Jennifer, 2026-09-29): desde el pedido (⊘, eligiendo
+// qué artículo y cuántas unidades) o desde el pendiente del proveedor
+// ("Cancelar"). Se anotan en el pedido y se ven tachadas.
+function lineasPedido(order) {
+  const items = order.items || [];
+  const partes = String(order.product || "").split(", ");
+  return items.map((it, i) => ({
+    index: i,
+    qty: it.qty || 1,
+    label: partes.length === items.length ? partes[i] : ((it.qty || 1) + "x " + (it.sku || "") + " " + (it.variantTitle || "")).trim(),
+    canceladas: (order.lineasCanceladas || []).filter(l => l.itemIndex === i).reduce((s, l) => s + l.unidades, 0),
+  }));
+}
+function cancelarLineaButton(order) {
+  if (order.cancelado || !(order.items || []).length) return "";
+  if (!lineasPedido(order).some(l => l.canceladas < l.qty)) return "";
+  return \`<button type="button" class="cancelar-linea-btn" data-cancelar-linea-id="\${escapeAttr(String(order.id))}" title="Cancelar una o varias unidades de este pedido (no el pedido entero)">⊘</button>\`;
+}
+function lineasCanceladasHtml(order) {
+  const l = order.lineasCanceladas || [];
+  if (!l.length) return "";
+  return l.map(x => \`<div class="linea-cancelada-tag" title="Cancelada \${x.desde === "proveedor" ? "desde el proveedor" : "desde el pedido"} el \${new Date(x.fecha).toLocaleDateString("es-ES")}\${x.usuario ? " por " + escapeAttr(x.usuario) : ""}">CANCELADA: <s>\${escapeAttr(x.texto)}</s></div>\`).join("");
+}
+async function recargarTrasCancelar() {
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  await loadOrders();
+  if (document.getElementById("view-pendientes").style.display !== "none") renderPendientes();
+  if (document.getElementById("view-seur").style.display !== "none") loadSeur();
+  if (document.getElementById("view-furniture").style.display !== "none") renderFurniture();
+  for (const p of platforms) {
+    if (p.id !== "shopify" && document.getElementById("view-" + p.id) && document.getElementById("view-" + p.id).style.display !== "none") loadMarketplacePedidos(p.id);
+  }
+}
+document.addEventListener("click", async (e) => {
+  const btnPedido = e.target.closest("[data-cancelar-linea-id]");
+  const btnPend = e.target.closest("[data-cancelar-pendiente]");
+  if (!btnPedido && !btnPend) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (btnPedido) {
+    const order = allOrders.find(o => String(o.id) === btnPedido.dataset.cancelarLineaId);
+    if (!order) return;
+    const lineas = lineasPedido(order).filter(l => l.canceladas < l.qty);
+    const elegidas = await elegirUnidades({
+      titulo: "Cancelar unidades · " + refLabel(order),
+      texto: "Marca lo que ha cancelado el cliente. Si tiene un pendiente en el proveedor, también se cancela allí. Si cancelas todo, el pedido queda cancelado.",
+      filas: lineas.map(l => ({ key: l.index, label: l.label, max: l.qty - l.canceladas })),
+      boton: "Cancelar unidades", peligro: true,
+    });
+    if (!elegidas) return;
+    let pedidoCancelado = false, pendientes = 0;
+    for (const x of elegidas) {
+      const l = lineas.find(y => y.index === x.key);
+      const res = await fetch("/api/pedidos/cancelar-linea", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderId: order.id, itemIndex: x.key, unidades: x.unidades, texto: x.unidades + "x " + l.label.replace(/^\\d+x\\s*/, ""), usuario: currentUser }),
+      });
+      const r = await res.json().catch(() => ({}));
+      if (!res.ok || !r.ok) { alert(r.error || "No se ha podido cancelar."); break; }
+      pendientes += r.pendientesCancelados || 0;
+      pedidoCancelado = pedidoCancelado || r.pedidoCancelado;
+    }
+    alert("Cancelado." + (pendientes ? " También se ha quitado del proveedor." : " No tenía pendiente en ningún proveedor.") + (pedidoCancelado ? " El pedido entero queda CANCELADO." : ""));
+    await recargarTrasCancelar();
+    return;
+  }
+  const b = backorders.find(x => x.id === btnPend.dataset.cancelarPendiente);
+  if (!b) return;
+  let unidades = b.cantidad || 1;
+  if (unidades > 1) {
+    const elegidas = await elegirUnidades({
+      titulo: "Cancelar · " + refLabel(b),
+      texto: "¿Cuántas unidades ha cancelado el cliente?",
+      filas: [{ key: b.id, label: nombreCortoModelo(b.stockModel) + " " + b.talla, max: unidades }],
+      boton: "Cancelar unidades", peligro: true,
+    });
+    if (!elegidas) return;
+    unidades = elegidas[0].unidades;
+  }
+  const aviso = b.pedidoGenerado ? "\\n\\nOJO: esto YA estaba pedido a fábrica" + (b.fechaPedidoFabrica ? " (" + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") + ")" : "") + ". Avisa a la fábrica." : "";
+  if (!confirm("¿Cancelar " + unidades + "x " + nombreCortoModelo(b.stockModel) + " " + b.talla + " de " + refLabel(b) + "?\\n\\nSe quita del proveedor y queda como CANCELADA en el pedido." + aviso)) return;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/cancelar-unidades", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ unidades, usuario: currentUser }),
+  });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido cancelar."); return; }
+  await recargarTrasCancelar();
 }, true);
 
 function cancelButton(order) {
@@ -2709,13 +2854,13 @@ function render(orders) {
   const tbody = document.querySelector("#orders tbody");
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
-      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}\${noSalioButton(o)}</div></td>
+      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}</div></td>
       <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
       <td>\${o.address}</td>
       <td>\${o.phone}</td>
-      <td>\${o.product}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
+      <td>\${o.product}\${lineasCanceladasHtml(o)}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
       <td class="services">\${o.services}</td>
       <td>\${o.paymentMethod}</td>
       <td>\${pagoManualCell(o)}</td>
@@ -4236,7 +4381,7 @@ function renderPendientes() {
       \${checkCell}
       <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
-      <td>\${b.stockModel}\${pedidoTag}\${abiertoTagHtml(b)}\${formatoHtml}</td>
+      <td>\${b.stockModel}\${pedidoTag}\${abiertoTagHtml(b)}\${formatoHtml}<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button></div></td>
       <td>\${b.color || "—"}</td>
       <td>\${b.talla}\${b.transformadoDesde ? '<br><span class="transformado-tag" title="Transformado de un colchón de otra medida que había en stock">Transformado desde ' + b.transformadoDesde + '</span>' : ""}</td>
       \${skuCell}
@@ -5620,7 +5765,7 @@ function renderMarketplace(platformId) {
   }
   document.querySelector("#" + platformId + "-table tbody").innerHTML = filtered.map(o => \`
     <tr\${(o.cancelado || estadoSeguimientoEspecial(o.estado) === "CANCELADO") ? ' class="fila-cancelada"' : ""}>
-      <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${noSalioButton(o)}</div></td>
+      <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}</div></td>
       <td>\${o.orderRef}</td>
       <td>\${o.orderDate || ""}</td>
       <td>\${plazoEnvioCell(o)}</td>
@@ -5631,7 +5776,7 @@ function renderMarketplace(platformId) {
       <td>\${o.province || ""}</td>
       <td>\${o.countryCode || ""}</td>
       <td>\${o.phone || ""}</td>
-      <td>\${o.product || ""}</td>
+      <td>\${o.product || ""}\${lineasCanceladasHtml(o)}</td>
       <td>\${o.qty || 1}</td>
       <td\${o.skuMatched ? "" : ' style="color:#991b1b;font-weight:600"'}>\${o.sku || ""}\${o.skuMatched ? "" : " ⚠"}</td>
       <td>\${o.price || ""}</td>
@@ -7744,8 +7889,47 @@ async function handleFetch(request, env) {
       const res = await inventoryStub(env).fetch("https://do/backorders/no-salio", { method: "POST", body });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) return Response.json(data, { status: res.status || 500 });
-      await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders/no-salio-seur", { method: "POST", body });
+      // Si aún le queda algo por salir en la carga (solo no salió una parte),
+      // el pedido sigue en ella y su etiqueta de SEUR sigue valiendo.
+      if (!data.quedanEnCarga) {
+        await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders/no-salio-seur", { method: "POST", body });
+      }
       return Response.json(data);
+    }
+
+    // Cancelar unidades (Jennifer, 2026-09-29): desde un pendiente del
+    // proveedor, o desde una línea del pedido. En los dos casos queda
+    // anotado en el pedido (lineasCanceladas).
+    const cancelarUnidadesMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/cancelar-unidades$/);
+    if (cancelarUnidadesMatch && request.method === "POST") {
+      const body = await request.text();
+      const res = await inventoryStub(env).fetch("https://do/backorders/" + cancelarUnidadesMatch[1] + "/cancelar-unidades", { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok && data.cancelado) {
+        const c = data.cancelado;
+        let usuario = null;
+        try { usuario = JSON.parse(body).usuario || null; } catch (e) { /* sin usuario */ }
+        await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders/cancelar-linea", {
+          method: "POST",
+          body: JSON.stringify({ orderId: c.orderId, unidades: c.cantidad, texto: `${c.cantidad}x ${c.stockModel} ${c.talla}`, desde: "proveedor", usuario }),
+        });
+      }
+      return Response.json(data, { status: res.status });
+    }
+    if (url.pathname === "/api/pedidos/cancelar-linea" && request.method === "POST") {
+      const { orderId, itemIndex, unidades, texto, usuario } = await request.json();
+      const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const orders = await (await ordersStub.fetch("https://do/orders")).json();
+      const order = orders.find((o) => String(o.id) === String(orderId));
+      const item = order && (order.items || [])[itemIndex];
+      if (!item) return Response.json({ ok: false, error: "Artículo no encontrado en el pedido." }, { status: 404 });
+      const inv = await (await inventoryStub(env).fetch("https://do/backorders/cancelar-por-item", {
+        method: "POST", body: JSON.stringify({ orderId: order.id, item, unidades }),
+      })).json();
+      const r = await (await ordersStub.fetch("https://do/orders/cancelar-linea", {
+        method: "POST", body: JSON.stringify({ orderId: order.id, itemIndex, unidades, texto, desde: "pedido", usuario }),
+      })).json();
+      return Response.json({ ok: true, pendientesCancelados: (inv.cancelados || []).length, pedidoCancelado: r.cancelado });
     }
 
     const grupoEnvioMatch = url.pathname.match(/^\/api\/pedidos\/shopify\/grupo-envio\/(vincular|desvincular)$/);

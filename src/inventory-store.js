@@ -1123,6 +1123,21 @@ function checkColchonesCoverage(stock, colchones) {
 // referencia usada hasta ahora puede que ya se haya dado de alta en la
 // plataforma de Seur — la siguiente vez que salga tiene que ser distinta
 // para no chocar. "" -> "2" -> "3" -> ...
+// Pendientes "vivos" (ni cancelados ni ya enviados/cerrados).
+const ESTADOS_ACTIVOS = new Set(["pendiente", "cubierto", "listo-seur"]);
+
+// Separa `n` unidades de un pendiente en uno nuevo (Jennifer, 2026-09-29:
+// de un pedido de 2 colchones iguales solo sale/se cancela uno). Si `n` es
+// todo lo que tiene, devuelve el mismo pendiente. El nuevo no conserva el
+// sufijo "-cubierto" del id (ya no es "cubierto por el motor").
+function separarUnidades(backorders, entry, n, etiqueta) {
+  if (n >= entry.cantidad) return entry;
+  entry.cantidad -= n;
+  const nuevo = { ...entry, id: `${String(entry.id).replace(/-cubierto$/, "")}-${etiqueta}${Date.now()}${Math.floor(Math.random() * 1000)}`, cantidad: n };
+  backorders.push(nuevo);
+  return nuevo;
+}
+
 function nextRefSuffix(current) {
   const n = parseInt(current, 10);
   return Number.isFinite(n) ? String(n + 1) : "2";
@@ -1925,13 +1940,28 @@ export class InventoryStore {
     // ya preparado), pero no salió porque en realidad no estaba — vuelve a
     // pendiente en su proveedor con la referencia siguiente ("…2"). El stock
     // real NO se devuelve (no estaba); se apunta como vendido pendiente.
+    // `seleccion` opcional (Jennifer, 2026-09-29): [{ id, unidades }] — solo
+    // esas unidades no han salido; el resto sigue en la carga. Sin
+    // selección, todos los colchones del pedido.
     if (url.pathname === "/backorders/no-salio" && method === "POST") {
-      const { orderId } = await request.json();
+      const { orderId, seleccion } = await request.json();
       const backorders = await this.load("backorders", []);
       const stock = await this.load("stock", {});
-      const afectados = backorders.filter((b) => String(b.orderId) === String(orderId) && b.tipo === "colchon"
+      const esDeSeur = (b) => String(b.orderId) === String(orderId) && b.tipo === "colchon"
         && !b.reposicion && !b.gestoComercial
-        && (b.estado === "listo-seur" || (b.estado === "cubierto" && String(b.id).endsWith("-cubierto"))));
+        && (b.estado === "listo-seur" || (b.estado === "cubierto" && String(b.id).endsWith("-cubierto")));
+      let afectados;
+      if (Array.isArray(seleccion) && seleccion.length) {
+        afectados = [];
+        for (const { id, unidades } of seleccion) {
+          const entry = backorders.find((b) => b.id === id && esDeSeur(b));
+          const n = Math.min(Math.max(0, Math.floor(Number(unidades) || 0)), entry ? entry.cantidad : 0);
+          if (!entry || !n) continue;
+          afectados.push(separarUnidades(backorders, entry, n, "ns"));
+        }
+      } else {
+        afectados = backorders.filter(esDeSeur);
+      }
       if (!afectados.length) return Response.json({ ok: false, error: "Este pedido no tiene ningún colchón preparado o cubierto con stock para SEUR." }, { status: 409 });
       for (const entry of afectados) {
         const key = stockKey(entry.stockModel, entry.talla);
@@ -1952,7 +1982,52 @@ export class InventoryStore {
       }
       await this.state.storage.put("stock", stock);
       await this.state.storage.put("backorders", backorders);
-      return Response.json({ ok: true, afectados });
+      // ¿Le queda al pedido algo listo para SEUR? Si no, el pedido sale de
+      // la carga (lo hace OrdersStore, ver /api/pedidos/no-salio).
+      const quedanEnCarga = backorders.some(esDeSeur);
+      return Response.json({ ok: true, afectados, quedanEnCarga });
+    }
+    // Cancelar unidades de un pendiente (Jennifer, 2026-09-29: el cliente
+    // cancela una unidad de un pedido de varias).
+    const cancelarUnidadesMatch = url.pathname.match(/^\/backorders\/([^/]+)\/cancelar-unidades$/);
+    if (cancelarUnidadesMatch && method === "POST") {
+      const { unidades } = await request.json().catch(() => ({}));
+      const backorders = await this.load("backorders", []);
+      const entry = backorders.find((b) => b.id === decodeURIComponent(cancelarUnidadesMatch[1]));
+      if (!entry) return new Response("not found", { status: 404 });
+      if (!ESTADOS_ACTIVOS.has(entry.estado)) return Response.json({ ok: false, error: "Este pendiente ya no está activo." }, { status: 409 });
+      const n = Math.min(Math.max(1, Math.floor(Number(unidades) || entry.cantidad)), entry.cantidad);
+      const cancelado = await this.cancelarUnidadesDe(backorders, entry, n);
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, cancelado });
+    }
+    // Cancelar unidades de una LÍNEA del pedido (Jennifer, 2026-09-29): se
+    // cancelan sus pendientes activos (del artículo o, si es un pack, de sus
+    // componentes). Si no tiene ninguno (ej. ya enviado por el sistema
+    // antiguo), no se toca nada aquí — solo se anota en el pedido.
+    if (url.pathname === "/backorders/cancelar-por-item" && method === "POST") {
+      const { orderId, item, unidades } = await request.json();
+      const products = await this.load("products", {});
+      const backorders = await this.load("backorders", []);
+      const resolved = resolveItem(item || {}, products);
+      const objetivos = resolved.tipo === "pack"
+        ? resolved.componentes.map((c) => ({ stockModel: c.product.stockModel, talla: c.talla }))
+        : resolved.product ? [{ stockModel: resolved.product.stockModel, talla: resolved.talla }] : [];
+      const n = Math.max(1, Math.floor(Number(unidades) || 1));
+      const cancelados = [];
+      for (const obj of objetivos) {
+        let falta = n;
+        for (const entry of backorders.slice()) {
+          if (!falta) break;
+          if (String(entry.orderId) !== String(orderId) || !ESTADOS_ACTIVOS.has(entry.estado) || entry.reposicion || entry.gestoComercial) continue;
+          if (entry.stockModel !== obj.stockModel || entry.talla !== obj.talla) continue;
+          const m = Math.min(falta, entry.cantidad);
+          cancelados.push(await this.cancelarUnidadesDe(backorders, entry, m));
+          falta -= m;
+        }
+      }
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, cancelados });
     }
     const undoSeurMatch = url.pathname.match(/^\/backorders\/([^/]+)\/deshacer-seur$/);
     if (undoSeurMatch && method === "POST") {
@@ -2843,6 +2918,46 @@ export class InventoryStore {
   // deja de aparecer en las listas activas de Proveedores (que filtran por
   // estado "pendiente") sin perder el historial. Ver aviso de campanita en
   // index.js (getAvisosCancelados).
+  // Cancela `n` unidades de un pendiente (si son menos que las que tiene, se
+  // separan en un pendiente aparte) y deja el stock como debe quedar
+  // (Jennifer, 2026-09-29):
+  // - pendiente de fábrica (colchón): se quita del "vendido pendiente";
+  // - ya cubierto con stock o preparado para SEUR: vuelve al stock;
+  // - sacado de un abierto: vuelve a los abiertos;
+  // - transformado: no se devuelve nada (ya está cortado).
+  async cancelarUnidadesDe(backorders, entry, n) {
+    const e = separarUnidades(backorders, entry, n, "cx");
+    const stock = await this.load("stock", {});
+    const key = stockKey(e.stockModel, e.talla);
+    const row = stock[key] || { stockModel: e.stockModel, talla: e.talla, cantidad: 0, vendidoPendiente: 0 };
+    const mov = { stockModel: e.stockModel, talla: e.talla, origen: "cancelacion", orderNumber: e.orderNumber, platform: e.platform, orderRef: e.orderRef };
+    if (e.estado === "pendiente") {
+      if (e.tipo === "colchon") {
+        const antes = row.vendidoPendiente || 0;
+        row.vendidoPendiente = Math.max(0, antes - e.cantidad);
+        await this.logMovement({ ...mov, campo: "vendidoPendiente", delta: row.vendidoPendiente - antes, resultante: row.vendidoPendiente });
+      }
+    } else if (e.desdeAbierto) {
+      const abiertos = await this.load("abiertos", {});
+      const k = InventoryStore.claveAbierto(abiertos, e.stockModel, e.talla) || key;
+      const ab = abiertos[k] || { stockModel: e.stockModel, talla: e.talla, cantidad: 0, nota: "" };
+      ab.cantidad += e.cantidad;
+      abiertos[k] = ab;
+      await this.state.storage.put("abiertos", abiertos);
+      await this.logMovement({ ...mov, campo: "abiertos", delta: e.cantidad, resultante: ab.cantidad });
+    } else if (!e.transformadoDesde && (e.estado === "cubierto" || e.estado === "listo-seur") && e.tipo !== "tapiceria") {
+      row.cantidad = (row.cantidad || 0) + e.cantidad;
+      await this.logMovement({ ...mov, campo: "cantidad", delta: e.cantidad, resultante: row.cantidad });
+    }
+    stock[key] = row;
+    await this.state.storage.put("stock", stock);
+    e.estadoAntesDeCancelar = e.estado;
+    e.estado = "cancelado";
+    e.cargaId = null;
+    e.fechaCancelado = new Date().toISOString();
+    return e;
+  }
+
   async cancelBackorder(id) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
