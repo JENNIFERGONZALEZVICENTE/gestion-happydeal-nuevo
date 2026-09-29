@@ -1667,6 +1667,7 @@ function renderPage() {
      mínimo general de 1100px, y el texto largo pasa a la línea de abajo. Si
      aun así algo no cabe, el cuadro se puede desplazar en horizontal. */
   #view-seur .carga-abierta-box table, #view-historial-cargas-seur .carga-historial-card table { min-width: 0; }
+  .seur-readd-btn { padding: 5px 10px; font-size: 12px; margin: 2px 0; }
   .carga-abierta-box .table-wrap, .carga-historial-card .table-wrap { overflow-x: auto; max-width: calc(100% - 4rem); }
   .carga-historial-card .table-wrap { max-height: 420px; }
   /* Jennifer, 2026-09-29: "que toda la información entre a golpe de vista" —
@@ -2221,6 +2222,7 @@ function renderPage() {
   </div>
 
   <div id="seur-cargas-list"></div>
+  <div id="seur-fuera-carga"></div>
 </div>
 
 <div id="view-historial-cargas-seur" style="display:none">
@@ -2574,6 +2576,7 @@ document.addEventListener("click", async (e) => {
   alert("Hecho: " + refLabel(order) + " vuelve a pendiente en " + [...new Set(data.afectados.map(b => b.proveedor))].join("/") + " con la referencia " + refLabel(order) + data.afectados[0].refSuffix + ".");
   backorders = await (await fetch("/api/inventario/pendientes")).json();
   await loadOrders();
+  if (document.getElementById("view-seur").style.display !== "none") loadSeur();
   for (const p of platforms) {
     if (p.id !== "shopify" && document.getElementById("view-" + p.id) && document.getElementById("view-" + p.id).style.display !== "none") loadMarketplacePedidos(p.id);
   }
@@ -5875,7 +5878,50 @@ function renderSeurDecisionBox() {
   });
 }
 
+// Pedidos de SEUR sacados a mano de su carga (Jennifer, 2026-09-29): igual
+// que en Furniture, se quedan aquí para volver a meterlos en la carga de
+// hoy o de mañana, o marcar que no han salido (↩, vuelven al proveedor).
+function pedidosSeurFueraDeCarga() {
+  return allOrders.filter(o => o.agencia === "SEUR" && !o.cargaId && !o.cancelado && o.shippingStatus !== "fulfilled"
+    && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "cubierto" && String(b.id).endsWith("-cubierto")));
+}
+function renderSeurFueraCarga() {
+  const cont = document.getElementById("seur-fuera-carga");
+  const pedidos = pedidosSeurFueraDeCarga();
+  if (!pedidos.length) { cont.innerHTML = ""; return; }
+  cont.innerHTML = \`
+    <div class="carga-abierta-box tener-en-cuenta-box">
+      <div class="toolbar"><h3 style="margin:0">Pedidos de SEUR fuera de carga</h3></div>
+      <div class="inventario-count">\${pedidos.length} pedido(s) listos para SEUR que no están en ninguna carga</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th><th></th></tr></thead>
+          <tbody>\${pedidos.map(o => \`<tr>
+            \${seurOrderRowCells(o, "")}
+            <td>
+              <button type="button" class="secondary seur-readd-btn" data-order-id="\${escapeAttr(String(o.id))}" data-fecha="hoy">A la carga de hoy</button>
+              <button type="button" class="seur-readd-btn" data-order-id="\${escapeAttr(String(o.id))}" data-fecha="manana">A la carga de mañana</button>
+              \${noSalioButton(o)}
+            </td>
+          </tr>\`).join("")}</tbody>
+        </table>
+      </div>
+    </div>\`;
+  cont.querySelectorAll(".seur-readd-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const res = await fetch("/api/cargas/seur/add", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderIds: [btn.dataset.orderId], fecha: btn.dataset.fecha }),
+      });
+      if (!res.ok) { alert("No se ha podido añadir a la carga."); return; }
+      await loadOrders();
+      loadSeur();
+    });
+  });
+}
+
 function renderSeurCargas() {
+  renderSeurFueraCarga();
   const cargasAbiertas = allCargas.filter(c => c.tipo === "seur" && c.estado === "abierta").sort((a, b) => a.fecha.localeCompare(b.fecha));
   const cont = document.getElementById("seur-cargas-list");
   if (!cargasAbiertas.length) {
@@ -5890,7 +5936,9 @@ function renderSeurCargas() {
       return \`
       <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
         \${cells}
-        <td>\${backorderId ? \`<button type="button" class="quitar-seur-btn" data-id="\${backorderId}">\${quitarLabel}</button>\` : ""}</td>
+        <td>\${backorderId
+          ? \`<button type="button" class="quitar-seur-btn" data-id="\${backorderId}">\${quitarLabel}</button>\`
+          : \`<button type="button" class="sacar-carga-btn sacar-carga-seur-btn" data-order-id="\${escapeAttr(String(o.id))}">Sacar de la carga</button>\`}</td>
       </tr>
     \`;
     }).join("");
@@ -5921,6 +5969,17 @@ function renderSeurCargas() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ cargaId: carga.id }),
       });
+      loadSeur();
+    });
+  });
+  document.querySelectorAll(".sacar-carga-seur-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const order = allOrders.find(o => String(o.id) === btn.dataset.orderId);
+      if (!confirm("¿Sacar " + (order ? refLabel(order) : "este pedido") + " de la carga de SEUR?\\n\\nQuedará en \\"Pedidos de SEUR fuera de carga\\", abajo, para volver a meterlo en otra carga cuando quieras.")) return;
+      await fetch("/api/cargas/remove", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: order ? order.id : btn.dataset.orderId }),
+      });
+      if (order) order.cargaId = null;
       loadSeur();
     });
   });
@@ -7825,6 +7884,12 @@ async function handleFetch(request, env) {
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/cargas/add", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/cargas/seur/add" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/cargas/seur/add", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     if (url.pathname === "/api/cargas/remove" && request.method === "POST") {

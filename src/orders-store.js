@@ -701,6 +701,25 @@ export class OrdersStore {
       return Response.json({ ok: true, carga: abierta, añadidos });
     }
 
+    // Volver a meter en una carga de SEUR (hoy/mañana) un pedido que se sacó
+    // a mano (Jennifer, 2026-09-29: "quitar las cosas de la carga como en
+    // Furniture").
+    if (url.pathname === "/cargas/seur/add" && request.method === "POST") {
+      const { orderIds, fecha } = await request.json();
+      const carga = await getOrCreateCargaByFecha(this.state.storage, "seur", seurCargaDateFromChoice(fecha));
+      const orders = (await this.state.storage.get("orders")) || {};
+      let añadidos = 0;
+      for (const id of orderIds || []) {
+        const order = orders[id];
+        if (!order || order.cargaId) continue;
+        order.cargaId = carga.id;
+        añadidos++;
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, carga, añadidos });
+    }
+
     if (url.pathname === "/cargas/remove" && request.method === "POST") {
       const { orderId } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
