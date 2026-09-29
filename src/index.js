@@ -787,6 +787,9 @@ function mapMarketplaceOrder(entriesGrupo, catalogMap, platform) {
     // marca para revisar — antes era por fila, ahora por pedido completo.
     skuMatched: items.every((it) => it.productId != null),
     estado: first.estado,
+    // "Fecha límite de envío" de Mirakl (Jennifer, 2026-09-29): hasta
+    // cuándo hay que dar el seguimiento al cliente.
+    limiteEnvio: first.limiteEnvio || "",
   };
 }
 
@@ -1052,7 +1055,7 @@ function renderPage() {
   const navItems = PLATFORMS.map(
     (p) => `<li>
         <a href="#" class="nav-link${p.ready ? " active" : ""}" data-platform="${p.id}">
-          ${p.label}${p.ready ? "" : '<span class="soon">próx.</span>'}
+          ${p.label}${p.ready ? "" : '<span class="soon">próx.</span>'}${p.id !== "shopify" ? `<span id="plazo-badge-${p.id}" class="plazo-badge" style="display:none" title="Pedidos que vencen mañana, hoy o ya vencidos sin seguimiento"></span>` : ""}
         </a>
       </li>`
   ).join("");
@@ -1250,6 +1253,14 @@ function renderPage() {
   .badge.pendiente { background: #fef3c7; color: #92400e; }
   .badge.pago-pendiente { background: #fee2e2; color: #991b1b; }
   .badge.reembolsado { background: #ede9fe; color: #5b21b6; }
+  /* Fecha límite de envío de marketplaces (2026-09-29) */
+  .plazo-badge { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 6px; border-radius: 9px; background: #dc2626; color: #fff; font-size: 11px; font-weight: 700; text-align: center; line-height: 18px; }
+  .plazo-envio { display: inline-block; padding: 2px 7px; border-radius: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+  .plazo-vencido { background: #7f1d1d; color: #fff; border: 1px solid #450a0a; }
+  .plazo-rojo { background: #fee2e2; color: #991b1b; border: 1px solid #ef4444; }
+  .plazo-naranja { background: #ffedd5; color: #9a3412; border: 1px solid #f97316; }
+  .plazo-verde { background: #dcfce7; color: #146138; }
+  .plazo-hecho { background: #f3f4f6; color: #6b7280; font-weight: 500; }
   /* Colchones abiertos (2026-09-28): morado, distinto de la campana */
   .abiertos-badge { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 6px; border-radius: 9px; background: #7c3aed; color: #fff; font-size: 11px; font-weight: 700; text-align: center; line-height: 18px; }
   .abierto-box { margin-top: 4px; }
@@ -1810,6 +1821,7 @@ function renderPage() {
 <div id="view-carrefour" style="display:none">
   <div class="toolbar">
     <input id="carrefour-search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="carrefour-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="carrefour-upload-btn" class="secondary">Subir fichero de Carrefour</button>
     <input type="file" id="carrefour-upload-input" accept=".xlsx" style="display:none" />
     <span id="carrefour-upload-status" class="inventario-count" style="padding:0"></span>
@@ -1818,7 +1830,7 @@ function renderPage() {
   <div id="carrefour-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="carrefour-table">
-      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
+      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Límite envío</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -1827,6 +1839,7 @@ function renderPage() {
 <div id="view-maison-du-monde" style="display:none">
   <div class="toolbar">
     <input id="maison-du-monde-search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="maison-du-monde-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="maison-du-monde-upload-btn" class="secondary">Subir fichero de Maison Du Monde</button>
     <input type="file" id="maison-du-monde-upload-input" accept=".xlsx" style="display:none" />
     <span id="maison-du-monde-upload-status" class="inventario-count" style="padding:0"></span>
@@ -1835,7 +1848,7 @@ function renderPage() {
   <div id="maison-du-monde-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="maison-du-monde-table">
-      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
+      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Límite envío</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -1844,6 +1857,7 @@ function renderPage() {
 <div id="view-worten" style="display:none">
   <div class="toolbar">
     <input id="worten-search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="worten-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="worten-upload-btn" class="secondary">Subir fichero de Worten</button>
     <input type="file" id="worten-upload-input" accept=".xlsx" style="display:none" />
     <span id="worten-upload-status" class="inventario-count" style="padding:0"></span>
@@ -1852,7 +1866,7 @@ function renderPage() {
   <div id="worten-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="worten-table">
-      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
+      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Límite envío</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -1861,6 +1875,7 @@ function renderPage() {
 <div id="view-conforama" style="display:none">
   <div class="toolbar">
     <input id="conforama-search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="conforama-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="conforama-upload-btn" class="secondary">Subir fichero de Conforama</button>
     <input type="file" id="conforama-upload-input" accept=".xlsx" style="display:none" />
     <span id="conforama-upload-status" class="inventario-count" style="padding:0"></span>
@@ -1869,7 +1884,7 @@ function renderPage() {
   <div id="conforama-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="conforama-table">
-      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
+      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Límite envío</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -1878,6 +1893,7 @@ function renderPage() {
 <div id="view-conforama-es" style="display:none">
   <div class="toolbar">
     <input id="conforama-es-search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="conforama-es-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="conforama-es-upload-btn" class="secondary">Subir fichero de Conforama ES</button>
     <input type="file" id="conforama-es-upload-input" accept=".xlsx" style="display:none" />
     <span id="conforama-es-upload-status" class="inventario-count" style="padding:0"></span>
@@ -1886,7 +1902,7 @@ function renderPage() {
   <div id="conforama-es-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="conforama-es-table">
-      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
+      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Límite envío</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -1895,6 +1911,7 @@ function renderPage() {
 <div id="view-leroy-merlin" style="display:none">
   <div class="toolbar">
     <input id="leroy-merlin-search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="leroy-merlin-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="leroy-merlin-upload-btn" class="secondary">Subir fichero de Leroy Merlin</button>
     <input type="file" id="leroy-merlin-upload-input" accept=".xlsx" style="display:none" />
     <span id="leroy-merlin-upload-status" class="inventario-count" style="padding:0"></span>
@@ -1903,7 +1920,7 @@ function renderPage() {
   <div id="leroy-merlin-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="leroy-merlin-table">
-      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
+      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Límite envío</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -2368,6 +2385,50 @@ function parseFechaGenerica(fecha) {
   }
   const t = Date.parse(fecha);
   return Number.isNaN(t) ? 0 : t;
+}
+
+// Fecha límite de envío de los marketplaces (Jennifer, 2026-09-29): hasta
+// cuándo hay que dar el seguimiento al cliente. Solo cuenta mientras el
+// pedido sigue pendiente de envío y sin seguimiento. Colores: verde (2+
+// días), naranja (vence mañana), rojo (vence hoy), rojo oscuro (vencido).
+function plazoEnvioPendiente(o) {
+  if (!o || !o.limiteEnvio || o.platform === "Shopify" || o.cancelado) return false;
+  if (o.shippingStatus === "fulfilled") return false;
+  if (/enviado|recibido|cerrado|reembols|cancel|rechaz/i.test(o.estado || "")) return false;
+  if ((o.furnitureTracking || []).length || (o.seurTracking || []).length) return false;
+  return true;
+}
+function plazoEnvio(o) {
+  const t = parseFechaGenerica(o && o.limiteEnvio);
+  if (!t) return null;
+  const limite = new Date(t);
+  const fecha = limite.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
+  if (!plazoEnvioPendiente(o)) return { nivel: "hecho", texto: fecha + " ✓" };
+  const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+  const dia = new Date(limite); dia.setHours(0, 0, 0, 0);
+  const dias = Math.round((dia - hoy) / 86400000);
+  // Vencido en rojo OSCURO, distinto del rojo de "vence hoy" (Jennifer, 2026-09-29).
+  if (Date.now() > t) return { nivel: "vencido", texto: "VENCIDO " + fecha, dias };
+  if (dias <= 0) return { nivel: "rojo", texto: "VENCE HOY", dias };
+  if (dias === 1) return { nivel: "naranja", texto: "VENCE MAÑANA", dias };
+  return { nivel: "verde", texto: fecha + " · " + dias + " días", dias };
+}
+function plazoEnvioCell(o) {
+  const p = plazoEnvio(o);
+  if (!p) return "—";
+  return \`<span class="plazo-envio plazo-\${p.nivel}" title="Fecha límite de envío: \${escapeAttr(o.limiteEnvio)}">\${p.texto}</span>\`;
+}
+// Número rojo en el menú, por marketplace: pedidos que vencen mañana, hoy
+// o ya vencidos, sin seguimiento.
+function actualizarBadgesPlazo() {
+  for (const p of platforms) {
+    if (p.id === "shopify") continue;
+    const badge = document.getElementById("plazo-badge-" + p.id);
+    if (!badge) continue;
+    const n = allOrders.filter(o => o.platform === p.label && (() => { const x = plazoEnvio(o); return x && (x.nivel === "vencido" || x.nivel === "rojo" || x.nivel === "naranja"); })()).length;
+    badge.textContent = n;
+    badge.style.display = n ? "" : "none";
+  }
 }
 
 function statusBadge(status) {
@@ -2909,6 +2970,7 @@ function currentFiltered() {
 function applyFilter() {
   render(currentFiltered());
   actualizarBadgeAbiertos();
+  actualizarBadgesPlazo();
 }
 
 document.getElementById("search").addEventListener("input", applyFilter);
@@ -5378,6 +5440,8 @@ function parseMiraklFile(arrayBuffer) {
     // nada, quedando countryCode sin definir (mapMarketplaceOrder cae a
     // "ES" por defecto).
     pais: header.indexOf("Dirección de entrega: país"),
+    // Fecha máxima para dar el seguimiento al cliente (Jennifer, 2026-09-29).
+    limiteEnvio: header.indexOf("Fecha límite de envío"),
   };
   const entries = [];
   for (let i = 1; i < rows.length; i++) {
@@ -5400,6 +5464,7 @@ function parseMiraklFile(arrayBuffer) {
       province: String(row[idx.provincia] || "").trim(),
       phone: String(row[idx.telefono] || "").trim(),
       countryCode: paisToCountryCode(row[idx.pais]),
+      limiteEnvio: idx.limiteEnvio >= 0 ? excelSerialToFecha(row[idx.limiteEnvio]) : "",
     });
   }
   return entries;
@@ -5457,8 +5522,10 @@ function initMarketplacePlatform(platformId) {
     const data = await res.json();
     statusEl.textContent = data.actualizados + " pedidos actualizados · " + data.procesados + " procesados con descuento de stock" + (data.sinMatch ? " · " + data.sinMatch + " con SKU sin reconocer" : "");
     await loadMarketplacePedidos(platformId);
+    loadOrders(); // refresca el aviso rojo de fecha límite del menú
   });
   document.getElementById(platformId + "-search").addEventListener("input", () => renderMarketplace(platformId));
+  document.getElementById(platformId + "-orden-limite").addEventListener("change", () => renderMarketplace(platformId));
 }
 async function loadMarketplacePedidos(platformId) {
   const res = await fetch("/api/" + platformId + "/pedidos");
@@ -5476,9 +5543,15 @@ function renderMarketplace(platformId) {
   // 2026-09-21/25: "estos pedidos no se ordenan por número de pedido, sino
   // por la fecha de realización"). Se reordena aquí por la fecha real,
   // más reciente primero (misma convención que la tabla de Shopify).
+  const porLimite = document.getElementById(platformId + "-orden-limite").checked;
+  // "Primero los que vencen antes" (Jennifer, 2026-09-29): los pendientes de
+  // envío por fecha límite (el más urgente arriba), y el resto detrás.
+  const claveLimite = o => plazoEnvioPendiente(o) ? (parseFechaGenerica(o.limiteEnvio) || Infinity) : Infinity;
   const filtered = orders
     .filter(o => !q || (o.orderRef || "").toLowerCase().includes(q) || (o.name || "").toLowerCase().includes(q))
-    .sort((a, b) => parseFechaGenerica(b.orderDate) - parseFechaGenerica(a.orderDate));
+    .sort((a, b) => porLimite
+      ? (claveLimite(a) - claveLimite(b)) || (parseFechaGenerica(b.orderDate) - parseFechaGenerica(a.orderDate))
+      : parseFechaGenerica(b.orderDate) - parseFechaGenerica(a.orderDate));
   document.getElementById(platformId + "-count").textContent = filtered.length + " pedidos";
   const sinMatch = orders.filter(o => !o.skuMatched);
   const avisoEl = document.getElementById(platformId + "-sku-aviso");
@@ -5493,6 +5566,7 @@ function renderMarketplace(platformId) {
       <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}</div></td>
       <td>\${o.orderRef}</td>
       <td>\${o.orderDate || ""}</td>
+      <td>\${plazoEnvioCell(o)}</td>
       <td>\${o.name || ""}</td>
       <td>\${o.address || ""}</td>
       <td>\${o.postalCode || ""}</td>
