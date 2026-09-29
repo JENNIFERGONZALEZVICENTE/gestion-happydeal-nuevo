@@ -6983,8 +6983,11 @@ const PROVINCIA_POR_CP = {
   "46": "VALENCIA", "47": "VALLADOLID", "48": "VIZCAYA", "49": "ZAMORA", "50": "ZARAGOZA",
   "51": "CEUTA", "52": "MELILLA",
 };
+// Sin tildes (Jennifer, 2026-09-29: Furniture da error al subir "LEÓN",
+// "LÉRIDA"…) — la Ñ se mantiene (LA CORUÑA).
 function provinciaPorCp(postalCode) {
-  return PROVINCIA_POR_CP[(postalCode || "").slice(0, 2)] || "";
+  const p = PROVINCIA_POR_CP[(postalCode || "").slice(0, 2)] || "";
+  return p.replace(/Ñ/g, "\u0000").normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\u0000/g, "Ñ");
 }
 
 function nombreCortoProducto(stockModel) {
