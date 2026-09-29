@@ -1920,6 +1920,40 @@ export class InventoryStore {
       const { fecha } = await request.json();
       return this.resolveSeurBackorder(decodeURIComponent(resolveSeurMatch[1]), fecha);
     }
+    // "No ha salido" desde el propio pedido (Jennifer, 2026-09-29, caso
+    // Carrefour 76393184-A): el colchón iba por SEUR cubierto con stock (o
+    // ya preparado), pero no salió porque en realidad no estaba — vuelve a
+    // pendiente en su proveedor con la referencia siguiente ("…2"). El stock
+    // real NO se devuelve (no estaba); se apunta como vendido pendiente.
+    if (url.pathname === "/backorders/no-salio" && method === "POST") {
+      const { orderId } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const stock = await this.load("stock", {});
+      const afectados = backorders.filter((b) => String(b.orderId) === String(orderId) && b.tipo === "colchon"
+        && !b.reposicion && !b.gestoComercial
+        && (b.estado === "listo-seur" || (b.estado === "cubierto" && String(b.id).endsWith("-cubierto"))));
+      if (!afectados.length) return Response.json({ ok: false, error: "Este pedido no tiene ningún colchón preparado o cubierto con stock para SEUR." }, { status: 409 });
+      for (const entry of afectados) {
+        const key = stockKey(entry.stockModel, entry.talla);
+        const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
+        row.vendidoPendiente = (row.vendidoPendiente || 0) + entry.cantidad;
+        stock[key] = row;
+        await this.logMovement({
+          stockModel: entry.stockModel, talla: entry.talla, campo: "vendidoPendiente", delta: entry.cantidad,
+          resultante: row.vendidoPendiente, origen: "no-salio", orderNumber: entry.orderNumber,
+          platform: entry.platform, orderRef: entry.orderRef,
+        });
+        entry.estado = "pendiente";
+        entry.cargaId = null;
+        entry.recibidoFabrica = false;
+        entry.fechaRecibido = null;
+        entry.refSuffix = nextRefSuffix(entry.refSuffix);
+        entry.noSalio = new Date().toISOString();
+      }
+      await this.state.storage.put("stock", stock);
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, afectados });
+    }
     const undoSeurMatch = url.pathname.match(/^\/backorders\/([^/]+)\/deshacer-seur$/);
     if (undoSeurMatch && method === "POST") {
       return this.undoSeurBackorder(decodeURIComponent(undoSeurMatch[1]));

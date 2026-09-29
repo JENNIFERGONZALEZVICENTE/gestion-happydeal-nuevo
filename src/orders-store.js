@@ -35,7 +35,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -479,6 +479,25 @@ export class OrdersStore {
       return Response.json({ ok: true, agencia: order.agencia });
     }
 
+    // "No ha salido" (Jennifer, 2026-09-29): el pedido sale de su carga de
+    // SEUR y las etiquetas de SEUR ya registradas quedan anuladas (no
+    // cuentan como seguimiento ni salen en "Casos a revisar"). El colchón lo
+    // devuelve a pendiente InventoryStore (/backorders/no-salio).
+    if (url.pathname === "/orders/no-salio-seur" && request.method === "POST") {
+      const { orderId } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const carga = order.cargaId && cargas.find((c) => c.id === order.cargaId);
+      if (carga && carga.tipo === "seur") order.cargaId = null;
+      for (const t of order.seurTracking || []) t.anulado = true;
+      order.noSalioSeur = new Date().toISOString();
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+
     if (url.pathname === "/orders/unprocess" && request.method === "POST") {
       const { ids } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
@@ -847,6 +866,9 @@ export class OrdersStore {
           seguimiento: e.seguimiento, codigoSituacion: e.codigoSituacion, estado: e.estado,
           fechaSituacion: e.fechaSituacion, fechaCreacion: e.fechaCreacion, infoAdicional: e.infoAdicional,
           nota: idx >= 0 ? tracking[idx].nota : undefined,
+          // Una etiqueta anulada con "No ha salido" sigue anulada aunque
+          // vuelva a aparecer en el fichero de SEUR.
+          anulado: idx >= 0 ? tracking[idx].anulado : undefined,
         };
         if (idx >= 0) tracking[idx] = nuevaEntrada;
         else tracking.push(nuevaEntrada);
@@ -1009,6 +1031,7 @@ export class OrdersStore {
       for (const order of Object.values(orders)) {
         if (order.cancelado) continue;
         for (const t of order.seurTracking || []) {
+          if (t.anulado) continue; // envío que no llegó a salir ("No ha salido")
           const motivos = [];
           const estadoNorm = (t.estado || "").trim();
           if (ESTADOS_INMEDIATOS.some((e) => e.toLowerCase() === estadoNorm.toLowerCase())) {

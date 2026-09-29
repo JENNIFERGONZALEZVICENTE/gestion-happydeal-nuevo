@@ -1277,6 +1277,8 @@ function renderPage() {
     display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 6px;
     background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; white-space: nowrap;
   }
+  .no-salio-btn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 1px solid #fca5a5; border-radius: 6px; background: #fff; color: #b91c1c; font-size: 14px; font-weight: 700; cursor: pointer; }
+  .no-salio-btn:hover { background: #b91c1c; color: #fff; }
   .juntar-envio-btn {
     display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 3px;
     border: 1px solid var(--border); border-radius: 6px; background: #fff; color: #6b7280; cursor: pointer;
@@ -2395,7 +2397,7 @@ function plazoEnvioPendiente(o) {
   if (!o || !o.limiteEnvio || o.platform === "Shopify" || o.cancelado) return false;
   if (o.shippingStatus === "fulfilled") return false;
   if (/enviado|recibido|cerrado|reembols|cancel|rechaz/i.test(o.estado || "")) return false;
-  if ((o.furnitureTracking || []).length || (o.seurTracking || []).length) return false;
+  if ((o.furnitureTracking || []).length || (o.seurTracking || []).some(t => !t.anulado)) return false;
   return true;
 }
 function plazoEnvio(o) {
@@ -2527,6 +2529,43 @@ function juntarEnvioButton(order) {
   return \`<button type="button" class="\${cls}" data-juntar-id="\${order.id}" title="\${escapeAttr(title)}">\${JUNTAR_ICON}</button>\`;
 }
 
+// "No ha salido" (Jennifer, 2026-09-29, caso Carrefour 76393184-A): el
+// colchón iba por SEUR pero no salió — vuelve a pendiente en su proveedor
+// con referencia "…2". Solo si hay un colchón cubierto con stock o ya
+// preparado para SEUR.
+function colchonesSeurDelPedido(order) {
+  return backorders.filter(b => String(b.orderId) === String(order.id) && b.tipo === "colchon" && !b.reposicion && !b.gestoComercial
+    && (b.estado === "listo-seur" || (b.estado === "cubierto" && String(b.id).endsWith("-cubierto"))));
+}
+function noSalioButton(order) {
+  if (order.agencia !== "SEUR" || order.shippingStatus === "fulfilled" || order.cancelado) return "";
+  if (!colchonesSeurDelPedido(order).length) return "";
+  return \`<button type="button" class="no-salio-btn" data-no-salio-id="\${escapeAttr(String(order.id))}" title="El colchón NO ha salido: vuelve a pendiente en su proveedor con la referencia siguiente (…2)">↩</button>\`;
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-no-salio-id]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const order = allOrders.find(o => String(o.id) === btn.dataset.noSalioId);
+  if (!order) return;
+  const colchones = colchonesSeurDelPedido(order);
+  const texto = colchones.map(b => (b.cantidad || 1) + "x " + nombreCortoModelo(b.stockModel) + " " + b.talla + " (" + (b.proveedor || "?") + ")").join(", ");
+  if (!confirm("¿El colchón de " + refLabel(order) + " NO ha salido?\\n\\n" + texto
+    + "\\n\\nVuelve a pendiente en su proveedor con la referencia siguiente (…2), sale de la carga de SEUR y la etiqueta ya registrada queda anulada. El stock no se devuelve (se entiende que no estaba).")) return;
+  const res = await fetch("/api/pedidos/no-salio", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: order.id }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { alert(data.error || "No se ha podido marcar como no salido."); return; }
+  alert("Hecho: " + refLabel(order) + " vuelve a pendiente en " + [...new Set(data.afectados.map(b => b.proveedor))].join("/") + " con la referencia " + refLabel(order) + data.afectados[0].refSuffix + ".");
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  await loadOrders();
+  for (const p of platforms) {
+    if (p.id !== "shopify" && document.getElementById("view-" + p.id) && document.getElementById("view-" + p.id).style.display !== "none") loadMarketplacePedidos(p.id);
+  }
+}, true);
+
 function cancelButton(order) {
   const cls = order.cancelado ? "cancel-btn cancelado" : "cancel-btn";
   const icon = order.cancelado ? CANCEL_ICON_UNDO : CANCEL_ICON_X;
@@ -2579,6 +2618,8 @@ function estadoSeguimientoEspecial(estado) {
   return null;
 }
 function trackingCell(order) {
+  // Las etiquetas de SEUR anuladas con "No ha salido" no cuentan.
+  order = { ...order, seurTracking: (order.seurTracking || []).filter(t => !t.anulado) };
   const especial = estadoSeguimientoEspecial(order.estado);
   if (especial) return \`<span class="tracking-link tracking-sin-link">\${especial}</span>\`;
   const furniture = (order.furnitureTracking || []).map(e => {
@@ -2652,7 +2693,7 @@ function render(orders) {
   const tbody = document.querySelector("#orders tbody");
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
-      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}</div></td>
+      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}\${noSalioButton(o)}</div></td>
       <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
@@ -5563,7 +5604,7 @@ function renderMarketplace(platformId) {
   }
   document.querySelector("#" + platformId + "-table tbody").innerHTML = filtered.map(o => \`
     <tr\${(o.cancelado || estadoSeguimientoEspecial(o.estado) === "CANCELADO") ? ' class="fila-cancelada"' : ""}>
-      <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}</div></td>
+      <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${noSalioButton(o)}</div></td>
       <td>\${o.orderRef}</td>
       <td>\${o.orderDate || ""}</td>
       <td>\${plazoEnvioCell(o)}</td>
@@ -7622,6 +7663,17 @@ async function handleFetch(request, env) {
       const { order } = await res.json();
       await handleUpsertOrder(order, env);
       return Response.json({ ok: true, orderNumber: order.order_number });
+    }
+
+    // "No ha salido" (Jennifer, 2026-09-29): el colchón vuelve a pendiente en
+    // su proveedor con referencia "…2" y el pedido sale de la carga de SEUR.
+    if (url.pathname === "/api/pedidos/no-salio" && request.method === "POST") {
+      const body = await request.text();
+      const res = await inventoryStub(env).fetch("https://do/backorders/no-salio", { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) return Response.json(data, { status: res.status || 500 });
+      await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders/no-salio-seur", { method: "POST", body });
+      return Response.json(data);
     }
 
     const grupoEnvioMatch = url.pathname.match(/^\/api\/pedidos\/shopify\/grupo-envio\/(vincular|desvincular)$/);
