@@ -1662,6 +1662,13 @@ function renderPage() {
   .furniture-pendiente-tag { display: block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #fef3c7; color: #92400e; }
   .carga-abierta-box .toolbar { padding: 1rem 1rem 0.25rem; }
   .carga-abierta-box .table-wrap { max-height: 320px; }
+  /* Cargas de SEUR (Jennifer, 2026-09-29: "el cuadro se corta"): la tabla
+     solo tiene 6 columnas, así que se ajusta al ancho del cuadro en vez del
+     mínimo general de 1100px, y el texto largo pasa a la línea de abajo. Si
+     aun así algo no cabe, el cuadro se puede desplazar en horizontal. */
+  #view-seur .carga-abierta-box table, #view-historial-cargas-seur .carga-historial-card table { min-width: 0; }
+  .carga-abierta-box .table-wrap, .carga-historial-card .table-wrap { overflow-x: auto; max-width: calc(100% - 4rem); }
+  .carga-historial-card .table-wrap { max-height: 420px; }
   #furniture-pendientes-toolbar { padding-top: 1.5rem; }
   .seur-decision-card { margin: 0 1rem 0.75rem; padding: 0.75rem 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
   .seur-decision-card ul { margin: 0.4rem 0; padding-left: 1.2rem; font-size: 13px; color: var(--muted); }
