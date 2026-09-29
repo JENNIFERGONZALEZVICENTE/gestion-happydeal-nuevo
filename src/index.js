@@ -2462,6 +2462,10 @@ const PLAZO_LIMITE_DESDE = { "Carrefour": "2026-09-29" };
 const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24" };
 function plazoEnvioActivo(o) {
   if (!o || !o.limiteEnvio) return false;
+  // Sin aviso mientras el cliente no ha pagado (Jennifer, 2026-09-29:
+  // "si está en pendiente de verificación de fraude no me tienes que
+  // informar... solo cuando está pendiente de envío").
+  if (/fraude|pago|d[eé]bito/i.test(o.estado || "")) return false;
   const pedidosDesde = PLAZO_PEDIDOS_DESDE[o.platform];
   if (pedidosDesde) {
     const tp = parseFechaGenerica(o.orderDate);
