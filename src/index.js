@@ -29,10 +29,11 @@ const PROCESAMIENTO_DESDE = {
   // verdad el cruce de seguimiento de Furniture/SEUR contra pedidos reales
   // de estas dos tiendas, no solo los que lleguen desde hoy.
   "Maison Du Monde": "2026-09-13",
-  // Desactivado (Jennifer, 2026-09-29): "con la información que suba no
-  // hagas nada de nada, solo que se actualicen los pedidos" — los
-  // pendientes los dice ella a mano. Antes: "2026-09-13".
-  Worten: "2099-12-31",
+  // Reactivado (Jennifer, 2026-09-29): "a partir de este pedido 83752933-A
+  // (24/09 21:09, único de ese día, ya con su pendiente manual) todos se
+  // van a tramitar con normalidad". Lo anterior se dejó pendiente a mano.
+  // Antes: "2099-12-31" (desactivado un rato), y antes "2026-09-13".
+  Worten: "2026-09-24",
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para poder probar de
   // verdad estas dos tiendas con pedidos reales, igual que se hizo con
   // Maison/Worten. Conforama Francia no tenía ningún pedido tras el 13/09
@@ -2462,7 +2463,8 @@ const PLAZO_LIMITE_DESDE = { "Carrefour": "2026-09-29" };
 // Corte por FECHA DEL PEDIDO en vez de por fecha límite (Jennifer,
 // 2026-09-29, Conforama ES: "que el aviso sobre el vencimiento sea solo
 // visible en los pedidos a partir del día 24/09").
-const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24" };
+// Worten desde 83706555-A (18/09, único pedido de ese día).
+const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18" };
 function plazoEnvioActivo(o) {
   if (!o || !o.limiteEnvio) return false;
   // Sin aviso mientras el cliente no ha pagado (Jennifer, 2026-09-29:
