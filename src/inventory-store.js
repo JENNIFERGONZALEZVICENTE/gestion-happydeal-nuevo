@@ -804,6 +804,14 @@ export function textoConFormato160(texto, formato) {
   return formato ? `${limpio}${limpio ? " · " : ""}FORMATO: ${formato}` : limpio;
 }
 
+// ¿`grande` es una medida mayor que `pequena` en ancho Y largo (y distinta)?
+// Un colchón solo se puede transformar cortándolo (Jennifer, 2026-09-29).
+export function esMedidaMayor(grande, pequena) {
+  const dims = (t) => { const m = String(t || "").toUpperCase().match(/^(\d+)X(\d+)$/); return m ? [Number(m[1]), Number(m[2])] : null; };
+  const g = dims(grande), p = dims(pequena);
+  return !!(g && p && g[0] >= p[0] && g[1] >= p[1] && (g[0] > p[0] || g[1] > p[1]));
+}
+
 function matchCanapeRecipeKey(title) {
   const t = normalizeKey(title);
   if (t.includes("esquinas curvas")) return "zenit";
@@ -3021,9 +3029,11 @@ export class InventoryStore {
     // Transformar (Jennifer, 2026-09-28): el MISMO modelo en otra medida con
     // stock real, que se adapta a la medida vendida (ej. un Zen Natural
     // 160x190 transformado en el 150x190 pendiente).
+    // Solo medidas MAYORES (Jennifer, 2026-09-29, caso BEZEN12242): un
+    // colchón se puede cortar a más pequeño, nunca agrandar.
     const tallaNum = (t) => (t || "").split("X").map(Number);
     const transformables = Object.values(stock)
-      .filter((row) => row.stockModel === entry.stockModel && row.talla !== entry.talla && row.cantidad > 0)
+      .filter((row) => row.stockModel === entry.stockModel && row.cantidad > 0 && esMedidaMayor(row.talla, entry.talla))
       .map((row) => ({ talla: row.talla, cantidad: row.cantidad }))
       .sort((a, b) => tallaNum(a.talla)[0] - tallaNum(b.talla)[0] || tallaNum(a.talla)[1] - tallaNum(b.talla)[1]);
     const viaSeur = await this.decideSustitucionViaSeur(entry);
@@ -3068,8 +3078,8 @@ export class InventoryStore {
       return Response.json({ ok: false, error: "Indica una talla válida." }, { status: 400 });
     }
     talla = tallaNorm;
-    if (transformar && talla === entry.talla) {
-      return Response.json({ ok: false, error: "Para transformar, elige una medida distinta de la vendida." }, { status: 400 });
+    if (transformar && !esMedidaMayor(talla, entry.talla)) {
+      return Response.json({ ok: false, error: `Solo se puede transformar un colchón MÁS GRANDE en uno más pequeño: ${talla} no sirve para ${entry.talla}.` }, { status: 400 });
     }
     const origenMovimiento = transformar ? "transformacion" : "sustitucion";
 
