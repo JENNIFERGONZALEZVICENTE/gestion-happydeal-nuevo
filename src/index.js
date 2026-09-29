@@ -46,11 +46,14 @@ const PROCESAMIENTO_DESDE = {
   // empieza a tener sentido que el motor normal se encargue; todo lo
   // anterior ya está gestionado y no debe volver a descontar stock ni pedir
   // a proveedor. Antes: "2026-09-13".
-  // Desactivado (Jennifer, 2026-09-29): "no quiero que gestiones nada nuevo
-  // porque ya se ha gestionado todo de manera manual" — el fichero solo
-  // actualiza el listado. Para reactivar, poner la fecha desde la que tramitar
-  // (antes: "2026-09-21").
-  "Conforama ES": "2099-12-31",
+  // Reactivado (Jennifer, 2026-09-29): "a partir de los pedidos que entren a
+  // raíz de MP9992626800277699-A (25/09 17:02, ya tramitado) ya se pueden
+  // tramitar con normalidad". El 25/09 también incluye MP9992626800277698-A
+  // (17:02:05, pendiente de verificación de fraude): se tramita solo cuando
+  // pase a un estado elegible (MARKETPLACE_ESTADOS_ELEGIBLES). Lo anterior
+  // se gestionó a mano (pendientes creados con crear-pendiente-manual).
+  // Antes: "2099-12-31" (desactivado), y antes "2026-09-21".
+  "Conforama ES": "2026-09-25",
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para procesar todo el
   // histórico real de prueba (95 pedidos desde el 24/06).
   "Leroy Merlin": "2026-06-24",
@@ -2453,9 +2456,19 @@ function parseFechaGenerica(fecha) {
 // ("para el resto de plataformas te iré diciendo según las vayamos
 // trabajando"). Formato AAAA-MM-DD.
 const PLAZO_LIMITE_DESDE = { "Carrefour": "2026-09-29" };
+// Corte por FECHA DEL PEDIDO en vez de por fecha límite (Jennifer,
+// 2026-09-29, Conforama ES: "que el aviso sobre el vencimiento sea solo
+// visible en los pedidos a partir del día 24/09").
+const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24" };
 function plazoEnvioActivo(o) {
-  const desde = o && PLAZO_LIMITE_DESDE[o.platform];
-  if (!desde || !o.limiteEnvio) return false;
+  if (!o || !o.limiteEnvio) return false;
+  const pedidosDesde = PLAZO_PEDIDOS_DESDE[o.platform];
+  if (pedidosDesde) {
+    const tp = parseFechaGenerica(o.orderDate);
+    return !!tp && tp >= new Date(pedidosDesde + "T00:00:00").getTime();
+  }
+  const desde = PLAZO_LIMITE_DESDE[o.platform];
+  if (!desde) return false;
   const t = parseFechaGenerica(o.limiteEnvio);
   return !!t && t >= new Date(desde + "T00:00:00").getTime();
 }
