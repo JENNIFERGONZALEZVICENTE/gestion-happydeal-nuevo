@@ -845,9 +845,12 @@ export class OrdersStore {
       // TODOS los pedidos del grupo — si no, el otro (ej. BEZEN12233) se
       // quedaría pendiente de envío para siempre, aquí y en Shopify.
       const destinos = [];
+      // Detalle para el reporte descargable (Jennifer, 2026-09-29).
+      const sinPedidoDetalle = [];
+      const actualizadosDetalle = [];
       for (const e of entries || []) {
         const principal = byOrderNumber.get(e.orderNumber);
-        if (!principal) { sinPedido++; continue; }
+        if (!principal) { sinPedido++; sinPedidoDetalle.push({ albaran: e.albaran, orderNumberDetectado: e.orderNumber, estado: e.estado }); continue; }
         const grupo = principal.grupoEnvio
           ? Object.values(orders).filter((o) => o.grupoEnvio === principal.grupoEnvio)
           : [principal];
@@ -857,9 +860,14 @@ export class OrdersStore {
         const tracking = order.furnitureTracking || [];
         const idx = tracking.findIndex((t) => t.albaran === e.albaran);
         const esNuevo = idx < 0;
+        // Si la vez anterior falló el envío a Shopify (Jennifer, 2026-09-29),
+        // se reintenta al volver a subir el fichero aunque el albarán ya se
+        // conozca.
+        const errorAnterior = idx >= 0 ? tracking[idx].shopifyError : undefined;
         const nuevaEntrada = {
           albaran: e.albaran, estado: e.estado, fechaAlmacen: e.fechaAlmacen,
           fechaPrevista: e.fechaPrevista, seguimiento: e.seguimiento, tipo: e.tipo,
+          shopifyError: errorAnterior,
           // La nota de seguimiento de "Casos a revisar" es manual, no viene
           // del fichero — se conserva al actualizar (Jennifer, 2026-09-16).
           nota: idx >= 0 ? tracking[idx].nota : undefined,
@@ -868,8 +876,9 @@ export class OrdersStore {
         else tracking.push(nuevaEntrada);
         order.furnitureTracking = tracking;
         pedidosTocados.add(e.orderNumber);
+        actualizadosDetalle.push({ orderNumber: e.orderNumber, albaran: e.albaran, nombre: order.name || "", estado: e.estado, nuevo: esNuevo });
         if (
-          esNuevo && order.platform === "Shopify" &&
+          (esNuevo || errorAnterior) && order.platform === "Shopify" &&
           !order.cancelado && order.shippingStatus !== "cancelado" &&
           (order.paymentStatus === "PAGADO" || order.pagoConfirmadoManual) && e.seguimiento
         ) {
@@ -881,7 +890,21 @@ export class OrdersStore {
       }
       await this.state.storage.put("orders", orders);
       this.broadcast();
-      return Response.json({ ok: true, actualizados: pedidosTocados.size, sinPedido, paraShopify });
+      return Response.json({ ok: true, actualizados: pedidosTocados.size, sinPedido, sinPedidoDetalle, actualizadosDetalle, paraShopify });
+    }
+
+    // Resultado del envío a Shopify de un albarán de Furniture (Jennifer,
+    // 2026-09-29): { orderNumber, albaran, error } — error null lo borra.
+    if (url.pathname === "/orders/furniture-shopify-error" && request.method === "POST") {
+      const { orderNumber, albaran, error } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = Object.values(orders).find((o) => o.orderNumber === orderNumber);
+      const t = order && (order.furnitureTracking || []).find((x) => x.albaran === albaran);
+      if (!t) return new Response("not found", { status: 404 });
+      if (error) t.shopifyError = error; else delete t.shopifyError;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true });
     }
 
     // Seguimiento de SEUR (Jennifer, 2026-09-16): mismo mecanismo que el de

@@ -524,10 +524,24 @@ async function procesarFulfillmentsShopify(env, paraShopify) {
       }
       enviados++;
     } else {
-      errores.push({ orderNumber: c.orderNumber, reason: resultado.reason, detail: resultado.detail });
+      errores.push({ orderNumber: c.orderNumber, albaran: c.trackingNumber, reason: resultado.reason, detail: resultado.detail });
     }
   }
   return { activo: true, enviados, errores };
+}
+
+// Guarda en cada albarán de Furniture si falló el envío a Shopify (y lo
+// borra si salió bien), para reintentarlo en la siguiente subida
+// (Jennifer, 2026-09-29).
+async function marcarErroresShopifyFurniture(env, candidatos, errores) {
+  const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  for (const c of candidatos || []) {
+    const err = (errores || []).find((x) => x.orderNumber === c.orderNumber && x.albaran === c.trackingNumber);
+    await stub.fetch("https://do/orders/furniture-shopify-error", {
+      method: "POST",
+      body: JSON.stringify({ orderNumber: c.orderNumber, albaran: c.trackingNumber, error: err ? [err.reason, err.detail].filter(Boolean).join(": ").slice(0, 500) : null }),
+    });
+  }
 }
 
 // Notas internas de Sergio (Jennifer, 2026-09-21): pedidos que solo sirven
@@ -2102,6 +2116,7 @@ function renderPage() {
       <button type="button" id="tracking-upload-btn" class="secondary">Actualizar seguimiento Furniture</button>
       <input type="file" id="tracking-upload-input" accept=".xls,.htm,.html" style="display:none" />
       <span id="tracking-upload-status" class="inventario-count" style="padding:0"></span>
+      <button type="button" id="tracking-report-btn" class="secondary" style="display:none">Descargar reporte de esta subida</button>
     </div>
     <div id="carga-abierta-count" class="inventario-count"></div>
     <div class="table-wrap">
@@ -5545,13 +5560,14 @@ function parseFurnitureTrackingFile(text) {
   const filas = [...doc.querySelectorAll("tr")].filter(tr => tr.querySelector("td"));
   const entries = [];
   let sinMatch = 0;
+  const sinMatchDetalle = [];
   const knownOrderNumbers = new Set(allOrders.map(o => o.orderNumber));
   for (const tr of filas) {
     const tds = [...tr.querySelectorAll("td")];
     if (tds.length < 18) continue;
     const albaran = (tds[0].textContent || "").trim();
     const orderNumber = extractTrackingOrderNumber(albaran, knownOrderNumbers);
-    if (orderNumber == null) { sinMatch++; continue; }
+    if (orderNumber == null) { sinMatch++; sinMatchDetalle.push(albaran); continue; }
     const linkEl = tds[17].querySelector("a");
     entries.push({
       orderNumber,
@@ -5563,8 +5579,46 @@ function parseFurnitureTrackingFile(text) {
       tipo: trackingTipoDeAlbaran(albaran, orderNumber),
     });
   }
-  return { entries, sinMatch };
+  return { entries, sinMatch, sinMatchDetalle };
 }
+// Reporte de la subida de seguimiento de Furniture (Jennifer, 2026-09-29:
+// "necesito poder descargar un archivo para ver los errores").
+let ultimoReporteFurniture = null;
+const MOTIVOS_SHOPIFY = {
+  update_tracking_error: "Shopify no dejó actualizar el seguimiento del envío que ya existía",
+  fulfillment_create_error: "Shopify no dejó marcar el pedido como enviado",
+  sin_fulfillment_order_abierto: "En Shopify el pedido no tiene nada pendiente de enviar (¿ya marcado como enviado a mano?)",
+  sin_fulfillment_previo_guardado: "El pedido ya estaba enviado en Shopify, pero no tenemos guardado ese envío para añadirle el seguimiento",
+  fulfillment_orders_error: "No se pudo leer el pedido en Shopify",
+};
+function construirFilasReporteFurniture(sinMatchDetalle, data) {
+  const filas = [];
+  const errores = (data.shopify && data.shopify.errores) || [];
+  for (const r of errores) {
+    const pedido = allOrders.find(o => o.orderNumber === r.orderNumber);
+    filas.push({ Estado: "ERROR AL ENVIAR A SHOPIFY", "Albarán": r.albaran || "", "Nº Pedido": r.orderNumber, Cliente: pedido ? pedido.name : "",
+      Motivo: MOTIVOS_SHOPIFY[r.reason] || r.reason || "", "Detalle de Shopify": r.detail || "" });
+  }
+  for (const a of sinMatchDetalle || []) {
+    filas.push({ Estado: "SIN REFERENCIA RECONOCIBLE", "Albarán": a, "Nº Pedido": "", Cliente: "", Motivo: "No se pudo sacar ningún número de pedido de este albarán", "Detalle de Shopify": "" });
+  }
+  for (const r of data.sinPedidoDetalle || []) {
+    filas.push({ Estado: "SIN PEDIDO CORRESPONDIENTE", "Albarán": r.albaran, "Nº Pedido": r.orderNumberDetectado ?? "", Cliente: "", Motivo: "No existe ningún pedido con ese número en el sistema", "Detalle de Shopify": "" });
+  }
+  for (const r of data.actualizadosDetalle || []) {
+    if (errores.some(x => x.orderNumber === r.orderNumber && x.albaran === r.albaran)) continue;
+    filas.push({ Estado: "ACTUALIZADO", "Albarán": r.albaran, "Nº Pedido": r.orderNumber, Cliente: r.nombre || "", Motivo: (r.nuevo ? "Envío nuevo" : "Actualización de un envío ya conocido") + (r.estado ? " · " + r.estado : ""), "Detalle de Shopify": "" });
+  }
+  return filas;
+}
+document.getElementById("tracking-report-btn").addEventListener("click", () => {
+  if (!ultimoReporteFurniture || !ultimoReporteFurniture.length) return;
+  const ws = XLSX.utils.json_to_sheet(ultimoReporteFurniture);
+  ws["!cols"] = [{ wch: 28 }, { wch: 18 }, { wch: 11 }, { wch: 28 }, { wch: 60 }, { wch: 80 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Seguimiento Furniture");
+  XLSX.writeFile(wb, "Reporte_Furniture_" + new Date().toISOString().slice(0, 10) + ".xlsx");
+});
 document.getElementById("tracking-upload-btn").addEventListener("click", () => {
   document.getElementById("tracking-upload-input").click();
 });
@@ -5573,9 +5627,11 @@ document.getElementById("tracking-upload-input").addEventListener("change", asyn
   e.target.value = "";
   if (!file) return;
   const statusEl = document.getElementById("tracking-upload-status");
+  const reportBtn = document.getElementById("tracking-report-btn");
+  reportBtn.style.display = "none";
   statusEl.textContent = "Leyendo archivo...";
   const text = await file.text();
-  const { entries, sinMatch } = parseFurnitureTrackingFile(text);
+  const { entries, sinMatch, sinMatchDetalle } = parseFurnitureTrackingFile(text);
   if (!entries.length) {
     statusEl.textContent = "No se reconoció ninguna referencia de pedido en el archivo.";
     return;
@@ -5593,6 +5649,8 @@ document.getElementById("tracking-upload-input").addEventListener("change", asyn
     if (data.shopify.errores && data.shopify.errores.length) msg += " · " + data.shopify.errores.length + " con error al enviar a Shopify";
   }
   statusEl.textContent = msg;
+  ultimoReporteFurniture = construirFilasReporteFurniture(sinMatchDetalle, data);
+  reportBtn.style.display = ultimoReporteFurniture.length ? "" : "none";
   await loadOrders();
 });
 
@@ -8259,8 +8317,31 @@ async function handleFetch(request, env) {
       const res = await stub.fetch("https://do/orders/tracking-import", { method: "POST", body: await request.text() });
       const data = await res.json();
       const shopify = await procesarFulfillmentsShopify(env, data.paraShopify);
+      if (shopify.activo) await marcarErroresShopifyFurniture(env, data.paraShopify, shopify.errores);
       delete data.paraShopify;
       return Response.json({ ...data, shopify });
+    }
+
+    // Reintenta a mano el envío a Shopify del último albarán de Furniture
+    // de un pedido y devuelve el error real de Shopify si lo hay (Jennifer,
+    // 2026-09-29). { numero }
+    if (url.pathname === "/api/pedidos/shopify/admin/reintentar-furniture" && request.method === "POST") {
+      const { numero } = await request.json();
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const orders = await stub.fetch("https://do/orders").then((r) => r.json());
+      const order = orders.find((o) => o.orderNumber === Number(numero));
+      const t = order && [...(order.furnitureTracking || [])].reverse().find((x) => x.seguimiento);
+      if (!t) return Response.json({ ok: false, reason: "sin_albaran_con_seguimiento" }, { status: 404 });
+      const c = {
+        orderId: order.id, orderNumber: order.orderNumber, trackingNumber: t.albaran, trackingUrl: t.seguimiento, company: "FURNITURE",
+        primerEnvio: !order.shopifyFulfilled, fulfillmentId: order.shopifyFulfillmentId || null,
+      };
+      const resultado = await shopifyFulfillOrder(env, c);
+      if (resultado.ok && c.primerEnvio) {
+        await stub.fetch("https://do/orders/shopify-fulfilled", { method: "POST", body: JSON.stringify({ id: order.id, fulfillmentId: resultado.fulfillmentId }) });
+      }
+      await marcarErroresShopifyFurniture(env, [c], resultado.ok ? [] : [{ orderNumber: c.orderNumber, albaran: c.trackingNumber, reason: resultado.reason, detail: resultado.detail }]);
+      return Response.json({ ...resultado, candidato: { ...c, trackingUrl: undefined } });
     }
 
     if (url.pathname === "/api/furniture/casos-revisar" && request.method === "GET") {
