@@ -7062,8 +7062,9 @@ function piezasBackorder(b, productoTexto, tapaPartida, servicios) {
   }
   // Colchón / almohada / topper / protector: sin referencia, formato
   // "{PREFIJO} {n}/{total} {MODELO CORTO} {MEDIDA}" cuando hay 2+ iguales.
-  const prefijo = b.tipo === "almohada" ? "ALMOHADA" : "COLCHÓN";
-  const corto = nombreCortoProducto(stockModel);
+  const prefijo = { almohada: "ALMOHADA", protector: "PROTECTOR", topper: "TOPPER" }[b.tipo] || "COLCHÓN";
+  // Sin repetir la palabra: "PROTECTOR Impermeable Pronébula", no "PROTECTOR Protector…".
+  const corto = nombreCortoProducto(stockModel).replace(/^(protector|topper)\s+/i, "");
   const base = `${corto} ${b.talla || ""}`.trim();
   const cantidad = b.cantidad || 1;
   if (cantidad <= 1) return [{ parte: prefijo, texto: `${prefijo} ${base}`.trim() }];
