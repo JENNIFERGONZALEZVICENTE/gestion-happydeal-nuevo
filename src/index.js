@@ -2420,14 +2420,27 @@ function parseFechaGenerica(fecha) {
 // cuándo hay que dar el seguimiento al cliente. Solo cuenta mientras el
 // pedido sigue pendiente de envío y sin seguimiento. Colores: verde (2+
 // días), naranja (vence mañana), rojo (vence hoy), rojo oscuro (vencido).
+// Corte por plataforma (Jennifer, 2026-09-29): solo cuenta la fecha límite
+// de los pedidos con límite a partir de esta fecha, para que no salga nada
+// antiguo. Una plataforma que no esté aquí NO muestra fecha límite todavía
+// ("para el resto de plataformas te iré diciendo según las vayamos
+// trabajando"). Formato AAAA-MM-DD.
+const PLAZO_LIMITE_DESDE = { "Carrefour": "2026-09-29" };
+function plazoEnvioActivo(o) {
+  const desde = o && PLAZO_LIMITE_DESDE[o.platform];
+  if (!desde || !o.limiteEnvio) return false;
+  const t = parseFechaGenerica(o.limiteEnvio);
+  return !!t && t >= new Date(desde + "T00:00:00").getTime();
+}
 function plazoEnvioPendiente(o) {
-  if (!o || !o.limiteEnvio || o.platform === "Shopify" || o.cancelado) return false;
+  if (!o || !plazoEnvioActivo(o) || o.platform === "Shopify" || o.cancelado) return false;
   if (o.shippingStatus === "fulfilled") return false;
   if (/enviado|recibido|cerrado|reembols|cancel|rechaz/i.test(o.estado || "")) return false;
   if ((o.furnitureTracking || []).length || (o.seurTracking || []).some(t => !t.anulado)) return false;
   return true;
 }
 function plazoEnvio(o) {
+  if (!plazoEnvioActivo(o)) return null;
   const t = parseFechaGenerica(o && o.limiteEnvio);
   if (!t) return null;
   const limite = new Date(t);
