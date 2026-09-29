@@ -2227,6 +2227,32 @@ export class InventoryStore {
     // backorder.cargaId (ya existía, mismo campo que usa SEUR para sus
     // propias cargas), NUNCA order.cargaId, para no atarla al estado de
     // envío del resto del pedido original.
+    // "Enviar aparte" en Furniture (Jennifer, 2026-09-29): un artículo de un
+    // pedido (ej. el cabecero) se separa del resto y sale más tarde como
+    // línea propia con la referencia del pedido terminada en 2 — mismo
+    // mecanismo que las reposiciones (su propia carga, backorder.cargaId).
+    // aparte:false lo vuelve a juntar con el pedido.
+    const envioAparteMatch = url.pathname.match(/^\/backorders\/([^/]+)\/envio-aparte$/);
+    if (envioAparteMatch && method === "POST") {
+      const { aparte } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const b = backorders.find((x) => x.id === decodeURIComponent(envioAparteMatch[1]));
+      if (!b) return Response.json({ ok: false, error: "Artículo no encontrado." }, { status: 404 });
+      if (b.reposicion || b.gestoComercial) return Response.json({ ok: false, error: "Las reposiciones y gestos comerciales ya van aparte." }, { status: 409 });
+      if (aparte && !b.envioAparte) {
+        b.refSuffixAntesAparte = b.refSuffix || "";
+        b.refSuffix = nextRefSuffix(b.refSuffix);
+        b.envioAparte = true;
+        b.cargaId = null;
+      } else if (!aparte && b.envioAparte) {
+        b.envioAparte = false;
+        b.refSuffix = b.refSuffixAntesAparte || "";
+        b.cargaId = null;
+      }
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, entry: b });
+    }
+
     if (url.pathname === "/admin/reposicion/carga-add" && method === "POST") {
       const { id, cargaId } = await request.json();
       const backorders = await this.load("backorders", []);

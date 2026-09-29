@@ -1281,6 +1281,9 @@ function renderPage() {
     display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 6px;
     background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; white-space: nowrap;
   }
+  .envio-aparte-btn { margin: 0 0 4px 22px; padding: 1px 7px; font-size: 11px; background: #fff; color: #1e40af; border: 1px solid #93c5fd; border-radius: 6px; cursor: pointer; }
+  .envio-aparte-btn:hover { background: #1e40af; color: #fff; }
+  .envio-aparte-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 6px; background: #dbeafe; color: #1e40af; font-size: 11px; font-weight: 700; }
   .cancelar-linea-btn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: #6b7280; font-size: 14px; cursor: pointer; }
   .cancelar-linea-btn:hover { color: #b91c1c; border-color: #b91c1c; background: #fff; }
   .cancelar-pendiente-btn { margin-top: 4px; padding: 2px 8px; font-size: 11px; background: #fff; color: #b91c1c; border: 1px solid #fca5a5; border-radius: 6px; cursor: pointer; }
@@ -5015,7 +5018,7 @@ async function loadFurniture() {
 // así que no deben aparecer dentro de la fila del pedido original ni
 // bloquear su auto-añadido a carga en checkAutoAddCarga.
 function backordersPorPedido(orderId) {
-  return backorders.filter(b => b.orderId === orderId && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial);
+  return backorders.filter(b => b.orderId === orderId && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial && !b.envioAparte);
 }
 
 // Envío conjunto (Jennifer, 2026-09-28): en Furniture el grupo es UNA sola
@@ -5049,7 +5052,7 @@ function furnitureRowCells(o) {
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
           \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}\${b.desdeAbierto ? ' <span class="abierto-tag">🟣 Sale de un colchón ABIERTO</span>' : ""}
-        </label>\${abiertoTagHtml(b)}
+        </label>\${items.length > 1 ? \`<button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="1" title="Sacar este artículo del envío: se queda pendiente como línea propia con la referencia terminada en 2">Enviar aparte</button>\` : ""}\${abiertoTagHtml(b)}
       \`;
       }).join("")
     : "<em>Todo en stock</em>";
@@ -5070,8 +5073,48 @@ function furnitureRowCells(o) {
 // carga, absorbe el nombre/dirección/teléfono del pedido original pero
 // tiene su propia casilla de "recibido" y su propia carga (ver
 // reposicionesEnCarga/reposicionesPendientes en renderFurniture).
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-envio-aparte]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const b = backorders.find(x => x.id === btn.dataset.envioAparte);
+  if (!b) return;
+  const aparte = btn.dataset.aparte === "1";
+  const o = allOrders.find(x => x.id === b.orderId) || b;
+  if (!confirm(aparte
+    ? "¿Enviar aparte " + b.cantidad + "x " + b.stockModel + " (" + b.talla + ") de " + refLabel(o) + "?\\n\\nSale de este envío y se queda pendiente como línea propia con la referencia " + refLabel(o) + ((b.refSuffix ? Number(b.refSuffix) + 1 : 2)) + ", para añadirla a una carga cuando quieras."
+    : "¿Volver a juntar " + b.stockModel + " (" + b.talla + ") con el resto de " + refLabel(o) + "?")) return;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/envio-aparte", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ aparte }),
+  });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido cambiar."); return; }
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  renderFurniture();
+}, true);
+
 function reposicionRowCells(b) {
   const o = allOrders.find(x => x.id === b.orderId) || {};
+  if (b.envioAparte) {
+    // Artículo enviado aparte (Jennifer, 2026-09-29): referencia del
+    // pedido terminada en su sufijo ("…2") y opción de volver a juntarlo.
+    return \`
+    <td>\${refLabel(o.id ? o : b)}\${b.refSuffix || ""}<span class="envio-aparte-tag">ENVÍO APARTE</span></td>
+    <td>\${o.platform || "Shopify"}</td>
+    <td>\${o.name || ""}</td>
+    <td>\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${b.color ? " " + escapeAttr(b.color) : ""}</td>
+    <td class="services">\${o.services || ""}</td>
+    <td class="furniture-items-cell">
+      <label class="furniture-item-check">
+        <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
+        \${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}
+      </label>
+      <button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="0" title="Volver a juntarlo con el resto de su pedido">Juntar con el pedido</button>
+    </td>
+    <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
+  \`;
+  }
   return \`
     <td>\${refLabel(b)}</td>
     <td>\${o.platform || "Shopify"}</td>
@@ -5130,8 +5173,12 @@ function renderFurniture() {
   // SEUR (Jennifer, 2026-09-22) NO entra aquí — esa va por Luso/New +
   // "Preparar para SEUR", nunca por esta línea de Furniture.
   const esRepoColchonSeur = b => b.tipo === "colchon" && b.agenciaReposicion === "SEUR";
-  const reposicionesEnCarga = cargaAbierta ? backorders.filter(b => b.reposicion && b.estado === "pendiente" && b.cargaId === cargaAbierta.id && !esRepoColchonSeur(b)) : [];
-  const reposicionesPendientes = backorders.filter(b => b.reposicion && b.estado === "pendiente" && !b.cargaId && !esRepoColchonSeur(b)).filter(b => {
+  // Los artículos "enviados aparte" (Jennifer, 2026-09-29) van por este
+  // mismo camino que las reposiciones: línea propia, su propia carga.
+  const esLineaPropia = b => (b.reposicion && b.estado === "pendiente" && !esRepoColchonSeur(b))
+    || (b.envioAparte && (b.estado === "pendiente" || b.estado === "cubierto"));
+  const reposicionesEnCarga = cargaAbierta ? backorders.filter(b => esLineaPropia(b) && b.cargaId === cargaAbierta.id) : [];
+  const reposicionesPendientes = backorders.filter(b => esLineaPropia(b) && !b.cargaId).filter(b => {
     if (!busquedaPedido) return true;
     // refLabel(b) ya incluye el prefijo "REP" (Jennifer, 2026-09-21) —
     // buscar solo bezen+número/orderRef no lo encontraba si se escribía
@@ -7072,6 +7119,7 @@ async function buildFurnitureExport(env, cargaId) {
       && (b.estado === "pendiente" || b.estado === "cubierto")
       && !b.reposicion
       && !b.gestoComercial
+      && !b.envioAparte // sale después, como línea propia (ver más abajo)
       && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
 
     const descripciones = backordersPedido.length
@@ -7136,6 +7184,29 @@ async function buildFurnitureExport(env, cargaId) {
       montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
       o.email || "", provinciaPorCp(o.postalCode), "",
     ]);
+  }
+
+  // Artículos enviados aparte (Jennifer, 2026-09-29): su propia carga
+  // (b.cargaId) y la referencia del pedido con su sufijo ("…2"). Los bultos
+  // se calculan igual que en el pedido; la retirada de cama ya se hizo en el
+  // primer envío, así que no se repite.
+  const aparteEnCarga = backorders.filter((b) => b.envioAparte && (b.estado === "pendiente" || b.estado === "cubierto") && b.cargaId === carga.id);
+  for (const b of aparteEnCarga) {
+    const o = orders.find((x) => x.id === b.orderId);
+    if (!o) continue;
+    const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
+    const montaje = tieneMontajeFurniture(o.services);
+    const telefono = limpiarTelefonoFurniture(envio.phone);
+    const observaciones = "Resto del pedido " + referenciaPedido(o) + " (segundo envío)";
+    for (const descrip of descripcionesBackorder(b, o.product, tapaPartidaFurniture(o.services))) {
+      rows.push([
+        fechaTexto, "", referenciaPedido(envio) + (b.refSuffix || ""), envio.name, envio.furnitureAddress || envio.address || "",
+        envio.postalCode || "", envio.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
+        "", "", "", "", "", "", "", "", "", "", "",
+        montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
+        envio.email || o.email || "", provinciaPorCp(envio.postalCode), "",
+      ]);
+    }
   }
 
   return { rows, carga };
@@ -8141,6 +8212,11 @@ async function handleFetch(request, env) {
 
     // Carga independiente de una reposición (Jennifer, 2026-09-21) — ver
     // /admin/reposicion/carga-add|remove en inventory-store.js.
+    const envioAparteMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/envio-aparte$/);
+    if (envioAparteMatch && request.method === "POST") {
+      return proxyInventory(env, `/backorders/${envioAparteMatch[1]}/envio-aparte`, request);
+    }
+
     if (url.pathname === "/api/inventario/reposicion/carga-add" && request.method === "POST") {
       return proxyInventory(env, "/admin/reposicion/carga-add", request);
     }
