@@ -1669,6 +1669,12 @@ function renderPage() {
   #view-seur .carga-abierta-box table, #view-historial-cargas-seur .carga-historial-card table { min-width: 0; }
   .carga-abierta-box .table-wrap, .carga-historial-card .table-wrap { overflow-x: auto; max-width: calc(100% - 4rem); }
   .carga-historial-card .table-wrap { max-height: 420px; }
+  /* Jennifer, 2026-09-29: "que toda la información entre a golpe de vista" —
+     las cargas de SEUR se ven enteras, sin límite de alto ni scroll interno,
+     y los botones de quitar pueden partirse en dos líneas. */
+  #view-seur .carga-abierta-box .table-wrap { max-height: none; overflow: visible; }
+  #view-seur .carga-abierta-box { overflow: visible; }
+  .quitar-seur-btn { white-space: normal; text-align: center; line-height: 1.25; }
   #furniture-pendientes-toolbar { padding-top: 1.5rem; }
   .seur-decision-card { margin: 0 1rem 0.75rem; padding: 0.75rem 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
   .seur-decision-card ul { margin: 0.4rem 0; padding-left: 1.2rem; font-size: 13px; color: var(--muted); }
