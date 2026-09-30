@@ -5249,8 +5249,19 @@ function esMiembroSecundario(o) {
 // avisar o poner una nota por si lo entregamos por nuestros medios").
 // Por población o por código postal de Valdemoro (28340-28343): hay
 // pedidos con población "Madrid" y CP de Valdemoro.
+// Solo para los pedidos nuevos (Jennifer, 2026-09-30: los de Maison du Monde
+// a Valdemoro son de prueba; "se los ponemos a los nuevos que vayan
+// entrando a partir de ahora", más el cabecero pendiente de BEZEN12035).
+// BEZEN12247 (29/09, pendiente por Furniture) entra por fecha.
+const VALDEMORO_AVISO_DESDE = "2026-09-29";
+const VALDEMORO_AVISO_TAMBIEN = [12035];
 function esValdemoro(o) {
-  return !!o && (/valdemoro/i.test((o.city || "") + " " + (o.address || "") + " " + (o.furnitureAddress || "")) || /^2834[0-3]$/.test(String(o.postalCode || "").trim()));
+  if (!o) return false;
+  const direccion = /valdemoro/i.test((o.city || "") + " " + (o.address || "") + " " + (o.furnitureAddress || "")) || /^2834[0-3]$/.test(String(o.postalCode || "").trim());
+  if (!direccion) return false;
+  if (VALDEMORO_AVISO_TAMBIEN.includes(o.orderNumber)) return true;
+  const t = parseFechaGenerica(o.orderDate || o.createdAt);
+  return !!t && t >= new Date(VALDEMORO_AVISO_DESDE + "T00:00:00").getTime();
 }
 function valdemoroTag(o) {
   return esValdemoro(o) ? '<span class="valdemoro-tag" title="Entrega en Valdemoro: ¿lo llevamos nosotros en vez de Furniture/SEUR?">📍 VALDEMORO — ¿lo entregamos nosotros?</span>' : "";
