@@ -4680,9 +4680,11 @@ function filasPedidoFabrica(seleccionados) {
     });
     const filas = [];
     const grupoDeFila = [];
-    // Posición donde empieza "N UNIDADES" en el texto de cada fila (-1 si es
-    // una sola unidad) — va en negrita (Jennifer, 2026-09-28).
-    const negritaDesde = [];
+    // Qué líneas de cada fila van en negrita y rojo: "N UNIDADES" (Jennifer,
+    // 2026-09-28) y las extras de tapa — TAPA PARTIDA / TAPA REFORZADA / SIN
+    // TAPA (Jennifer, 2026-09-30: "había que ponerlo en negrita y color rojo
+    // para que llamara la atención").
+    const resaltadas = [];
     [...grupos.values()].forEach((items, g) => {
       items.forEach(b => {
         // Producto primero y referencia a la DERECHA (Jennifer, 2026-09-28:
@@ -4700,10 +4702,10 @@ function filasPedidoFabrica(seleccionados) {
           : formatMercanciaSinReceta(b)).split(" · ").join("\\n");
         filas.push([mercancia, b.referencia || "—"]);
         grupoDeFila.push(g);
-        negritaDesde.push(cantidad > 1 ? mercancia.lastIndexOf(cantidad + " UNIDADES") : -1);
+        resaltadas.push(mercancia.split("\\n").map(l => /TAPA PARTIDA|TAPA REFORZADA|SIN TAPA|\\d+ UNIDADES$/i.test(l)));
       });
     });
-    return { head: ["Mercancía para pedir a fábrica", "Referencia"], filas, grupoDeFila, negritaDesde };
+    return { head: ["Mercancía para pedir a fábrica", "Referencia"], filas, grupoDeFila, resaltadas };
   }
   // Agrupado por MODELO+TALLA en vez de por pedido (Jennifer, 2026-09-21:
   // "si varios de esos pedidos son del mismo modelo, ¿habría opción de
@@ -4722,7 +4724,7 @@ function filasPedidoFabrica(seleccionados) {
 }
 
 function descargarPedidoFabricaPdf(seleccionados) {
-  const { head, filas, grupoDeFila, negritaDesde } = filasPedidoFabrica(seleccionados);
+  const { head, filas, grupoDeFila, resaltadas } = filasPedidoFabrica(seleccionados);
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF();
   // Sin el nombre del proveedor en el título (Jennifer, 2026-09-21: "no
@@ -4749,12 +4751,40 @@ function descargarPedidoFabricaPdf(seleccionados) {
         if (data.section === "body" && grupoDeFila[data.row.index] % 2 === 1) {
           data.cell.styles.fillColor = [234, 244, 238];
         }
-        // autoTable no admite negrita solo en un trozo de la celda: con más
-        // de una unidad va en negrita toda la descripción.
-        if (data.section === "body" && data.column.index === 0 && negritaDesde[data.row.index] >= 0) {
-          data.cell.styles.fontStyle = "bold";
-          data.cell.styles.textColor = [200, 0, 0];
+      },
+      // autoTable no admite estilos distintos dentro de una celda: si alguna
+      // línea va resaltada, la celda se escribe a mano línea a línea (las
+      // resaltadas en negrita y rojo, Jennifer, 2026-09-30).
+      willDrawCell: data => {
+        if (data.section !== "body" || data.column.index !== 0) return;
+        const marcas = resaltadas[data.row.index];
+        if (!marcas || !marcas.some(Boolean)) return;
+        const cell = data.cell;
+        const ancho = cell.width - cell.padding("left") - cell.padding("right");
+        doc.setFontSize(cell.styles.fontSize);
+        cell.lineasPropias = String(cell.raw).split("\\n").flatMap((l, n) => {
+          doc.setFont(undefined, marcas[n] ? "bold" : "normal");
+          return doc.splitTextToSize(l, ancho).map(t => ({ t, marcada: marcas[n] }));
+        });
+        doc.setFont(undefined, "normal");
+        cell.text = [];
+      },
+      didDrawCell: data => {
+        const lineas = data.cell.lineasPropias;
+        if (!lineas) return;
+        const cell = data.cell;
+        const alto = cell.styles.fontSize * 1.15 / doc.internal.scaleFactor;
+        let y = cell.y + (cell.height - lineas.length * alto) / 2 + (alto - cell.styles.fontSize / doc.internal.scaleFactor) / 2;
+        doc.setFontSize(cell.styles.fontSize);
+        for (const { t, marcada } of lineas) {
+          doc.setFont(undefined, marcada ? "bold" : "normal");
+          doc.setTextColor(marcada ? 200 : 20, 0, 0);
+          if (!marcada) doc.setTextColor(20, 20, 20);
+          doc.text(t, cell.x + cell.padding("left"), y, { baseline: "top" });
+          y += alto;
         }
+        doc.setFont(undefined, "normal");
+        doc.setTextColor(20, 20, 20);
       },
     });
   } else {
@@ -4796,7 +4826,7 @@ function cargarExcelJs() {
 // Excel listo para imprimir (Jennifer, 2026-09-28): el texto largo pasa a
 // varias líneas dentro de la celda y todo el ancho cabe en un A4 vertical.
 async function descargarPedidoFabricaExcel(seleccionados) {
-  const { head, filas, grupoDeFila, negritaDesde } = filasPedidoFabrica(seleccionados);
+  const { head, filas, grupoDeFila, resaltadas } = filasPedidoFabrica(seleccionados);
   const ExcelJS = await cargarExcelJs();
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Pedido a fábrica", {
@@ -4848,14 +4878,15 @@ async function descargarPedidoFabricaExcel(seleccionados) {
       c.alignment = { vertical: "middle", horizontal: col === 1 ? "left" : "center", wrapText: true };
       c.border = bordes;
       c.font = { size: TAM, bold: esPolival && col === 2 };
-      // "N UNIDADES" en negrita y rojo, el resto del texto normal.
-      const desde = negritaDesde ? negritaDesde[i] : -1;
-      if (col === 1 && desde >= 0) {
-        const texto = String(c.value);
-        c.value = { richText: [
-          { text: texto.slice(0, desde), font: { size: TAM } },
-          { text: texto.slice(desde), font: { size: TAM, bold: true, color: { argb: "FFC80000" } } },
-        ] };
+      // Líneas resaltadas (unidades y extras de tapa) en negrita y rojo, el
+      // resto del texto normal.
+      const marcas = resaltadas ? resaltadas[i] : null;
+      if (col === 1 && marcas && marcas.some(Boolean)) {
+        const lineasTexto = String(c.value).split("\\n");
+        c.value = { richText: lineasTexto.map((l, n) => ({
+          text: l + (n < lineasTexto.length - 1 ? "\\n" : ""),
+          font: marcas[n] ? { size: TAM, bold: true, color: { argb: "FFC80000" } } : { size: TAM },
+        })) };
       }
       if (grupoDeFila && grupoDeFila[i] % 2 === 1) {
         c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEAF4EE" } };
