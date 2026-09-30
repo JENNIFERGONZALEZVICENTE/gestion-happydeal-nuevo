@@ -88,10 +88,52 @@ function nextSeurCargaDate(from) {
 // viernes" — un viernes, "mañana" tiene que caer en lunes, nunca en
 // sábado, que no existe como carga real).
 function seurCargaDateFromChoice(choice) {
+  // Fecha concreta (AAAA-MM-DD) elegida en el desplegable de días abiertos.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(choice || "")) return new Date(choice + "T00:00:00Z");
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   if (choice === "manana") d.setDate(d.getDate() + 1);
   return skipWeekend(d);
+}
+
+// Cargas de SEUR fijas (Jennifer, 2026-09-30): "se abra una carga por cada
+// día de la semana... el lunes me mostrarás todos los días de lunes a
+// viernes, pero el martes me mostrarás la del martes hasta el lunes
+// siguiente. No hay cargas ni sábado ni domingo" — siempre abiertas las de
+// los 5 próximos días laborables empezando hoy (hora de Madrid). La primera
+// es la del 01/10 ("la primera que vamos a abrir es la del día de mañana").
+// Un día que ya tuvo carga (abierta o cerrada) no se vuelve a crear, para
+// que cerrar la de hoy no abra otra nueva del mismo día.
+const SEUR_SEMANA_DESDE = "2026-10-01";
+function diasCargaSeur(n = 5) {
+  const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  const d = new Date((hoy < SEUR_SEMANA_DESDE ? SEUR_SEMANA_DESDE : hoy) + "T12:00:00Z");
+  const dias = [];
+  while (dias.length < n) {
+    const w = d.getUTCDay();
+    if (w !== 0 && w !== 6) dias.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return dias;
+}
+async function asegurarCargasSeur(storage) {
+  const cargas = (await storage.get("cargas")) || [];
+  let creadas = 0;
+  for (const fecha of diasCargaSeur()) {
+    if (cargas.some((c) => c.tipo === "seur" && c.fecha === fecha)) continue;
+    cargas.push({
+      id: crypto.randomUUID(),
+      tipo: "seur",
+      fecha,
+      dia: DIAS_SEMANA[new Date(fecha + "T12:00:00Z").getUTCDay()],
+      estado: "abierta",
+      fechaCreacion: new Date().toISOString(),
+      fechaCierre: null,
+    });
+    creadas++;
+  }
+  if (creadas) await storage.put("cargas", cargas);
+  return creadas;
 }
 
 async function getOrCreateCargaByFecha(storage, tipo, dateObj) {
@@ -713,6 +755,7 @@ export class OrdersStore {
     // próximo miércoles/viernes la primera vez que se añade algo, y se
     // reutiliza hasta que Jennifer la cierra a mano.
     if (url.pathname === "/cargas" && request.method === "GET") {
+      await asegurarCargasSeur(this.state.storage);
       const cargas = (await this.state.storage.get("cargas")) || [];
       return Response.json(cargas);
     }

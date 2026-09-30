@@ -1711,6 +1711,7 @@ function renderPage() {
      aun así algo no cabe, el cuadro se puede desplazar en horizontal. */
   #view-seur .carga-abierta-box table, #view-historial-cargas-seur .carga-historial-card table { min-width: 0; }
   .seur-readd-btn { padding: 5px 10px; font-size: 12px; margin: 2px 0; }
+  .seur-readd-fecha { padding: 4px 6px; font-size: 12px; margin: 2px 0; }
   .carga-abierta-box .table-wrap, .carga-historial-card .table-wrap { overflow-x: auto; max-width: calc(100% - 4rem); }
   .carga-historial-card .table-wrap { max-height: 420px; }
   /* Jennifer, 2026-09-29: "que toda la información entre a golpe de vista" —
@@ -6280,6 +6281,11 @@ function renderSeurFueraCarga() {
   const cont = document.getElementById("seur-fuera-carga");
   const pedidos = pedidosSeurFueraDeCarga();
   if (!pedidos.length) { cont.innerHTML = ""; return; }
+  // Elegir cualquiera de los días con carga abierta (Jennifer, 2026-09-30:
+  // una carga de SEUR por cada día laborable).
+  const opcionesDiasSeur = allCargas.filter(c => c.tipo === "seur" && c.estado === "abierta")
+    .sort((a, b) => a.fecha.localeCompare(b.fecha))
+    .map(c => '<option value="' + c.fecha + '">' + formatSeurCargaTitulo(c).replace("Carga ", "") + '</option>').join("");
   cont.innerHTML = \`
     <div class="carga-abierta-box tener-en-cuenta-box">
       <div class="toolbar"><h3 style="margin:0">Pedidos de SEUR fuera de carga</h3></div>
@@ -6290,8 +6296,8 @@ function renderSeurFueraCarga() {
           <tbody>\${pedidos.map(o => \`<tr>
             \${seurOrderRowCells(o, "")}
             <td>
-              <button type="button" class="secondary seur-readd-btn" data-order-id="\${escapeAttr(String(o.id))}" data-fecha="hoy">A la carga de hoy</button>
-              <button type="button" class="seur-readd-btn" data-order-id="\${escapeAttr(String(o.id))}" data-fecha="manana">A la carga de mañana</button>
+              <select class="seur-readd-fecha" data-order-id="\${escapeAttr(String(o.id))}">\${opcionesDiasSeur}</select>
+              <button type="button" class="seur-readd-btn" data-order-id="\${escapeAttr(String(o.id))}">A la carga</button>
               \${noSalioButton(o)}
             </td>
           </tr>\`).join("")}</tbody>
@@ -6302,7 +6308,7 @@ function renderSeurFueraCarga() {
     btn.addEventListener("click", async () => {
       const res = await fetch("/api/cargas/seur/add", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ orderIds: [btn.dataset.orderId], fecha: btn.dataset.fecha }),
+        body: JSON.stringify({ orderIds: [btn.dataset.orderId], fecha: [...cont.querySelectorAll(".seur-readd-fecha")].find(s => s.dataset.orderId === btn.dataset.orderId).value }),
       });
       if (!res.ok) { alert("No se ha podido añadir a la carga."); return; }
       await loadOrders();
