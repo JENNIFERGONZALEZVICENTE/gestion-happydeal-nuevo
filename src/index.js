@@ -1697,6 +1697,8 @@ function renderPage() {
   .carga-abierta-box.retenidos-box { border-color: #6d28d9; background: #f5f3ff; }
   .carga-abierta-box.retenidos-box h3 { color: #5b21b6; }
   .retenido-listo { color: #15803d; font-weight: 600; }
+  .coste-tarifa { text-align: right; white-space: nowrap; }
+  .coste-unidad { color: var(--muted); font-size: 11px; }
   .valdemoro-tag { display: inline-block; background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .ref-duplicada { display: inline-block; background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .retenido-falta { color: #b45309; font-weight: 600; }
@@ -2099,12 +2101,12 @@ function renderPage() {
   <div class="table-wrap">
     <table id="pendientes-table">
       <thead>
-        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Plataforma</th><th>Modelo</th><th>Color</th><th>Talla</th><th id="pendientes-sku-head">SKU</th><th>Cantidad</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
+        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Plataforma</th><th>Modelo</th><th>Color</th><th>Talla</th><th id="pendientes-sku-head">SKU</th><th>Cantidad</th><th id="pendientes-coste-head" title="Coste según la tarifa vigente del proveedor (precio unidad × unidades)">Coste tarifa</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
         <tr id="pendientes-filter-row">
           <th></th>
           <th><input id="pendientes-pedido-search" type="text" placeholder="Filtrar..." /></th>
           <th></th>
-          <th></th><th></th><th></th><th id="pendientes-sku-filter"><input id="pendientes-sku-search" type="text" placeholder="ej. COLZNIR105X180" /></th><th></th>
+          <th></th><th></th><th></th><th id="pendientes-sku-filter"><input id="pendientes-sku-search" type="text" placeholder="ej. COLZNIR105X180" /></th><th></th><th id="pendientes-coste-filter"></th>
           <th id="pendientes-refpolival-filter" style="display:none"><input id="pendientes-referencia-search" type="text" placeholder="Filtrar..." /></th>
           <th></th><th></th><th id="pendientes-furfpk-filter"></th><th></th><th></th>
         </tr>
@@ -4323,6 +4325,53 @@ async function loadPendientes() {
   renderPendientes();
 }
 
+// Coste de tarifa de cada colchón en Luso/New (Jennifer, 2026-09-30: "al
+// lado de los pedidos de proveedores me pongas el importe que tiene cada
+// colchón con la tarifa del proveedor"). Se piden al servidor solo los
+// modelo+medida que aún no se tienen; al llegar se vuelve a pintar.
+const costesTarifa = new Map();
+let costesTarifaPidiendo = false;
+async function cargarCostesTarifa(lista) {
+  const faltan = [];
+  const vistos = new Set();
+  for (const b of lista) {
+    const k = b.stockModel + "|" + b.talla;
+    if (costesTarifa.has(k) || vistos.has(k)) continue;
+    vistos.add(k);
+    faltan.push({ stockModel: b.stockModel, talla: b.talla });
+  }
+  if (!faltan.length || costesTarifaPidiendo) return;
+  costesTarifaPidiendo = true;
+  try {
+    const res = await fetch("/api/tarifas/costes", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: faltan }) });
+    const data = await res.json();
+    for (const c of data.costes || []) costesTarifa.set(c.stockModel + "|" + c.talla, c);
+    for (const f of faltan) if (!costesTarifa.has(f.stockModel + "|" + f.talla)) costesTarifa.set(f.stockModel + "|" + f.talla, { coste: null });
+  } catch (e) { /* sin tarifa: la celda queda en "—" */ }
+  costesTarifaPidiendo = false;
+  renderPendientes();
+}
+function formatoEuros(n) {
+  return n.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+}
+function costeTarifaCell(b) {
+  const c = costesTarifa.get(b.stockModel + "|" + b.talla);
+  if (!c) return '<td class="coste-tarifa">…</td>';
+  if (c.coste == null) return '<td class="coste-tarifa" title="Sin precio en la tarifa del proveedor">—</td>';
+  const cantidad = b.cantidad || 1;
+  const titulo = "Tarifa " + (c.proveedor || "") + " " + (c.periodo || "") + (c.sustituto ? " (precio de la medida " + c.sustituto + ")" : "") + ": " + formatoEuros(c.coste) + " la unidad";
+  return '<td class="coste-tarifa" title="' + escapeAttr(titulo) + '"><strong>' + formatoEuros(c.coste * cantidad) + "</strong>"
+    + (cantidad > 1 ? '<br><span class="coste-unidad">' + formatoEuros(c.coste) + " / ud</span>" : "") + "</td>";
+}
+function totalCostesTarifa(lista) {
+  let total = 0, sinPrecio = 0;
+  for (const b of lista) {
+    const c = costesTarifa.get(b.stockModel + "|" + b.talla);
+    if (c && c.coste != null) total += c.coste * (b.cantidad || 1); else sinPrecio++;
+  }
+  return { total, sinPrecio };
+}
+
 // Aviso que desaparece solo, sin bloquear la pantalla como un alert.
 function mostrarAvisoBreve(texto) {
   let el = document.getElementById("aviso-breve");
@@ -4399,6 +4448,10 @@ function renderPendientes() {
   const showSkuCol = ["luso", "new"].includes(currentProveedorFilter);
   document.getElementById("pendientes-sku-head").style.display = showSkuCol ? "" : "none";
   document.getElementById("pendientes-sku-filter").style.display = showSkuCol ? "" : "none";
+  // Coste de tarifa (Jennifer, 2026-09-30), también solo en Luso/New.
+  document.getElementById("pendientes-coste-head").style.display = showSkuCol ? "" : "none";
+  document.getElementById("pendientes-coste-filter").style.display = showSkuCol ? "" : "none";
+  if (showSkuCol) cargarCostesTarifa(pendientes);
 
   // Varios artículos del mismo pedido se agrupan visualmente en un mismo
   // recuadro (Jennifer, 2026-08-25) — cada uno sigue en su fila (para
@@ -4552,6 +4605,7 @@ function renderPendientes() {
       <td>\${b.talla}\${b.transformadoDesde ? '<br><span class="transformado-tag" title="Transformado de un colchón de otra medida que había en stock">Transformado desde ' + b.transformadoDesde + '</span>' : ""}</td>
       \${skuCell}
       <td>\${b.cantidad}</td>
+      \${showSkuCol ? costeTarifaCell(b) : ""}
       \${refPolivalCell}
       <td><textarea class="fabricacion-input" data-id="\${b.id}" placeholder="cómo pedirlo a fábrica...">\${escapeAttr(b.mercanciaFabrica != null ? b.mercanciaFabrica : (b.nombreFabricacion || ""))}</textarea></td>
       <td>\${new Date(parseFechaGenerica(b.fecha)).toLocaleDateString("es-ES")}</td>
@@ -4562,7 +4616,15 @@ function renderPendientes() {
   \`;
   }).join("");
   const nCancelados = pendientes.filter(b => b.estado === "cancelado").length;
-  document.getElementById("pendientes-count").textContent = (pendientes.length - nCancelados) + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)" + (nCancelados ? " · " + nCancelados + " cancelados a la vista" : "");
+  // Total de coste de tarifa de lo que se ve, y de lo que falta por pedir.
+  let textoCoste = "";
+  if (showSkuCol) {
+    const activos = pendientes.filter(b => b.estado !== "cancelado");
+    const todo = totalCostesTarifa(activos);
+    const porPedir = totalCostesTarifa(activos.filter(b => !b.pedidoGenerado));
+    textoCoste = " · Coste tarifa: " + formatoEuros(todo.total) + " (por pedir: " + formatoEuros(porPedir.total) + ")" + (todo.sinPrecio ? " · " + todo.sinPrecio + " sin precio en tarifa" : "");
+  }
+  document.getElementById("pendientes-count").textContent = (pendientes.length - nCancelados) + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)" + (nCancelados ? " · " + nCancelados + " cancelados a la vista" : "") + textoCoste;
   actualizarSeleccionUI();
   sincronizarTopFilaFiltro("pendientes-table", "pendientes-filter-row");
 
@@ -4651,7 +4713,13 @@ function actualizarSeleccionUI() {
   document.getElementById("generar-pedido-btn").disabled = n === 0;
   document.getElementById("generar-pedido-excel-btn").disabled = n === 0;
   document.getElementById("marcar-ya-pedido-btn").disabled = n === 0;
-  document.getElementById("seleccion-count").textContent = n > 0 ? n + " seleccionados" : "";
+  // En Luso/New, lo que costaría el pedido a fábrica seleccionado.
+  let costeSel = "";
+  if (n > 0 && ["luso", "new"].includes(currentProveedorFilter)) {
+    const t = totalCostesTarifa(backorders.filter(b => pedidoFabricaSeleccion.has(b.id)));
+    costeSel = " · " + formatoEuros(t.total) + (t.sinPrecio ? " (" + t.sinPrecio + " sin precio)" : "");
+  }
+  document.getElementById("seleccion-count").textContent = n > 0 ? n + " seleccionados" + costeSel : "";
 }
 
 async function guardarMercanciaFabrica(id, texto) {
@@ -8605,6 +8673,9 @@ async function handleFetch(request, env) {
     }
     if (url.pathname === "/api/tarifas/tabla" && request.method === "GET") {
       return inventoryStub(env).fetch("https://do/tarifas/tabla?stockModel=" + encodeURIComponent(url.searchParams.get("stockModel") || ""));
+    }
+    if (url.pathname === "/api/tarifas/costes" && request.method === "POST") {
+      return proxyInventory(env, "/tarifas/costes", request);
     }
 
     // Exportación de precios a plataforma (Jennifer, 2026-09-23): el .xlsx

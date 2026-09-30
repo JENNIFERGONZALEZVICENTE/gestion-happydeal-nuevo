@@ -2313,6 +2313,20 @@ export class InventoryStore {
     if (url.pathname === "/tarifas/periodo-activo" && method === "POST") {
       return this.setTarifaPeriodoActivo(await request.json());
     }
+    // Coste de tarifa vigente por modelo+medida (Jennifer, 2026-09-30: "al
+    // lado de los pedidos de proveedores me pongas el importe que tiene cada
+    // colchón con la tarifa del proveedor"). { items: [{ stockModel, talla }] }
+    if (url.pathname === "/tarifas/costes" && method === "POST") {
+      const { items } = await request.json();
+      const vistos = new Map();
+      for (const it of items || []) {
+        const k = it.stockModel + "|" + it.talla;
+        if (vistos.has(k)) continue;
+        const t = await this.calcularTarifaModelo(it.stockModel, it.talla);
+        vistos.set(k, { stockModel: it.stockModel, talla: it.talla, coste: t.coste ?? null, sustituto: t.costeSustituto || null, proveedor: t.costeProveedor || null, periodo: t.costePeriodo || null });
+      }
+      return Response.json({ ok: true, costes: [...vistos.values()] });
+    }
     if (url.pathname === "/tarifas/tabla" && method === "GET") {
       return this.getTarifaTabla(url.searchParams.get("stockModel"));
     }
