@@ -5053,7 +5053,7 @@ async function loadFurniture() {
   ]);
   backorders = await pendRes.json();
   allCargas = await cargasRes.json();
-  cargaAbierta = allCargas.find(c => c.estado === "abierta") || null;
+  cargaAbierta = allCargas.find(c => (c.tipo || "furniture") === "furniture" && c.estado === "abierta") || null;
   renderFurniture();
 }
 
@@ -7355,7 +7355,7 @@ async function buildFurnitureExport(env, cargaId) {
     invStub.fetch("https://do/backorders").then((r) => r.json()),
   ]);
 
-  const carga = cargaId ? cargas.find((c) => c.id === cargaId) : cargas.find((c) => c.estado === "abierta");
+  const carga = cargaId ? cargas.find((c) => c.id === cargaId) : cargas.find((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta");
   if (!carga) return { error: "No hay carga abierta." };
 
   // Envío conjunto (Jennifer, 2026-09-28): los pedidos de un mismo grupo
@@ -7523,7 +7523,7 @@ async function buildListadoAlmacen(env, cargaId) {
     ordersStub.fetch("https://do/cargas").then((r) => r.json()),
     inventoryStub(env).fetch("https://do/backorders").then((r) => r.json()),
   ]);
-  const carga = cargaId ? cargas.find((c) => c.id === cargaId) : cargas.find((c) => c.estado === "abierta");
+  const carga = cargaId ? cargas.find((c) => c.id === cargaId) : cargas.find((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta");
   if (!carga) return { error: "No hay carga abierta." };
 
   // Mismo orden y mismos artículos que el fichero de Furniture.
