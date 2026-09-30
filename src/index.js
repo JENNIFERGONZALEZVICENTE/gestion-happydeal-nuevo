@@ -3322,10 +3322,20 @@ window.addEventListener("resize", () => {
 // filtros de texto que haya puestos en pantalla ahora mismo (a diferencia de
 // la tabla, que sí filtra). Mismas columnas que ya se ven en pantalla, más
 // "Proveedor" para poder distinguirlos una vez mezclados en una sola hoja.
-document.getElementById("descargar-excel-pendientes-btn").addEventListener("click", () => {
-  const filas = backorders
+document.getElementById("descargar-excel-pendientes-btn").addEventListener("click", async () => {
+  const lista = backorders
     .filter(b => b.estado === "pendiente" && ["POLIVAL", "LUSO", "NEW"].includes(b.proveedor))
-    .sort((a, b) => (a.proveedor === b.proveedor ? parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha) : a.proveedor.localeCompare(b.proveedor)))
+    .sort((a, b) => (a.proveedor === b.proveedor ? parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha) : a.proveedor.localeCompare(b.proveedor)));
+  // Coste de tarifa de los colchones de Luso/New (Jennifer, 2026-09-30:
+  // "cuando descargue la tabla de proveedores esos precios se puedan
+  // descargar en la columna también") — como número, para poder sumar.
+  await cargarCostesTarifa(lista.filter(b => b.proveedor === "LUSO" || b.proveedor === "NEW"));
+  const costeUd = b => {
+    if (b.proveedor !== "LUSO" && b.proveedor !== "NEW") return "";
+    const c = costesTarifa.get(b.stockModel + "|" + b.talla);
+    return c && c.coste != null ? Math.round(c.coste * 100) / 100 : "";
+  };
+  const filas = lista
     .map(b => ({
       Proveedor: b.proveedor,
       Pedido: refLabel(b) + (b.refSuffix || ""),
@@ -3335,6 +3345,8 @@ document.getElementById("descargar-excel-pendientes-btn").addEventListener("clic
       Talla: b.talla,
       SKU: skuDePendiente(b),
       Cantidad: b.cantidad,
+      "Coste ud (tarifa)": costeUd(b),
+      "Coste total (tarifa)": costeUd(b) === "" ? "" : Math.round(costeUd(b) * (b.cantidad || 1) * 100) / 100,
       "Ref. Polival": b.referencia || "",
       "FUR/FPK": b.esPack && b.tipo === "colchon" ? (b.tipoEnvio || "") : "",
       "Mercancía para pedir a fábrica": b.mercanciaFabrica || "",
@@ -4340,7 +4352,11 @@ async function cargarCostesTarifa(lista) {
     vistos.add(k);
     faltan.push({ stockModel: b.stockModel, talla: b.talla });
   }
-  if (!faltan.length || costesTarifaPidiendo) return;
+  if (!faltan.length) return;
+  // Si ya hay una petición en marcha, se espera a que acabe y se reintenta
+  // (la descarga del Excel necesita los precios sí o sí).
+  while (costesTarifaPidiendo) await new Promise(r => setTimeout(r, 150));
+  if (faltan.every(f => costesTarifa.has(f.stockModel + "|" + f.talla))) return;
   costesTarifaPidiendo = true;
   try {
     const res = await fetch("/api/tarifas/costes", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: faltan }) });
