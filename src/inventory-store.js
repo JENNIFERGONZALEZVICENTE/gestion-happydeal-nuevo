@@ -2173,10 +2173,14 @@ export class InventoryStore {
     // stock/agencia (evita duplicar backorders — pushBackorder no
     // sobreescribe uno con la misma id).
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
-      const { id, referencia, mercanciaFabrica, tapaStock } = await request.json();
+      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return new Response("not found", { status: 404 });
+      // Corrección a mano del estado (Jennifer, 2026-09-30: cabeceros dados
+      // por servidos sin haber salido).
+      if (estado !== undefined && ["pendiente", "cubierto", "servido"].includes(estado)) entry.estado = estado;
+      if (recibidoFabrica !== undefined) entry.recibidoFabrica = !!recibidoFabrica;
       if (referencia !== undefined) entry.referencia = referencia;
       if (mercanciaFabrica !== undefined) entry.mercanciaFabrica = mercanciaFabrica;
       // Tapa del canapé que ya está en el almacén (Jennifer, 2026-09-30,
@@ -2737,6 +2741,11 @@ export class InventoryStore {
 
     for (const b of backorders) {
       if (b.orderId !== orderId || b.estado === "servido") continue;
+      // Los artículos con envío propio no salen con el pedido (Jennifer,
+      // 2026-09-30: los cabeceros "enviados aparte" de BEZEN12187 y
+      // BEZEN12176 quedaron como servidos al enviarse el resto sin haber
+      // salido): envío aparte, reposición y gesto comercial se cierran solos.
+      if (b.envioAparte || b.reposicion || b.gestoComercial) continue;
       const key = stockKey(b.stockModel, b.talla);
       const row = stock[key];
       if (row) {

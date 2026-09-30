@@ -1697,6 +1697,7 @@ function renderPage() {
   .carga-abierta-box.retenidos-box { border-color: #6d28d9; background: #f5f3ff; }
   .carga-abierta-box.retenidos-box h3 { color: #5b21b6; }
   .retenido-listo { color: #15803d; font-weight: 600; }
+  .valdemoro-tag { display: inline-block; background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .ref-duplicada { display: inline-block; background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .retenido-falta { color: #b45309; font-weight: 600; }
   .retenido-toca { background: #15803d; color: #fff; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
@@ -4539,7 +4540,7 @@ function renderPendientes() {
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
-      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}</td>
+      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
@@ -5201,6 +5202,18 @@ function esMiembroSecundario(o) {
     && allOrders.some(p => p.id === o.grupoEnvio && p.shippingStatus !== "fulfilled");
 }
 
+// Entregas en Valdemoro (Jennifer, 2026-09-30: "cuando un pedido sea para
+// entregar en Valdemoro por Furniture o por SEUR siempre me tendrás que
+// avisar o poner una nota por si lo entregamos por nuestros medios").
+// Por población o por código postal de Valdemoro (28340-28343): hay
+// pedidos con población "Madrid" y CP de Valdemoro.
+function esValdemoro(o) {
+  return !!o && (/valdemoro/i.test((o.city || "") + " " + (o.address || "") + " " + (o.furnitureAddress || "")) || /^2834[0-3]$/.test(String(o.postalCode || "").trim()));
+}
+function valdemoroTag(o) {
+  return esValdemoro(o) ? '<span class="valdemoro-tag" title="Entrega en Valdemoro: ¿lo llevamos nosotros en vez de Furniture/SEUR?">📍 VALDEMORO — ¿lo entregamos nosotros?</span>' : "";
+}
+
 // Misma referencia de fábrica en pedidos distintos (Jennifer, 2026-09-30:
 // MB251FUR se puso por error a BEZEN12188 y BEZEN12178 — "estaría bien poner
 // una señal de advertencia para que lo vea cuando venga esa referencia de
@@ -5241,7 +5254,7 @@ function furnitureRowCells(o) {
       }).join("")
     : "<em>Todo en stock</em>";
   return \`
-    <td>\${refLabel(o)}\${grupoEnvioTag(o)}</td>
+    <td>\${refLabel(o)}\${grupoEnvioTag(o)}\${valdemoroTag(o)}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name}</td>
     <td>\${productoGrupo}</td>
@@ -5284,7 +5297,7 @@ function reposicionRowCells(b) {
     // Artículo enviado aparte (Jennifer, 2026-09-29): referencia del
     // pedido terminada en su sufijo ("…2") y opción de volver a juntarlo.
     return \`
-    <td>\${refLabel(o.id ? o : b)}\${b.refSuffix || ""}<span class="envio-aparte-tag">ENVÍO APARTE</span></td>
+    <td>\${refLabel(o.id ? o : b)}\${b.refSuffix || ""}<span class="envio-aparte-tag">ENVÍO APARTE</span>\${valdemoroTag(o)}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name || ""}</td>
     <td>\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${b.color ? " " + escapeAttr(b.color) : ""}</td>
@@ -6472,7 +6485,7 @@ function formatSeurCargaTitulo(carga) {
 
 function seurOrderRowCells(o, refSuffix) {
   return \`
-    <td>\${refLabel(o)}\${refSuffix || ""}</td>
+    <td>\${refLabel(o)}\${refSuffix || ""}\${valdemoroTag(o)}</td>
     <td>\${o.name}</td>
     <td>\${o.furnitureAddress || o.address || ""}</td>
     <td>\${o.phone}</td>
@@ -6754,7 +6767,7 @@ function seurEnviosDeCarga(cargaId) {
 function seurBackorderRowCells(b) {
   const o = allOrders.find(x => x.orderNumber === b.orderNumber) || {};
   return \`
-    <td>\${refLabel(b)}</td>
+    <td>\${refLabel(b)}\${valdemoroTag(o)}</td>
     <td>\${o.name || ""}</td>
     <td>\${o.furnitureAddress || o.address || ""}</td>
     <td>\${o.phone || ""}</td>
