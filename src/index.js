@@ -1694,6 +1694,15 @@ function renderPage() {
   .carga-abierta-box { margin: 0 2rem 1.5rem; border: 2px solid var(--brand); border-radius: 12px; overflow: hidden; background: var(--brand-light); }
   .carga-abierta-box.tener-en-cuenta-box { border-color: #b45309; background: #fef3c7; }
   .carga-abierta-box.tener-en-cuenta-box h3 { color: #92400e; }
+  .carga-abierta-box.retenidos-box { border-color: #6d28d9; background: #f5f3ff; }
+  .carga-abierta-box.retenidos-box h3 { color: #5b21b6; }
+  .retenido-listo { color: #15803d; font-weight: 600; }
+  .retenido-falta { color: #b45309; font-weight: 600; }
+  .retenido-toca { background: #15803d; color: #fff; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
+  @media (prefers-color-scheme: dark) {
+    .carga-abierta-box.retenidos-box { background: #2e1065; border-color: #7c3aed; }
+    .carga-abierta-box.retenidos-box h3 { color: #ddd6fe; }
+  }
   .quitar-tener-en-cuenta-btn { padding: 5px 10px; font-size: 12px; background: transparent; color: #92400e; border: 1px solid #92400e; }
   .furniture-items-cell { min-width: 220px; }
   .furniture-item-check { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; margin-bottom: 4px; cursor: pointer; }
@@ -2156,9 +2165,23 @@ function renderPage() {
     </div>
   </div>
 
+  <div class="carga-abierta-box retenidos-box">
+    <div class="toolbar">
+      <h3 style="margin:0">Retenidos a la espera del cliente</h3>
+    </div>
+    <div id="retenidos-count" class="inventario-count"></div>
+    <div class="table-wrap">
+      <table id="retenidos-table">
+        <thead><tr><th>Pedido</th><th>Plataforma</th><th>Nombre</th><th>Producto comprado</th><th>Servicios adicionales</th><th>Artículos / Llegada</th><th>Notas</th><th>Retención</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="toolbar" id="furniture-pendientes-toolbar">
     <button type="button" id="anadir-carga-btn" disabled>Añadir a la carga</button>
     <button type="button" id="anadir-tener-en-cuenta-btn" disabled>Añadir a "tener en cuenta"</button>
+    <button type="button" id="retener-btn" class="secondary" disabled>Retener (el cliente lo quiere más adelante)</button>
     <span id="furniture-seleccion-count" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="furniture-pendientes-count" class="inventario-count"></div>
@@ -2360,6 +2383,21 @@ function renderPage() {
       <button type="button" id="sustituir-directo-btn" disabled style="display:none">Sustituir</button>
       <button type="button" class="secondary" id="sustituir-hoy-btn" disabled style="display:none">Sustituir — carga de hoy</button>
       <button type="button" id="sustituir-manana-btn" disabled style="display:none">Sustituir — carga de mañana</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="retener-modal-overlay">
+  <div class="modal-box">
+    <h3>Retener hasta que el cliente lo pida</h3>
+    <p id="retener-modal-texto" style="color:var(--muted);font-size:13px"></p>
+    <label style="display:block;font-size:13px;margin:8px 0"><input type="radio" name="retener-tipo" value="sin-fecha" checked /> Sin fecha: a falta de que el cliente dé luz verde al envío</label>
+    <label style="display:block;font-size:13px;margin:8px 0"><input type="radio" name="retener-tipo" value="fecha" /> Enviar en la carga de este día o la siguiente:
+      <input type="date" id="retener-fecha-input" style="display:block;margin-top:6px" />
+    </label>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="retener-modal-cancel">Cancelar</button>
+      <button type="button" id="retener-modal-ok">Retener</button>
     </div>
   </div>
 </div>
@@ -4908,6 +4946,10 @@ async function checkAutoAddCarga(orderId) {
   const todosRecibidos = itemsFurniture.length > 0 && itemsFurniture.every(i => i.recibidoFabrica);
   const colchonFpkPendiente = items.some(i => esFpkPendiente(i) && i.estado === "pendiente");
   if (!todosRecibidos) return;
+  // Retenido por el cliente (Jennifer, 2026-09-30): no sube solo salvo que
+  // ya le toque por fecha.
+  if (retencionDe(order) && !retencionCumplida(order)) return;
+  if (retencionDe(order)) await guardarRetencion([order.id], null);
   const notaTexto = grupo.map(o => (o.notas || "").trim()).filter(Boolean).join(" / ");
   const confirmar = notaTexto
     ? confirm(grupo.map(refLabel).join(" + ") + ' tiene una nota: "' + notaTexto + '". ¿Añadirlo a la próxima carga igualmente?')
@@ -5055,6 +5097,7 @@ async function loadFurniture() {
   allCargas = await cargasRes.json();
   cargaAbierta = allCargas.find(c => (c.tipo || "furniture") === "furniture" && c.estado === "abierta") || null;
   renderFurniture();
+  if (await aplicarRetencionesCumplidas()) renderFurniture();
 }
 
 // Un pedido de Furniture puede tener varios artículos (ej. BEZEN12117:
@@ -5208,6 +5251,7 @@ function renderFurniture() {
   // marketplace no es un correlativo cronológico.
   const pendientes = todasFurniture.filter(o => {
     if (o.cargaId) return false;
+    if (retencionDe(o)) return false; // van en su propio recuadro
     // Mismo arreglo que en Proveedores pendientes (Jennifer, 2026-09-21):
     // buscar por la referencia real del marketplace, no solo BEZEN+número.
     // En un envío conjunto se busca en todos sus pedidos (la línea es una).
@@ -5322,6 +5366,8 @@ function renderFurniture() {
     });
   });
 
+  renderRetenidos(todasFurniture.filter(o => !o.cargaId && retencionDe(o)));
+
   document.getElementById("furniture-pendientes-count").textContent = (pendientes.length + reposicionesPendientes.length) + " pedidos pendientes de envío por Furniture";
   document.querySelector("#furniture-pendientes-table tbody").innerHTML = pendientes.map(o => \`
     <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
@@ -5374,12 +5420,122 @@ function renderFurniture() {
   });
 }
 
+// Pedidos retenidos a petición del cliente (Jennifer, 2026-09-30): "habría
+// que habilitar una casilla donde pongamos RETENIDO A FALTA DE QUE EL
+// CLIENTE DIGA QUE SE ENVÍE... o bien, si el cliente ya da una fecha a un
+// mes vista, poderlo meter en la carga que queramos". order.retenido =
+// { hasta: "AAAA-MM-DD" | null }. En un envío conjunto basta con que uno
+// del grupo esté retenido.
+function retencionDe(o) {
+  const p = o && pedidosDelGrupo(o).find(x => x.retenido);
+  return p ? p.retenido : null;
+}
+function todoRecibidoFurniture(o) {
+  const items = pedidosDelGrupo(o).filter(p => !p.cancelado).flatMap(p => backordersPorPedido(p.id))
+    .filter(i => !(i.esPack && i.tipo === "colchon" && i.tipoEnvio === "FPK"));
+  return items.length > 0 && items.every(i => i.recibidoFabrica);
+}
+function fechaCortaEs(f) {
+  return new Date(f + "T00:00:00").toLocaleDateString("es-ES");
+}
+// ¿Le toca ya salir? Solo con fecha y si la carga abierta de Furniture es de
+// ese día o posterior.
+function retencionCumplida(o) {
+  const r = retencionDe(o);
+  return !!(r && r.hasta && cargaAbierta && cargaAbierta.fecha >= r.hasta);
+}
+async function guardarRetencion(orderIds, retenido) {
+  const ids = [...new Set(orderIds.flatMap(id => pedidosDelGrupo(allOrders.find(o => o.id === id)).map(o => o.id).concat(id)))];
+  await Promise.all(ids.map(id => fetch("/api/pedidos/shopify/meta", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, retenido }),
+  })));
+  ids.forEach(id => { const o = allOrders.find(x => x.id === id); if (o) o.retenido = retenido ? { hasta: retenido.hasta || null } : null; });
+}
+function renderRetenidos(retenidos) {
+  retenidos.sort((a, b) => ((retencionDe(a).hasta || "9999") + a.orderNumber).localeCompare((retencionDe(b).hasta || "9999") + b.orderNumber));
+  document.getElementById("retenidos-count").textContent = retenidos.length
+    ? retenidos.length + " pedido(s) retenidos. No suben solos a la carga hasta que el cliente dé luz verde o llegue su fecha."
+    : "No hay pedidos retenidos.";
+  document.querySelector("#retenidos-table tbody").innerHTML = retenidos.map(o => {
+    const r = retencionDe(o);
+    const listo = todoRecibidoFurniture(o);
+    const toca = retencionCumplida(o);
+    const retTxt = (r.hasta ? "Enviar en la carga del " + fechaCortaEs(r.hasta) + " o la siguiente" : "Sin fecha: a falta de luz verde del cliente")
+      + '<br><span class="' + (listo ? "retenido-listo" : "retenido-falta") + '">' + (listo ? "✓ Todo en stock" : "Falta mercancía") + "</span>"
+      + (toca ? '<br><span class="retenido-toca">TOCA EN ESTA CARGA</span>' : "");
+    return '<tr' + (o.cancelado ? ' class="fila-cancelada"' : "") + ">" + furnitureRowCells(o)
+      + "<td>" + retTxt + "</td><td>"
+      + '<button type="button" class="luz-verde-btn" data-id="' + o.id + '">Luz verde: a la carga</button> '
+      + '<button type="button" class="secondary cambiar-retencion-btn" data-id="' + o.id + '">Cambiar</button> '
+      + '<button type="button" class="secondary quitar-retencion-btn" data-id="' + o.id + '">Quitar retención</button>'
+      + "</td></tr>";
+  }).join("");
+  document.querySelectorAll(".luz-verde-btn").forEach(btn => btn.addEventListener("click", async () => {
+    const o = allOrders.find(x => String(x.id) === btn.dataset.id);
+    if (!o) return;
+    if (todoRecibidoFurniture(o)) {
+      if (!confirm("¿El cliente da luz verde? " + refLabel(o) + " entra ahora en la carga de Furniture.")) return;
+      await guardarRetencion([o.id], null);
+      await anadirPedidosACarga([o.id]);
+    } else {
+      if (!confirm(refLabel(o) + " todavía no tiene toda la mercancía. Se quita la retención y subirá solo a la carga cuando llegue todo. ¿Seguir?")) return;
+      await guardarRetencion([o.id], null);
+    }
+    renderFurniture();
+  }));
+  document.querySelectorAll(".quitar-retencion-btn").forEach(btn => btn.addEventListener("click", async () => {
+    await guardarRetencion([Number(btn.dataset.id)], null);
+    renderFurniture();
+  }));
+  document.querySelectorAll(".cambiar-retencion-btn").forEach(btn => btn.addEventListener("click", () => abrirModalRetener([Number(btn.dataset.id)])));
+}
+// Con fecha: al abrir Furniture, lo que ya toca y está todo recibido entra
+// solo en la carga abierta (y deja de estar retenido).
+async function aplicarRetencionesCumplidas() {
+  const listos = allOrders.filter(o => o.agencia === "FURNITURE" && !o.cargaId && !o.cancelado && o.retenido && !esMiembroSecundario(o)
+    && retencionCumplida(o) && todoRecibidoFurniture(o));
+  for (const o of listos) {
+    await guardarRetencion([o.id], null);
+    await anadirPedidosACarga([o.id]);
+  }
+  return listos.length;
+}
+let retenerModalIds = [];
+function abrirModalRetener(ids) {
+  retenerModalIds = ids;
+  const refs = ids.map(id => refLabel(allOrders.find(o => o.id === id) || {})).join(", ");
+  document.getElementById("retener-modal-texto").textContent = refs;
+  const r = ids.length === 1 ? retencionDe(allOrders.find(o => o.id === ids[0])) : null;
+  const input = document.getElementById("retener-fecha-input");
+  input.min = hoyMadrid();
+  input.value = r && r.hasta ? r.hasta : "";
+  document.querySelector('input[name="retener-tipo"][value="' + (r && r.hasta ? "fecha" : "sin-fecha") + '"]').checked = true;
+  document.getElementById("retener-modal-overlay").classList.add("open");
+}
+document.getElementById("retener-btn").addEventListener("click", () => {
+  if (furnitureSeleccion.size) abrirModalRetener([...furnitureSeleccion]);
+});
+document.getElementById("retener-modal-cancel").addEventListener("click", () => document.getElementById("retener-modal-overlay").classList.remove("open"));
+document.getElementById("retener-fecha-input").addEventListener("input", () => {
+  document.querySelector('input[name="retener-tipo"][value="fecha"]').checked = true;
+});
+document.getElementById("retener-modal-ok").addEventListener("click", async () => {
+  const conFecha = document.querySelector('input[name="retener-tipo"]:checked').value === "fecha";
+  const hasta = document.getElementById("retener-fecha-input").value;
+  if (conFecha && (!hasta || hasta < hoyMadrid())) { alert("Elige una fecha de hoy en adelante."); return; }
+  await guardarRetencion(retenerModalIds, { hasta: conFecha ? hasta : null });
+  document.getElementById("retener-modal-overlay").classList.remove("open");
+  furnitureSeleccion.clear();
+  renderFurniture();
+});
+
 function actualizarFurnitureSeleccionUI() {
   const n = furnitureSeleccion.size + reposicionSeleccion.size;
   document.getElementById("anadir-carga-btn").disabled = n === 0;
   // "Tener en cuenta" no aplica a reposiciones (Jennifer no lo ha pedido) —
   // solo cuenta pedidos normales.
   document.getElementById("anadir-tener-en-cuenta-btn").disabled = furnitureSeleccion.size === 0;
+  document.getElementById("retener-btn").disabled = furnitureSeleccion.size === 0;
   document.getElementById("furniture-seleccion-count").textContent = n > 0 ? n + " seleccionados" : "";
 }
 

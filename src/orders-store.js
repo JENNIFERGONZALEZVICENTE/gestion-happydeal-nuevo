@@ -35,7 +35,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -667,7 +667,7 @@ export class OrdersStore {
     }
 
     if (url.pathname === "/orders/meta" && request.method === "POST") {
-      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta, needsReview } = await request.json();
+      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta, needsReview, retenido } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const existing = orders[id];
       if (!existing) return new Response("not found", { status: 404 });
@@ -690,6 +690,11 @@ export class OrdersStore {
       // fechas...), sin que haga falta que la mercancía haya llegado ya.
       // No quita al pedido de ningún otro sitio, es solo una marca.
       if (paraTenerEnCuenta !== undefined) existing.paraTenerEnCuenta = !!paraTenerEnCuenta;
+      // Retenido a petición del cliente (Jennifer, 2026-09-30): { hasta:
+      // "AAAA-MM-DD" | null, desde } — sin fecha espera a la luz verde del
+      // cliente; con fecha, sube solo a la carga de Furniture de ese día o
+      // posterior. null lo quita.
+      if (retenido !== undefined) existing.retenido = retenido ? { hasta: retenido.hasta || null, desde: new Date().toISOString() } : null;
       // Marcar un aviso de revisión como resuelto a mano (Jennifer,
       // 2026-09-19: la campanita se quedaba encendida para siempre en
       // pedidos donde needsReview se puso a true sin ningún motivo de texto
