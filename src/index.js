@@ -4408,12 +4408,14 @@ function renderPendientes() {
     // sin inventar un mecanismo nuevo.
     const esColchonSueltoConTapiceria = b.tipo === "colchon" && !b.esPack && ordenTieneTapiceria(b.orderNumber);
     const mostrarSelectorEnvio = esPackColchon || esColchonSueltoConTapiceria;
+    // Colchón suelto que sale por Furniture (Jennifer, 2026-09-30): sin
+    // tapicería no hay nada que elegir, pero se ve la referencia FUR.
     const tipoEnvioSelect = mostrarSelectorEnvio
       ? \`<select class="tipo-envio-select" data-id="\${b.id}">
-           <option value="FPK"\${b.tipoEnvio === "FPK" ? " selected" : ""}>FPK\${refLabel(b)} (independiente)</option>
-           <option value="FUR"\${b.tipoEnvio === "FUR" ? " selected" : ""}>FUR\${refLabel(b)} (junto)</option>
+           <option value="FPK"\${b.tipoEnvio === "FPK" ? " selected" : ""}>FPK\${refLabel(b)}\${b.refSuffix || ""} (independiente)</option>
+           <option value="FUR"\${b.tipoEnvio === "FUR" ? " selected" : ""}>FUR\${refLabel(b)}\${b.refSuffix || ""} (junto)</option>
          </select>\`
-      : "";
+      : (b.tipo === "colchon" && b.tipoEnvio === "FUR" ? \`<strong>FUR\${refLabel(b)}\${b.refSuffix || ""}</strong> (Furniture)\` : "");
     // Estado de la tapicería de este mismo pedido en Furniture (Jennifer,
     // 2026-08-27, ampliado 2026-09-25): antes solo avisaba cuando la
     // tapicería YA había salido con el colchón todavía marcado FPK aquí
@@ -4488,7 +4490,9 @@ function renderPendientes() {
     // buildFurnitureExport en la carga de Furniture de ese pedido.
     // Un colchón transformado va abierto: siempre Furniture, nunca SEUR
     // (Jennifer, 2026-09-28).
-    const esColchonSeur = ((b.tipo === "colchon" && !b.esPack && !b.transformadoDesde && !(esColchonSueltoConTapiceria && b.tipoEnvio === "FUR")) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
+    // Un colchón suelto marcado FUR (con o sin tapicería, Jennifer,
+    // 2026-09-30) sale por Furniture: "Marcar recibido", no SEUR.
+    const esColchonSeur = ((b.tipo === "colchon" && !b.esPack && !b.transformadoDesde && b.tipoEnvio !== "FUR") && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
     // Sustituir por otro modelo que sí hay en stock (Jennifer, 2026-09-18):
     // vale tanto para colchón suelto como de pack, mientras siga
     // "pendiente" — una vez preparado o sustituido ya no aplica. El propio
