@@ -1697,6 +1697,7 @@ function renderPage() {
   .carga-abierta-box.retenidos-box { border-color: #6d28d9; background: #f5f3ff; }
   .carga-abierta-box.retenidos-box h3 { color: #5b21b6; }
   .retenido-listo { color: #15803d; font-weight: 600; }
+  .ref-duplicada { display: inline-block; background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .retenido-falta { color: #b45309; font-weight: 600; }
   .retenido-toca { background: #15803d; color: #fff; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
   @media (prefers-color-scheme: dark) {
@@ -4466,7 +4467,7 @@ function renderPendientes() {
       ? \`<span class="pedido-generado-tag">✓ Pedido a fábrica\${b.fechaPedidoFabrica ? " " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : ""}</span>\`
       : "";
     const refPolivalCell = showRefPolivalCol
-      ? \`<td><input type="text" class="referencia-input" data-id="\${b.id}" value="\${escapeAttr(b.referencia || "")}" placeholder="ref."></td>\`
+      ? \`<td><input type="text" class="referencia-input" data-id="\${b.id}" value="\${escapeAttr(b.referencia || "")}" placeholder="ref.">\${avisoRefDuplicada(b)}</td>\`
       : "";
     // Columna SKU en Luso/New (Jennifer, 2026-09-21) — mismo cálculo que ya
     // se usa para mostrar el SKU de los pedidos de marketplace: prefijo del
@@ -5130,6 +5131,20 @@ function esMiembroSecundario(o) {
     && allOrders.some(p => p.id === o.grupoEnvio && p.shippingStatus !== "fulfilled");
 }
 
+// Misma referencia de fábrica en pedidos distintos (Jennifer, 2026-09-30:
+// MB251FUR se puso por error a BEZEN12188 y BEZEN12178 — "estaría bien poner
+// una señal de advertencia para que lo vea cuando venga esa referencia de
+// fábrica"). Dentro del mismo pedido (dos canapés iguales) no avisa.
+function avisoRefDuplicada(b) {
+  const ref = (b.referencia || "").trim().toUpperCase();
+  if (!ref) return "";
+  const otros = backorders.filter(x => x.id !== b.id && x.orderNumber !== b.orderNumber
+    && (x.referencia || "").trim().toUpperCase() === ref && x.estado !== "cancelado" && x.estado !== "servido");
+  if (!otros.length) return "";
+  const texto = otros.map(x => refLabel(x) + (x.refSuffix || "") + " (" + x.talla + (x.color ? " " + x.color : "") + ")").join(", ");
+  return ' <span class="ref-duplicada" title="Dos pedidos distintos comparten esta referencia de fábrica: al llegar, mira la medida para saber de cuál es">⚠ ' + escapeAttr(ref) + " también en " + escapeAttr(texto) + "</span>";
+}
+
 function furnitureRowCells(o) {
   const grupo = pedidosDelGrupo(o);
   const items = grupo.flatMap(p => backordersPorPedido(p.id));
@@ -5150,7 +5165,7 @@ function furnitureRowCells(o) {
         return \`
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
-          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}\${b.desdeAbierto ? ' <span class="abierto-tag">🟣 Sale de un colchón ABIERTO</span>' : ""}
+          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + avisoRefDuplicada(b) + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}\${b.desdeAbierto ? ' <span class="abierto-tag">🟣 Sale de un colchón ABIERTO</span>' : ""}
         </label>\${items.length > 1 ? \`<button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="1" title="Sacar este artículo del envío: se queda pendiente como línea propia con la referencia terminada en 2">Enviar aparte</button>\` : ""}\${abiertoTagHtml(b)}
       \`;
       }).join("")
