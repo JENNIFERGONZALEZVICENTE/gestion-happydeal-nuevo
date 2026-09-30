@@ -3063,7 +3063,10 @@ export class InventoryStore {
   // `color`, `esPack` y `tipoEnvio` (Jennifer, 2026-09-30, BEZEN12146: dos
   // packs de canapé de madera Cerezo metidos a mano) — sin color el canapé
   // no saca bien sus piezas en Furniture.
-  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo, refSuffix, envioSeur, color, esPack, tipoEnvio }) {
+  // `unidad` (Jennifer, 2026-09-30, BEZEN12155: dos canapés iguales con la
+  // misma referencia) — distingue dos artículos iguales del mismo pedido,
+  // para que cada canapé saque su propio juego de piezas en Furniture.
+  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo, refSuffix, envioSeur, color, esPack, tipoEnvio, unidad }) {
     if (!orderId || !stockModel || !talla || !proveedor) {
       return Response.json({ ok: false, error: "Faltan orderId, stockModel, talla o proveedor." }, { status: 400 });
     }
@@ -3082,8 +3085,9 @@ export class InventoryStore {
       await this.state.storage.put("backorders", backorders);
       return Response.json({ ok: true, id, backorder: b });
     }
+    const idNuevo = `${orderId}-${key}` + (unidad && unidad > 1 ? `-u${unidad}` : "");
     pushBackorder(backorders, {
-      id: `${orderId}-${key}`,
+      id: idNuevo,
       orderId,
       orderNumber,
       stockModel,
@@ -3101,7 +3105,7 @@ export class InventoryStore {
       tipoEnvio: tipoEnvio || undefined,
     });
     await this.state.storage.put("backorders", backorders);
-    return Response.json({ ok: true, id: `${orderId}-${key}` });
+    return Response.json({ ok: true, id: idNuevo });
   }
 
   // Mantenimiento puntual: pone todo el stock a 0 y borra los pendientes de
