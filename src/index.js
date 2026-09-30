@@ -3623,7 +3623,7 @@ function renderHistoricoRepGc() {
   if (tipoFiltro === "reposicion") items = items.filter(b => b.reposicion);
   if (tipoFiltro === "gestoComercial") items = items.filter(b => b.gestoComercial);
   if (busquedaPedido) {
-    items = items.filter(b => refLabel(b).toLowerCase().includes(busquedaPedido)
+    items = items.filter(b => (refLabel(b) + (b.refSuffix || "")).toLowerCase().includes(busquedaPedido)
       || (b.orderRef || "").toLowerCase().includes(busquedaPedido)
       || String(b.orderNumber).includes(busquedaPedido));
   }
@@ -4342,7 +4342,10 @@ function renderPendientes() {
     // refLabel(b) ya cubre BEZEN+número, la referencia real de marketplace,
     // Y el prefijo "REP" de una reposición (Jennifer, 2026-09-21) — buscar
     // solo bezen+número/orderRef no encontraba "REP..." al escribirlo.
-    if (busquedaPedido && !refLabel(b).toLowerCase().includes(busquedaPedido)) return false;
+    // Con el número final incluido (Jennifer, 2026-09-30: buscaba
+    // "BEZEN121022" y no salía, solo con "BEZEN12102"), y admitiendo FPK/FUR
+    // delante, tal como se ve en el selector de envío.
+    if (busquedaPedido && !(refLabel(b) + (b.refSuffix || "")).toLowerCase().includes(busquedaPedido.replace(/^(fpk|fur)(?=bezen|rep)/, ""))) return false;
     if (currentProveedorFilter === "decision") return !!b.pendingDecision;
     if (b.pendingDecision) return false;
     if (currentProveedorFilter === "revisar") return !b.proveedor;
@@ -5282,7 +5285,7 @@ function renderFurniture() {
     // refLabel(b) ya incluye el prefijo "REP" (Jennifer, 2026-09-21) —
     // buscar solo bezen+número/orderRef no lo encontraba si se escribía
     // "REP" o la referencia completa con REP delante.
-    return refLabel(b).toLowerCase().includes(busquedaPedido);
+    return (refLabel(b) + (b.refSuffix || "")).toLowerCase().includes(busquedaPedido);
   }).sort((a, b) => parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha));
 
   document.getElementById("carga-abierta-count").textContent = (enCarga.length + reposicionesEnCarga.length) + " pedidos en esta carga";
