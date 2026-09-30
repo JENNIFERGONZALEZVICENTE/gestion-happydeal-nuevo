@@ -1724,6 +1724,10 @@ function renderPage() {
   .seur-readd-btn { padding: 5px 10px; font-size: 12px; margin: 2px 0; }
   .seur-readd-fecha { padding: 4px 6px; font-size: 12px; margin: 2px 0; }
   .mover-seur { display: flex; gap: 4px; margin-top: 4px; }
+  .mover-seur select { padding: 3px 6px; font-size: 12px; }
+  .cargas-tabs { display: flex; gap: 6px; flex-wrap: wrap; padding: 0.75rem 1rem 0; }
+  .carga-tab { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border, #d1d5db); background: transparent; color: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .carga-tab.activa { background: #1f8a4c; border-color: #1f8a4c; color: #fff; }
   .mover-seur input, .mover-seur button { padding: 3px 6px; font-size: 12px; }
   .seur-programados { margin: 1rem 2rem; }
   .seur-programados > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
@@ -2135,6 +2139,7 @@ function renderPage() {
 
 <div id="view-furniture" style="display:none">
   <div class="carga-abierta-box">
+    <div id="furniture-cargas-tabs" class="cargas-tabs"></div>
     <div class="toolbar">
       <h3 id="carga-abierta-titulo" style="margin:0">Carga</h3>
       <button type="button" id="descargar-carga-btn" class="secondary" disabled>Descargar Excel Furniture</button>
@@ -5028,13 +5033,14 @@ async function checkAutoAddCarga(orderId) {
   // Retenido por el cliente (Jennifer, 2026-09-30): no sube solo salvo que
   // ya le toque por fecha.
   if (retencionDe(order) && !retencionCumplida(order)) return;
+  const cargaRetencion = cargaParaRetencion(order);
   if (retencionDe(order)) await guardarRetencion([order.id], null);
   const notaTexto = grupo.map(o => (o.notas || "").trim()).filter(Boolean).join(" / ");
   const confirmar = notaTexto
     ? confirm(grupo.map(refLabel).join(" + ") + ' tiene una nota: "' + notaTexto + '". ¿Añadirlo a la próxima carga igualmente?')
     : true;
   if (confirmar) {
-    await anadirPedidosACarga(grupo.map(o => o.id));
+    await anadirPedidosACarga(grupo.map(o => o.id), cargaRetencion && cargaRetencion.id);
   } else if (!order.paraTenerEnCuenta) {
     // Si Jennifer dice que NO lo añada (ej. el cliente pidió recibirlo más
     // adelante), que no se pierda de vista entre el resto de pendientes —
@@ -5174,9 +5180,45 @@ async function loadFurniture() {
   ]);
   backorders = await pendRes.json();
   allCargas = await cargasRes.json();
-  cargaAbierta = allCargas.find(c => (c.tipo || "furniture") === "furniture" && c.estado === "abierta") || null;
+  elegirCargaFurniture();
   renderFurniture();
   if (await aplicarRetencionesCumplidas()) renderFurniture();
+}
+
+// Varias cargas de Furniture abiertas a la vez (Jennifer, 2026-09-30: las 2
+// próximas de miércoles/viernes). cargaAbierta es la de la pestaña
+// elegida: la tabla, descargar, listado, cerrar y "Añadir a la carga"
+// trabajan con ella. Por defecto, la más próxima.
+let cargaFurnitureElegidaId = null;
+function cargasFurnitureAbiertas() {
+  return allCargas.filter(c => (c.tipo || "furniture") === "furniture" && c.estado === "abierta").sort((a, b) => a.fecha.localeCompare(b.fecha));
+}
+function elegirCargaFurniture() {
+  const abiertas = cargasFurnitureAbiertas();
+  cargaAbierta = abiertas.find(c => c.id === cargaFurnitureElegidaId) || abiertas[0] || null;
+  cargaFurnitureElegidaId = cargaAbierta ? cargaAbierta.id : null;
+}
+function pedidosEnCargaFurniture(cargaId) {
+  return allOrders.filter(o => o.agencia === "FURNITURE" && o.cargaId === cargaId && !o.gestionadoExterno && !esMiembroSecundario(o)).length
+    + backorders.filter(b => (b.envioAparte || b.reposicion) && b.cargaId === cargaId && (b.estado === "pendiente" || b.estado === "cubierto")).length;
+}
+function renderPestanasFurniture() {
+  const abiertas = cargasFurnitureAbiertas();
+  const cont = document.getElementById("furniture-cargas-tabs");
+  cont.innerHTML = abiertas.map(c => '<button type="button" class="carga-tab' + (cargaAbierta && c.id === cargaAbierta.id ? " activa" : "") + '" data-carga-tab="' + c.id + '">'
+    + formatCargaTitulo(c) + ' · ' + pedidosEnCargaFurniture(c.id) + ' pedidos</button>').join("");
+  cont.querySelectorAll("[data-carga-tab]").forEach(btn => btn.addEventListener("click", () => {
+    cargaFurnitureElegidaId = btn.dataset.cargaTab;
+    elegirCargaFurniture();
+    renderFurniture();
+  }));
+}
+// Desplegable "Mover a…" con las otras cargas de Furniture abiertas.
+function moverFurnitureHtml(attrs) {
+  const otras = cargasFurnitureAbiertas().filter(c => !cargaAbierta || c.id !== cargaAbierta.id);
+  if (!otras.length) return "";
+  return '<div class="mover-seur"><select class="mover-fur-destino">' + otras.map(c => '<option value="' + c.id + '">' + formatCargaTitulo(c) + '</option>').join("")
+    + '</select><button type="button" class="secondary mover-fur-btn" ' + attrs + '>Mover</button></div>';
 }
 
 // Un pedido de Furniture puede tener varios artículos (ej. BEZEN12117:
@@ -5333,6 +5375,7 @@ function reposicionRowCells(b) {
 }
 
 function renderFurniture() {
+  renderPestanasFurniture();
   document.getElementById("carga-abierta-titulo").textContent = formatCargaTitulo(cargaAbierta);
   document.getElementById("cerrar-carga-btn").disabled = !cargaAbierta;
   document.getElementById("descargar-carga-btn").disabled = !cargaAbierta;
@@ -5394,14 +5437,30 @@ function renderFurniture() {
   document.querySelector("#carga-abierta-table tbody").innerHTML = enCarga.map(o => \`
     <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
       \${furnitureRowCells(o)}
-      <td><button type="button" class="sacar-carga-btn" data-id="\${o.id}">Sacar de la carga</button></td>
+      <td><button type="button" class="sacar-carga-btn" data-id="\${o.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-order-id="' + o.id + '"')}</td>
     </tr>
   \`).join("") + reposicionesEnCarga.map(b => \`
     <tr>
       \${reposicionRowCells(b)}
-      <td><button type="button" class="sacar-carga-reposicion-btn" data-repo-id="\${b.id}">Sacar de la carga</button></td>
+      <td><button type="button" class="sacar-carga-reposicion-btn" data-repo-id="\${b.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-backorder-id="' + escapeAttr(b.id) + '"')}</td>
     </tr>
   \`).join("");
+  document.querySelectorAll(".mover-fur-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const cargaId = btn.parentElement.querySelector(".mover-fur-destino").value;
+      let body;
+      if (btn.dataset.backorderId) body = { backorderId: btn.dataset.backorderId, cargaId };
+      else {
+        const order = allOrders.find(o => String(o.id) === btn.dataset.orderId);
+        body = { orderIds: pedidosDelGrupo(order).filter(o => o.cargaId).map(o => o.id), cargaId };
+      }
+      const res = await fetch("/api/cargas/furniture/mover", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) { alert(data.error || "No se ha podido mover."); return; }
+      await loadOrders();
+      await loadFurniture();
+    });
+  });
   document.querySelectorAll(".sacar-carga-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       // Envío conjunto: sale el grupo entero de la carga.
@@ -5459,7 +5518,7 @@ function renderFurniture() {
       // Añadir manualmente desde "para tener en cuenta" (Jennifer,
       // 2026-09-18: "no tengo opción de añadirlo a la carga") — una vez en
       // la carga ya no hace falta seguir teniéndolo a golpe de vista aquí.
-      await anadirPedidosACarga([id]);
+      await anadirPedidosACarga([id], cargaAbierta && cargaAbierta.id);
       await fetch("/api/pedidos/shopify/meta", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -5543,11 +5602,16 @@ function todoRecibidoFurniture(o) {
 function fechaCortaEs(f) {
   return new Date(f + "T00:00:00").toLocaleDateString("es-ES");
 }
-// ¿Le toca ya salir? Solo con fecha y si la carga abierta de Furniture es de
-// ese día o posterior.
-function retencionCumplida(o) {
+// ¿Le toca ya salir? Solo con fecha: la primera carga de Furniture abierta de
+// ese día o posterior (con las 2 próximas siempre abiertas, un retenido
+// para una fecha cercana entra ya en la carga de su día).
+function cargaParaRetencion(o) {
   const r = retencionDe(o);
-  return !!(r && r.hasta && cargaAbierta && cargaAbierta.fecha >= r.hasta);
+  if (!r || !r.hasta) return null;
+  return cargasFurnitureAbiertas().find(c => c.fecha >= r.hasta) || null;
+}
+function retencionCumplida(o) {
+  return !!cargaParaRetencion(o);
 }
 async function guardarRetencion(orderIds, retenido) {
   const ids = [...new Set(orderIds.flatMap(id => pedidosDelGrupo(allOrders.find(o => o.id === id)).map(o => o.id).concat(id)))];
@@ -5600,8 +5664,9 @@ async function aplicarRetencionesCumplidas() {
   const listos = allOrders.filter(o => o.agencia === "FURNITURE" && !o.cargaId && !o.cancelado && o.retenido && !esMiembroSecundario(o)
     && retencionCumplida(o) && todoRecibidoFurniture(o));
   for (const o of listos) {
+    const carga = cargaParaRetencion(o);
     await guardarRetencion([o.id], null);
-    await anadirPedidosACarga([o.id]);
+    await anadirPedidosACarga([o.id], carga && carga.id);
   }
   return listos.length;
 }
@@ -5660,20 +5725,24 @@ document.getElementById("anadir-tener-en-cuenta-btn").addEventListener("click", 
   renderFurniture();
 });
 
-async function anadirPedidosACarga(orderIds) {
+// cargaId opcional (Jennifer, 2026-09-30): sin él va a la carga de
+// Furniture más próxima (subidas automáticas); el botón "Añadir a la carga"
+// manda la de la pestaña elegida.
+async function anadirPedidosACarga(orderIds, cargaId) {
   // Un pedido de un envío conjunto nunca entra solo: arrastra a su grupo.
   orderIds = [...new Set(orderIds.flatMap(id => pedidosDelGrupo(allOrders.find(o => o.id === id)).filter(o => !o.cancelado).map(o => o.id).concat(id)))];
   const res = await fetch("/api/cargas/add", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ orderIds }),
+    body: JSON.stringify({ orderIds, cargaId: cargaId || undefined }),
   });
   const { carga } = await res.json();
   orderIds.forEach(id => {
     const order = allOrders.find(o => o.id === id);
     if (order) order.cargaId = carga.id;
   });
-  cargaAbierta = carga;
+  if (!allCargas.some(c => c.id === carga.id)) allCargas.push(carga);
+  if (!cargaAbierta) { cargaAbierta = carga; cargaFurnitureElegidaId = carga.id; }
   return carga;
 }
 
@@ -5700,7 +5769,7 @@ document.getElementById("anadir-carga-btn").addEventListener("click", async () =
   const orderIds = [...furnitureSeleccion];
   const repoIds = [...reposicionSeleccion];
   if (!orderIds.length && !repoIds.length) return;
-  if (orderIds.length) await anadirPedidosACarga(orderIds);
+  if (orderIds.length) await anadirPedidosACarga(orderIds, cargaAbierta && cargaAbierta.id);
   if (repoIds.length) await anadirReposicionesACarga(repoIds);
   furnitureSeleccion.clear();
   reposicionSeleccion.clear();
@@ -5789,8 +5858,10 @@ document.getElementById("cerrar-carga-btn").addEventListener("click", async () =
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ cargaId: cargaAbierta.id }),
   });
+  // Al cerrar se abre sola la siguiente de miércoles/viernes (servidor).
   cargaAbierta = null;
-  renderFurniture();
+  cargaFurnitureElegidaId = null;
+  await loadFurniture();
 });
 
 // Seguimiento de Furniture (Jennifer, 2026-09-16): sube a diario el
@@ -8899,6 +8970,24 @@ async function handleFetch(request, env) {
           "content-disposition": `attachment; filename="${filename}"`,
         },
       });
+    }
+
+    // Mover entre cargas de Furniture abiertas (Jennifer, 2026-09-30):
+    // { orderIds } (pedido con su grupo) o { backorderId } (envío aparte /
+    // reposición), y cargaId de destino.
+    if (url.pathname === "/api/cargas/furniture/mover" && request.method === "POST") {
+      const { orderIds, backorderId, cargaId } = await request.json();
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      if (backorderId) {
+        const cargas = await stub.fetch("https://do/cargas").then((r) => r.json());
+        if (!cargas.some((c) => c.id === cargaId && (c.tipo || "furniture") === "furniture" && c.estado === "abierta")) {
+          return Response.json({ ok: false, error: "Esa carga de Furniture no está abierta." }, { status: 400 });
+        }
+        const res = await inventoryStub(env).fetch("https://do/backorders/set-carga", { method: "POST", body: JSON.stringify({ id: backorderId, cargaId }) });
+        return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+      }
+      const res = await stub.fetch("https://do/cargas/furniture/mover", { method: "POST", body: JSON.stringify({ orderIds, cargaId }) });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     // Mover un envío a otra carga de SEUR abierta (Jennifer, 2026-09-30).

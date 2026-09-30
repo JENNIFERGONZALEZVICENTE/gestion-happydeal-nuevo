@@ -149,6 +149,33 @@ async function asegurarCargasSeur(storage) {
   return creadas;
 }
 
+// Cargas de Furniture fijas (Jennifer, 2026-09-30: "las cargas de Furniture
+// tienen que estar abiertas igual que las cargas de SEUR, pero solo dos veces
+// a la semana, miércoles y viernes... ahora tenemos que tener abierta la del
+// día 2 de octubre y la del miércoles 7 de octubre"): siempre abiertas las 2
+// próximas de miércoles/viernes desde hoy (hora de Madrid). Un día que ya
+// tuvo su carga cerrada no se vuelve a abrir.
+async function asegurarCargasFurniture(storage) {
+  const cargas = (await storage.get("cargas")) || [];
+  const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  const d = new Date(hoy + "T12:00:00Z");
+  let abiertas = 0;
+  let creadas = 0;
+  for (let i = 0; i < 60 && abiertas < 2; i++, d.setUTCDate(d.getUTCDate() + 1)) {
+    const w = d.getUTCDay();
+    if (!(w in DIAS_CARGA)) continue;
+    const fecha = d.toISOString().slice(0, 10);
+    const delDia = cargas.filter((c) => (c.tipo || "furniture") === "furniture" && c.fecha === fecha);
+    if (delDia.some((c) => c.estado === "abierta")) { abiertas++; continue; }
+    if (delDia.length) continue; // ya tuvo su carga y está cerrada
+    cargas.push({ id: crypto.randomUUID(), tipo: "furniture", fecha, dia: DIAS_CARGA[w], estado: "abierta", fechaCreacion: new Date().toISOString(), fechaCierre: null });
+    abiertas++;
+    creadas++;
+  }
+  if (creadas) await storage.put("cargas", cargas);
+  return creadas;
+}
+
 async function getOrCreateCargaByFecha(storage, tipo, dateObj) {
   const cargas = (await storage.get("cargas")) || [];
   const fecha = cargaFechaKey(dateObj);
@@ -777,16 +804,29 @@ export class OrdersStore {
     // reutiliza hasta que Jennifer la cierra a mano.
     if (url.pathname === "/cargas" && request.method === "GET") {
       await asegurarCargasSeur(this.state.storage);
+      await asegurarCargasFurniture(this.state.storage);
       const cargas = (await this.state.storage.get("cargas")) || [];
       return Response.json(cargas);
     }
 
     if (url.pathname === "/cargas/add" && request.method === "POST") {
-      const { orderIds } = await request.json();
+      const { orderIds, cargaId } = await request.json();
+      await asegurarCargasFurniture(this.state.storage);
       const cargas = (await this.state.storage.get("cargas")) || [];
-      let abierta = cargas.find((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta");
+      // Con varias cargas de Furniture abiertas (Jennifer, 2026-09-30): la
+      // elegida (cargaId) o, si no se dice, la más próxima.
+      const abiertasFur = cargas.filter((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta").sort((a, b) => a.fecha.localeCompare(b.fecha));
+      let abierta = cargaId ? abiertasFur.find((c) => c.id === cargaId) : abiertasFur[0];
+      if (cargaId && !abierta) return Response.json({ ok: false, error: "Esa carga de Furniture no está abierta." }, { status: 400 });
       if (!abierta) {
-        const fecha = nextCargaDate(new Date());
+        // Sin repetir un día que ya tuvo su carga cerrada (Jennifer,
+        // 2026-09-30: cerrada la del miércoles 30/09, la siguiente es la del
+        // viernes 02/10, no otra vez la de hoy).
+        let fecha = nextCargaDate(new Date());
+        while (cargas.some((c) => (c.tipo || "furniture") === "furniture" && c.fecha === cargaFechaKey(fecha))) {
+          fecha.setDate(fecha.getDate() + 1);
+          fecha = nextCargaDate(fecha);
+        }
         abierta = {
           id: crypto.randomUUID(),
           tipo: "furniture",
@@ -810,6 +850,25 @@ export class OrdersStore {
       await this.state.storage.put("cargas", cargas);
       this.broadcast();
       return Response.json({ ok: true, carga: abierta, añadidos });
+    }
+
+    // Pasar pedidos de una carga de Furniture abierta a otra (Jennifer,
+    // 2026-09-30). { orderIds, cargaId }
+    if (url.pathname === "/cargas/furniture/mover" && request.method === "POST") {
+      const { orderIds, cargaId } = await request.json();
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const destino = cargas.find((c) => c.id === cargaId && (c.tipo || "furniture") === "furniture" && c.estado === "abierta");
+      if (!destino) return Response.json({ ok: false, error: "Esa carga de Furniture no está abierta." }, { status: 400 });
+      const orders = (await this.state.storage.get("orders")) || {};
+      let movidos = 0;
+      for (const id of orderIds || []) {
+        if (!orders[id]) continue;
+        orders[id].cargaId = destino.id;
+        movidos++;
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, carga: destino, movidos });
     }
 
     // Cambiar la fecha de una carga (Jennifer, 2026-09-29: la carga abierta
