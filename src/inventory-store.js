@@ -3060,7 +3060,10 @@ export class InventoryStore {
   // colchón de reposición que no pasa por proveedor ni descuenta stock):
   // `envioSeur: { cargaId, reposicion }` lo crea directamente como
   // "listo-seur" dentro de esa carga de SEUR.
-  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo, refSuffix, envioSeur }) {
+  // `color`, `esPack` y `tipoEnvio` (Jennifer, 2026-09-30, BEZEN12146: dos
+  // packs de canapé de madera Cerezo metidos a mano) — sin color el canapé
+  // no saca bien sus piezas en Furniture.
+  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo, refSuffix, envioSeur, color, esPack, tipoEnvio }) {
     if (!orderId || !stockModel || !talla || !proveedor) {
       return Response.json({ ok: false, error: "Faltan orderId, stockModel, talla o proveedor." }, { status: 400 });
     }
@@ -3088,12 +3091,14 @@ export class InventoryStore {
       tipo: tipo || "colchon",
       cantidad: cantidad || 1,
       orderDate,
-      esPack: false,
+      esPack: !!esPack,
       proveedor,
       referencia: referencia || null,
       platform,
       orderRef,
       refSuffix: refSuffix ? String(refSuffix) : "",
+      color: color || "",
+      tipoEnvio: tipoEnvio || undefined,
     });
     await this.state.storage.put("backorders", backorders);
     return Response.json({ ok: true, id: `${orderId}-${key}` });
