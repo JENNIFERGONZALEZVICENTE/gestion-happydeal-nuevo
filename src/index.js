@@ -4445,7 +4445,14 @@ function renderPendientes() {
     // programada en ninguna carga (sin cargaId).
     const pedidoDelColchon = mostrarSelectorEnvio ? allOrders.find(o => o.orderNumber === b.orderNumber) : null;
     const cargaDelColchon = pedidoDelColchon?.cargaId ? allCargas.find(c => c.id === pedidoDelColchon.cargaId) : null;
+    // Pedidos del sistema antiguo (Jennifer, 2026-09-30, BEZEN12137): la
+    // tapicería salió sin pasar por una carga de aquí — cuenta como enviada
+    // si ya tiene seguimiento de Furniture o está marcada a mano.
+    const seguimientoFur = pedidoDelColchon && (pedidoDelColchon.furnitureTracking || []).filter(t => t.estado);
+    const tapiceriaYaEnviada = !cargaDelColchon && pedidoDelColchon && (pedidoDelColchon.tapiceriaEnviada || (seguimientoFur && seguimientoFur.length));
     const furnitureEstadoTag = !mostrarSelectorEnvio ? ""
+      : tapiceriaYaEnviada
+      ? \`<span class="furniture-ya-salio-tag">ℹ Tapicería ya enviada\${seguimientoFur && seguimientoFur.length ? " (" + seguimientoFur.map(t => t.albaran + ": " + t.estado).join(", ") + ")" : ""}</span>\`
       : cargaDelColchon?.estado === "cerrada"
       ? \`<span class="furniture-ya-salio-tag">ℹ Furniture de este pedido ya salió (\${new Date(cargaDelColchon.fechaCierre).toLocaleDateString("es-ES")})</span>\`
       : cargaDelColchon?.estado === "abierta"
