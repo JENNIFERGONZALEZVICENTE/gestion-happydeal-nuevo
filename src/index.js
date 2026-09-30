@@ -7211,8 +7211,16 @@ function piezasBackorder(b, productoTexto, tapaPartida, servicios) {
     // Si Jennifer ha elegido el formato de un canapé de 160 (2026-09-28),
     // manda sobre lo que diga la variante de Shopify.
     const gemelo = b.formato160 ? b.formato160 === "GEMELOS" : esGemeloFurniture(medida, productoTexto);
-    const piezas = rule.gen(rule.modelo, medida, color, referencia, tapaPartida, gemelo);
-    return tapaReforzadaFurniture(servicios) ? marcarTapaReforzada(piezas) : piezas;
+    let piezas = rule.gen(rule.modelo, medida, color, referencia, tapaPartida, gemelo);
+    if (tapaReforzadaFurniture(servicios)) piezas = marcarTapaReforzada(piezas);
+    // Tapa sacada del almacén (Jennifer, 2026-09-30, BEZEN12211): referencia
+    // "STOCK" solo en la(s) tapa(s); el resto lleva la referencia de Polival.
+    if (b.tapaStock) {
+      piezas = piezas.map((p) => (/^TAPA/.test(p.parte)
+        ? { ...p, texto: "STOCK " + (referencia && p.texto.startsWith(referencia + " ") ? p.texto.slice(referencia.length + 1) : p.texto) }
+        : p));
+    }
+    return piezas;
   }
   if (t.includes("cabecero")) {
     const medidaTxt = extraerMedidaDeMercancia(b.mercanciaFabrica) || b.talla || "";
@@ -7430,6 +7438,7 @@ function productoAlmacen(b, productoTexto, services) {
     else if (b.formato160 === "PARTIDO") extras.push("PARTIDO");
     else if (tapaPartidaFurniture(services)) extras.push("TAPA PARTIDA");
     if (tapaReforzadaFurniture(services)) extras.push("TAPA REFORZADA");
+    if (b.tapaStock) extras.push("TAPA EN STOCK");
     return [rule ? rule.modelo : stockModel, b.talla, color].filter(Boolean).join(" ") + (extras.length ? " · " + extras.join(" · ") : "");
   }
   const piezas = piezasBackorder({ ...b, cantidad: 1, referencia: "" }, productoTexto, false, services);
