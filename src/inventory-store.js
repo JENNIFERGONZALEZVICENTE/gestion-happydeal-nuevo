@@ -3041,12 +3041,29 @@ export class InventoryStore {
   // `refSuffix` (Jennifer, 2026-09-29, Conforama ES 40451996M-A: una unidad
   // ya salió y la otra queda pendiente): número pegado al final de la
   // referencia del pedido en los ficheros de envío, ej. "3".
-  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo, refSuffix }) {
+  // Envío suelto ya listo para SEUR (Jennifer, 2026-09-30, REPBEZEN12176:
+  // colchón de reposición que no pasa por proveedor ni descuenta stock):
+  // `envioSeur: { cargaId, reposicion }` lo crea directamente como
+  // "listo-seur" dentro de esa carga de SEUR.
+  async crearPendienteManual({ orderId, orderNumber, platform, orderRef, stockModel, talla, cantidad, orderDate, proveedor, referencia, tipo, refSuffix, envioSeur }) {
     if (!orderId || !stockModel || !talla || !proveedor) {
       return Response.json({ ok: false, error: "Faltan orderId, stockModel, talla o proveedor." }, { status: 400 });
     }
     const backorders = await this.load("backorders", []);
     const key = stockKey(stockModel, talla);
+    if (envioSeur) {
+      const id = `${orderId}-${key}-envio-seur-${envioSeur.cargaId}`;
+      pushBackorder(backorders, {
+        id, orderId, orderNumber, stockModel, talla, tipo: tipo || "colchon", cantidad: cantidad || 1, orderDate,
+        esPack: false, proveedor, referencia: referencia || null, platform, orderRef, refSuffix: refSuffix ? String(refSuffix) : "",
+        estado: "listo-seur", recibidoFabrica: true, reposicion: !!envioSeur.reposicion, agenciaReposicion: envioSeur.reposicion ? "SEUR" : undefined,
+      });
+      const b = backorders.find((x) => x.id === id);
+      b.cargaId = envioSeur.cargaId;
+      b.mercanciaFabrica = "ENVÍO SUELTO — no pasa por proveedor ni descuenta stock";
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, id, backorder: b });
+    }
     pushBackorder(backorders, {
       id: `${orderId}-${key}`,
       orderId,
