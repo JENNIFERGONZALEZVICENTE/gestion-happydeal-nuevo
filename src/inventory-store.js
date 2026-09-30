@@ -2187,6 +2187,17 @@ export class InventoryStore {
       return Response.json(entry);
     }
 
+    // Cambiar de carga de SEUR un colchón ya preparado (Jennifer, 2026-09-30).
+    if (url.pathname === "/backorders/set-carga" && method === "POST") {
+      const { id, cargaId } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const entry = backorders.find((b) => b.id === id);
+      if (!entry) return Response.json({ ok: false, error: "Artículo no encontrado." }, { status: 404 });
+      entry.cargaId = cargaId;
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, backorder: entry });
+    }
+
     if (url.pathname === "/admin/crear-pendiente-manual" && method === "POST") {
       return this.crearPendienteManual(await request.json());
     }
@@ -3462,7 +3473,10 @@ export class InventoryStore {
   // varias cargas de SEUR abiertas a la vez (hoy y mañana), a diferencia de
   // Furniture que solo tiene una.
   async getOrCreateSeurCarga(fecha) {
-    if (fecha !== "hoy" && fecha !== "manana") return null;
+    // También un día concreto AAAA-MM-DD laborable (Jennifer, 2026-09-30:
+    // programar el envío para la fecha que pida el cliente).
+    const esDia = /^\d{4}-\d{2}-\d{2}$/.test(fecha || "") && ![0, 6].includes(new Date(fecha + "T12:00:00Z").getUTCDay());
+    if (fecha !== "hoy" && fecha !== "manana" && !esDia) return null;
     const id = this.env.ORDERS_STORE.idFromName("shopify");
     const stub = this.env.ORDERS_STORE.get(id);
     const res = await stub.fetch("https://do/cargas/seur/get-or-create", {

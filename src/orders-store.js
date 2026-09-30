@@ -849,6 +849,22 @@ export class OrdersStore {
       return Response.json({ ok: true, carga });
     }
 
+    // Mover un pedido de una carga de SEUR a otra (Jennifer, 2026-09-30:
+    // BEZEN12099 pasa del viernes 02/10 al jueves 01/10).
+    if (url.pathname === "/cargas/seur/mover-pedido" && request.method === "POST") {
+      const { orderId, cargaId } = await request.json();
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const destino = cargas.find((c) => c.id === cargaId && c.tipo === "seur" && c.estado === "abierta");
+      if (!destino) return Response.json({ ok: false, error: "Esa carga de SEUR no está abierta." }, { status: 400 });
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      order.cargaId = destino.id;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, carga: destino });
+    }
+
     // Llamado por InventoryStore (Jennifer, 2026-09-08) al marcar un
     // pendiente de colchón como "listo para SEUR" — hoy o mañana, elegido a
     // mano porque puede ser un pedido atrasado que quiere que salga ya.

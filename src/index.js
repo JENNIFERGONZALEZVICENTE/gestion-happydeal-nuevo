@@ -1712,6 +1712,10 @@ function renderPage() {
   #view-seur .carga-abierta-box table, #view-historial-cargas-seur .carga-historial-card table { min-width: 0; }
   .seur-readd-btn { padding: 5px 10px; font-size: 12px; margin: 2px 0; }
   .seur-readd-fecha { padding: 4px 6px; font-size: 12px; margin: 2px 0; }
+  .mover-seur { display: flex; gap: 4px; margin-top: 4px; }
+  .mover-seur input, .mover-seur button { padding: 3px 6px; font-size: 12px; }
+  .seur-programados { margin: 1rem 2rem; }
+  .seur-programados > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
   .carga-abierta-box .table-wrap, .carga-historial-card .table-wrap { overflow-x: auto; max-width: calc(100% - 4rem); }
   .carga-historial-card .table-wrap { max-height: 420px; }
   /* Jennifer, 2026-09-29: "que toda la información entre a golpe de vista" —
@@ -2362,12 +2366,14 @@ function renderPage() {
 
 <div class="modal-overlay" id="seur-fecha-modal-overlay">
   <div class="modal-box">
-    <h3>¿Carga de hoy o de mañana?</h3>
+    <h3>¿En qué carga de SEUR sale?</h3>
     <p id="seur-fecha-modal-texto" style="color:var(--muted);font-size:13px"></p>
+    <label style="font-size:13px">Día de la carga (cualquier día laborable, aunque sea dentro de varias semanas):
+      <input type="date" id="seur-fecha-input" style="display:block;margin-top:6px" />
+    </label>
     <div class="modal-actions">
       <button type="button" class="secondary" id="seur-fecha-modal-cancel">Cancelar</button>
-      <button type="button" class="secondary" id="seur-fecha-hoy-btn">Carga de hoy</button>
-      <button type="button" id="seur-fecha-manana-btn">Carga de mañana</button>
+      <button type="button" id="seur-fecha-ok-btn">Preparar para ese día</button>
     </div>
   </div>
 </div>
@@ -6277,15 +6283,43 @@ function pedidosSeurFueraDeCarga() {
   return allOrders.filter(o => o.agencia === "SEUR" && !o.cargaId && !o.cancelado && o.shippingStatus !== "fulfilled"
     && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "cubierto" && String(b.id).endsWith("-cubierto")));
 }
+// Ventana de cargas de SEUR a la vista (Jennifer, 2026-09-30): los 5
+// próximos días laborables desde hoy (primera, el 01/10). Las cargas
+// programadas más allá se ven aparte, plegadas. Mismo cálculo que
+// diasCargaSeur en orders-store.js.
+function hoyMadrid() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+}
+function finVentanaSeur() {
+  const hoy = hoyMadrid();
+  const d = new Date((hoy < "2026-10-01" ? "2026-10-01" : hoy) + "T12:00:00Z");
+  let n = 0, ultimo = "";
+  while (n < 5) {
+    const w = d.getUTCDay();
+    if (w !== 0 && w !== 6) { n++; ultimo = d.toISOString().slice(0, 10); }
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return ultimo;
+}
+function errorFechaSeur(fecha) {
+  if (!fecha) return "Elige primero el día.";
+  const w = new Date(fecha + "T12:00:00Z").getUTCDay();
+  if (w === 0 || w === 6) return "No hay cargas de SEUR ni sábado ni domingo.";
+  if (fecha < hoyMadrid()) return "Esa fecha ya ha pasado.";
+  return null;
+}
+function primerDiaSeur() {
+  const abiertas = allCargas.filter(c => c.tipo === "seur" && c.estado === "abierta" && c.fecha >= hoyMadrid()).map(c => c.fecha).sort();
+  return abiertas[0] || hoyMadrid();
+}
+
 function renderSeurFueraCarga() {
   const cont = document.getElementById("seur-fuera-carga");
   const pedidos = pedidosSeurFueraDeCarga();
   if (!pedidos.length) { cont.innerHTML = ""; return; }
-  // Elegir cualquiera de los días con carga abierta (Jennifer, 2026-09-30:
-  // una carga de SEUR por cada día laborable).
-  const opcionesDiasSeur = allCargas.filter(c => c.tipo === "seur" && c.estado === "abierta")
-    .sort((a, b) => a.fecha.localeCompare(b.fecha))
-    .map(c => '<option value="' + c.fecha + '">' + formatSeurCargaTitulo(c).replace("Carga ", "") + '</option>').join("");
+  // Cualquier día laborable, aunque su carga aún no se vea (Jennifer,
+  // 2026-09-30).
+  const diaPorDefecto = primerDiaSeur();
   cont.innerHTML = \`
     <div class="carga-abierta-box tener-en-cuenta-box">
       <div class="toolbar"><h3 style="margin:0">Pedidos de SEUR fuera de carga</h3></div>
@@ -6296,7 +6330,7 @@ function renderSeurFueraCarga() {
           <tbody>\${pedidos.map(o => \`<tr>
             \${seurOrderRowCells(o, "")}
             <td>
-              <select class="seur-readd-fecha" data-order-id="\${escapeAttr(String(o.id))}">\${opcionesDiasSeur}</select>
+              <input type="date" class="seur-readd-fecha" data-order-id="\${escapeAttr(String(o.id))}" min="\${hoyMadrid()}" value="\${diaPorDefecto}" />
               <button type="button" class="seur-readd-btn" data-order-id="\${escapeAttr(String(o.id))}">A la carga</button>
               \${noSalioButton(o)}
             </td>
@@ -6306,9 +6340,12 @@ function renderSeurFueraCarga() {
     </div>\`;
   cont.querySelectorAll(".seur-readd-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
+      const fecha = [...cont.querySelectorAll(".seur-readd-fecha")].find(s => s.dataset.orderId === btn.dataset.orderId).value;
+      const error = errorFechaSeur(fecha);
+      if (error) { alert(error); return; }
       const res = await fetch("/api/cargas/seur/add", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ orderIds: [btn.dataset.orderId], fecha: [...cont.querySelectorAll(".seur-readd-fecha")].find(s => s.dataset.orderId === btn.dataset.orderId).value }),
+        body: JSON.stringify({ orderIds: [btn.dataset.orderId], fecha }),
       });
       if (!res.ok) { alert("No se ha podido añadir a la carga."); return; }
       await loadOrders();
@@ -6325,17 +6362,24 @@ function renderSeurCargas() {
     cont.innerHTML = '<p style="margin:1rem 2rem;color:var(--muted)">No hay ninguna carga de SEUR abierta todavía.</p>';
     return;
   }
-  cont.innerHTML = cargasAbiertas.map(carga => {
+  // Las cargas más allá de los 5 días laborables a la vista (programadas a
+  // petición del cliente, Jennifer, 2026-09-30) van aparte, plegadas.
+  const fin = finVentanaSeur();
+  const aLaVista = cargasAbiertas.filter(c => c.fecha <= fin);
+  const programadas = cargasAbiertas.filter(c => c.fecha > fin && seurEnviosDeCarga(c.id).length);
+  const tarjeta = carga => {
     const filas = seurEnviosDeCarga(carga.id);
     const filasHtml = filas.map(({ o, refSuffix, backorderId, backorder }) => {
       const cells = backorder && (backorder.gestoComercial || backorder.reposicion) ? seurBackorderRowCells(backorder) : seurOrderRowCells(o, refSuffix);
       const quitarLabel = backorder && backorder.gestoComercial ? "El gesto comercial no vino: quitar" : (backorder && backorder.reposicion ? "La reposición no vino: quitar" : "El colchón no vino: quitar");
+      // Mover a cualquier día laborable (Jennifer, 2026-09-30).
+      const moverHtml = \`<div class="mover-seur"><input type="date" class="mover-seur-fecha" min="\${hoyMadrid()}" /><button type="button" class="secondary mover-seur-btn" data-order-id="\${backorderId ? "" : escapeAttr(String(o.id))}" data-backorder-id="\${backorderId ? escapeAttr(backorderId) : ""}">Mover a ese día</button></div>\`;
       return \`
       <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
         \${cells}
         <td>\${backorderId
           ? \`<button type="button" class="quitar-seur-btn" data-id="\${backorderId}">\${quitarLabel}</button>\`
-          : \`<button type="button" class="sacar-carga-btn sacar-carga-seur-btn" data-order-id="\${escapeAttr(String(o.id))}">Sacar de la carga</button>\`}</td>
+          : \`<button type="button" class="sacar-carga-btn sacar-carga-seur-btn" data-order-id="\${escapeAttr(String(o.id))}">Sacar de la carga</button>\`}\${moverHtml}</td>
       </tr>
     \`;
     }).join("");
@@ -6355,7 +6399,13 @@ function renderSeurCargas() {
         </div>
       </div>
     \`;
-  }).join("");
+  };
+  const nProgramados = programadas.reduce((n, c) => n + seurEnviosDeCarga(c.id).length, 0);
+  cont.innerHTML = aLaVista.map(tarjeta).join("") + (programadas.length ? \`
+    <details class="seur-programados">
+      <summary>Envíos programados más adelante — \${nProgramados} envío(s) en \${programadas.length} carga(s): \${programadas.map(c => new Date(c.fecha + "T00:00:00").toLocaleDateString("es-ES")).join(", ")}</summary>
+      \${programadas.map(tarjeta).join("")}
+    </details>\` : "");
   document.querySelectorAll(".cerrar-carga-seur-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       const carga = allCargas.find(c => c.id === btn.dataset.id);
@@ -6398,6 +6448,19 @@ function renderSeurCargas() {
   });
   document.querySelectorAll(".descargar-seur-btn").forEach(btn => {
     btn.addEventListener("click", () => descargarFicheroSeur(btn.dataset.id));
+  });
+  document.querySelectorAll(".mover-seur-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const fecha = btn.parentElement.querySelector(".mover-seur-fecha").value;
+      const error = errorFechaSeur(fecha);
+      if (error) { alert(error); return; }
+      const body = btn.dataset.backorderId ? { backorderId: btn.dataset.backorderId, fecha } : { orderId: btn.dataset.orderId, fecha };
+      const res = await fetch("/api/cargas/seur/mover", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) { alert(data.error || "No se ha podido mover."); return; }
+      await loadOrders();
+      loadSeur();
+    });
   });
 }
 
@@ -6883,6 +6946,9 @@ function abrirModalFechaSeur(id) {
   if (!b) return;
   seurFechaModalBackorderId = id;
   document.getElementById("seur-fecha-modal-texto").textContent = refLabel(b) + " — " + b.cantidad + "x " + b.stockModel + " (" + b.talla + ")";
+  const input = document.getElementById("seur-fecha-input");
+  input.min = hoyMadrid();
+  input.value = primerDiaSeur();
   document.getElementById("seur-fecha-modal-overlay").classList.add("open");
 }
 function cerrarModalFechaSeur() {
@@ -6909,8 +6975,12 @@ async function confirmarFechaSeur(fecha) {
   }
   loadPendientes();
 }
-document.getElementById("seur-fecha-hoy-btn").addEventListener("click", () => confirmarFechaSeur("hoy"));
-document.getElementById("seur-fecha-manana-btn").addEventListener("click", () => confirmarFechaSeur("manana"));
+document.getElementById("seur-fecha-ok-btn").addEventListener("click", () => {
+  const fecha = document.getElementById("seur-fecha-input").value;
+  const error = errorFechaSeur(fecha);
+  if (error) { alert(error); return; }
+  confirmarFechaSeur(fecha);
+});
 
 // Campanita de "pedido cancelado con pendiente en Proveedores" (Jennifer,
 // 2026-09-16): el contador se refresca solo (carga inicial + cada update
@@ -7703,6 +7773,17 @@ function calificaNetExpressExport(title, talla) {
   if (matchesKeywordSeur(title, NETEXPRESS_ANCHO_135_KEYWORDS_EXPORT)) return ancho >= 135;
   if (matchesKeywordSeur(title, NETEXPRESS_ANCHO_180_KEYWORDS_EXPORT)) return ancho >= 180;
   return false;
+}
+
+// Fecha elegida para una carga de SEUR: AAAA-MM-DD, laborable y no pasada
+// (hora de Madrid). Devuelve el motivo si no vale, o null.
+function errorFechaCargaSeur(fecha) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha || "")) return "Fecha no válida.";
+  const w = new Date(fecha + "T12:00:00Z").getUTCDay();
+  if (w === 0 || w === 6) return "No hay cargas de SEUR ni sábado ni domingo.";
+  const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  if (fecha < hoy) return "Esa fecha ya ha pasado.";
+  return null;
 }
 
 function buildSeurCsv(rows) {
@@ -8557,6 +8638,24 @@ async function handleFetch(request, env) {
           "content-disposition": `attachment; filename="${filename}"`,
         },
       });
+    }
+
+    // Mover un envío a otra carga de SEUR abierta (Jennifer, 2026-09-30).
+    // { orderId } para un pedido metido entero, { backorderId } para un
+    // colchón preparado desde Luso/New (o envío suelto); fecha AAAA-MM-DD.
+    // Cualquier día laborable futuro (Jennifer: "el cliente solicita que se
+    // mande mucho más adelante, por ejemplo en 15 días"): si la carga de ese
+    // día aún no existe, se crea.
+    if (url.pathname === "/api/cargas/seur/mover" && request.method === "POST") {
+      const { orderId, backorderId, fecha } = await request.json();
+      const error = errorFechaCargaSeur(fecha);
+      if (error) return Response.json({ ok: false, error }, { status: 400 });
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const destino = await stub.fetch("https://do/cargas/seur/get-or-create", { method: "POST", body: JSON.stringify({ fecha }) }).then((r) => r.json());
+      const res = backorderId
+        ? await inventoryStub(env).fetch("https://do/backorders/set-carga", { method: "POST", body: JSON.stringify({ id: backorderId, cargaId: destino.id }) })
+        : await stub.fetch("https://do/cargas/seur/mover-pedido", { method: "POST", body: JSON.stringify({ orderId, cargaId: destino.id }) });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     if (url.pathname === "/api/cargas/seur/export" && request.method === "GET") {
