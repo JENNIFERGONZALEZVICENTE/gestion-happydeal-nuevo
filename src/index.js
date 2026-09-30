@@ -4317,6 +4317,21 @@ async function loadPendientes() {
   renderPendientes();
 }
 
+// Aviso que desaparece solo, sin bloquear la pantalla como un alert.
+function mostrarAvisoBreve(texto) {
+  let el = document.getElementById("aviso-breve");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "aviso-breve";
+    el.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#15803d;color:#fff;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:9999;max-width:90vw;text-align:center";
+    document.body.appendChild(el);
+  }
+  el.textContent = texto;
+  el.style.display = "block";
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.display = "none"; }, 5000);
+}
+
 let pedidoFabricaSeleccion = new Set();
 function renderPendientes() {
   const busquedaReferencia = document.getElementById("pendientes-referencia-search").value.trim().toLowerCase();
@@ -4492,8 +4507,11 @@ function renderPendientes() {
     // Un colchón transformado va abierto: siempre Furniture, nunca SEUR
     // (Jennifer, 2026-09-28).
     // Un colchón suelto marcado FUR (con o sin tapicería, Jennifer,
-    // 2026-09-30) sale por Furniture: "Marcar recibido", no SEUR.
-    const esColchonSeur = ((b.tipo === "colchon" && !b.esPack && !b.transformadoDesde && b.tipoEnvio !== "FUR") && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
+    // 2026-09-30) sale por Furniture: "Marcar recibido", no SEUR. Y al revés,
+    // un colchón de pack en FPK sale independiente por SEUR (Jennifer,
+    // 2026-09-30, BEZEN12117: la tapicería ya salió y los colchones "cuando
+    // vengan saldrán por SEUR") — antes no tenía forma de prepararse para SEUR.
+    const esColchonSeur = ((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
     // Sustituir por otro modelo que sí hay en stock (Jennifer, 2026-09-18):
     // vale tanto para colchón suelto como de pack, mientras siga
     // "pendiente" — una vez preparado o sustituido ya no aplica. El propio
@@ -4508,7 +4526,7 @@ function renderPendientes() {
     const resolverCell = esCancelado
       ? \`<span class="cancelado-tag">✕ CANCELADO\${b.fechaCancelado ? " " + new Date(b.fechaCancelado).toLocaleDateString("es-ES") : ""}</span>\`
       : esColchonSeur
-      ? \`<button type="button" class="resolver-seur-btn" data-id="\${b.id}">Preparar para SEUR</button>\${sustituirBtnHtml}\`
+      ? \`<button type="button" class="recibido-seur-btn" data-id="\${b.id}" title="Recibido: entra solo en la próxima carga de SEUR (antes de las 15:00, la de mañana; después, la de pasado mañana)">Marcar recibido</button> <button type="button" class="secondary resolver-seur-btn" data-id="\${b.id}" title="Recibido y programado para el día que pida el cliente">📅 Otro día</button>\${sustituirBtnHtml}\`
       : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${sustituirBtnHtml}\`;
     const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button></div>\`;
     return \`
@@ -4568,6 +4586,20 @@ function renderPendientes() {
   });
   tbody.querySelectorAll(".resolver-seur-btn").forEach(btn => {
     btn.addEventListener("click", () => abrirModalFechaSeur(btn.dataset.id));
+  });
+  // Colchón que va solo: al marcarlo recibido entra en la próxima carga de
+  // SEUR (Jennifer, 2026-09-30).
+  tbody.querySelectorAll(".recibido-seur-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(btn.dataset.id) + "/resolver-seur", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha: "auto" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) { alert(data.error || "No se pudo preparar para SEUR."); btn.disabled = false; return; }
+      if (data.carga) mostrarAvisoBreve("Recibido. Sale en la " + formatSeurCargaTitulo(data.carga) + " (se puede mover de día en SEUR).");
+      loadPendientes();
+    });
   });
   tbody.querySelectorAll(".sustituir-btn").forEach(btn => {
     btn.addEventListener("click", () => {

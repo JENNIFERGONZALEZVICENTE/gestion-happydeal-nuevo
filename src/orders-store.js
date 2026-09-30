@@ -90,6 +90,19 @@ function nextSeurCargaDate(from) {
 function seurCargaDateFromChoice(choice) {
   // Fecha concreta (AAAA-MM-DD) elegida en el desplegable de días abiertos.
   if (/^\d{4}-\d{2}-\d{2}$/.test(choice || "")) return new Date(choice + "T00:00:00Z");
+  // "auto" (Jennifer, 2026-09-30: "si los marco como recibidos y el colchón
+  // va solo se tienen que preparar solos para SEUR"): la próxima carga con el
+  // corte de las 15:00 en hora de Madrid — antes de las 15:00, mañana;
+  // después, pasado mañana; sin sábados ni domingos.
+  if (choice === "auto") {
+    const ahora = new Date();
+    const hoy = ahora.toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+    const hora = Number(ahora.toLocaleString("en-GB", { timeZone: "Europe/Madrid", hour: "2-digit", hour12: false }));
+    const d = new Date(hoy + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + (hora >= 15 ? 2 : 1));
+    while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() + 1);
+    return d;
+  }
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   if (choice === "manana") d.setDate(d.getDate() + 1);

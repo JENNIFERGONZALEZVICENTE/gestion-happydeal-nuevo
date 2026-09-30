@@ -3485,7 +3485,7 @@ export class InventoryStore {
     // También un día concreto AAAA-MM-DD laborable (Jennifer, 2026-09-30:
     // programar el envío para la fecha que pida el cliente).
     const esDia = /^\d{4}-\d{2}-\d{2}$/.test(fecha || "") && ![0, 6].includes(new Date(fecha + "T12:00:00Z").getUTCDay());
-    if (fecha !== "hoy" && fecha !== "manana" && !esDia) return null;
+    if (fecha !== "hoy" && fecha !== "manana" && fecha !== "auto" && !esDia) return null;
     const id = this.env.ORDERS_STORE.idFromName("shopify");
     const stub = this.env.ORDERS_STORE.get(id);
     const res = await stub.fetch("https://do/cargas/seur/get-or-create", {
