@@ -9447,13 +9447,16 @@ async function handleFetch(request, env) {
       const c = result.carga;
       const fechaCorta = c.fecha.slice(8, 10) + "/" + c.fecha.slice(5, 7);
       const bultos = result.filas.reduce((n, f) => n + (f.cantidad || 1), 0);
-      const grupos = [];
+      // Solo modelo y medida, sumando las unidades iguales.
+      const lineas = [];
       for (const f of result.filas) {
-        let g = grupos.find((x) => x.origen === f.origen);
-        if (!g) grupos.push((g = { origen: f.origen, filas: [] }));
-        g.filas.push(f);
+        const producto = String(f.producto || "").replace(/^COLCHÓN\s+/i, "");
+        const l = lineas.find((x) => x.producto === producto);
+        if (l) l.cantidad += f.cantidad || 1;
+        else lineas.push({ producto, cantidad: f.cantidad || 1 });
       }
-      const pdf = resumenSeurPdf({ titulo: `SEUR  ${c.dia} ${fechaCorta}  ·  ${bultos} ${bultos === 1 ? "BULTO" : "BULTOS"}`, grupos });
+      lineas.sort((x, y) => x.producto.localeCompare(y.producto, "es", { numeric: true }));
+      const pdf = resumenSeurPdf({ titulo: `SEUR  ${c.dia} ${fechaCorta}  ·  ${bultos} ${bultos === 1 ? "BULTO" : "BULTOS"}`, lineas });
       const nombrePdf = `Carga SEUR ${c.fecha}.pdf`;
       if (request.method === "GET" && url.searchParams.get("ver") === "1") {
         return new Response(pdf, { headers: { "content-type": "application/pdf", "content-disposition": `inline; filename="${nombrePdf}"` } });
@@ -9462,7 +9465,8 @@ async function handleFetch(request, env) {
       const texto = [
         `Carga de SEUR del ${c.dia.toLowerCase()} ${fechaCorta}: ${bultos} ${bultos === 1 ? "bulto" : "bultos"}.`,
         "",
-        ...grupos.flatMap((g) => [g.origen + ":", ...g.filas.map((f) => `  ${f.pedido} — ${f.producto}${f.cantidad > 1 ? " x" + f.cantidad : ""}`), ""]),
+        ...lineas.map((l) => `${l.cantidad} x ${l.producto}`),
+        "",
         "Se adjunta el resumen en etiqueta 15×10 para imprimir.",
       ].join("\n");
       const r = await enviarEmailAlmacen(env, { asunto: `Carga SEUR ${c.dia} ${fechaCorta}`, texto, pdf, nombrePdf });

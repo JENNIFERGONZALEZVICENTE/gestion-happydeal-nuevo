@@ -5,6 +5,7 @@
 // codificación WinAnsi, que cubre las tildes y la ñ.
 
 const MM = 72 / 25.4;
+const NL = String.fromCharCode(10);
 const ANCHO = 150 * MM;
 const ALTO = 100 * MM;
 
@@ -117,43 +118,44 @@ function paginaReserva(datos) {
 
 // Resumen de una carga de SEUR para el almacén (Jennifer, 2026-10-01: "el
 // resumen de listado almacén lo metas en una etiqueta de 10x15 y que se
-// envíe al email del almacén"). El mismo contenido que el Excel "Listado
-// almacén", agrupado por de dónde sale; si no cabe, sigue en otra etiqueta.
-// resumen: { titulo, grupos: [{ origen, filas: [{ pedido, producto, cantidad }] }] }
+// envíe al email del almacén"). Solo modelo y medida con cuántas unidades
+// (Jennifer: "la referencia del pedido, si está en stock o apartado... eso
+// no hace falta"). Si no cabe, sigue en otra etiqueta.
+// resumen: { titulo, lineas: [{ producto, cantidad }] }
 function paginasResumenSeur(resumen) {
+  // Dos columnas para que una carga normal quepa en una sola etiqueta.
   const MARGEN = 8 * MM;
-  const IZQ = MARGEN + 2;
-  const UTIL = ANCHO - 2 * MARGEN - 4;
-  const TAM = 9;
-  const SALTO = 11.5;
+  const HUECO = 10;
+  const COL = (ANCHO - 2 * MARGEN - 8 - HUECO) / 2;
+  const TAM = 10;
+  const SALTO = 12.5;
+  const ARRIBA = ALTO - MARGEN - 4 - 14 * 0.74 - 7 - SALTO - 1;
   const paginas = [];
-  let ops, y, num = 0;
+  let ops, y, col = 0, num = 0;
   const nueva = () => {
     num++;
+    col = 0;
     ops = ["1.5 w", `${MARGEN / 2} ${MARGEN / 2} ${ANCHO - MARGEN} ${ALTO - MARGEN} re S`];
     paginas.push(ops);
-    y = ALTO - MARGEN - 4 - 14 * 0.74;
+    const yCab = ALTO - MARGEN - 4 - 14 * 0.74;
     const cab = resumen.titulo + (num > 1 ? "  (sigue)" : "");
-    ops.push(`BT /F2 14 Tf ${((ANCHO - anchoTexto(cab, 14)) / 2).toFixed(1)} ${y.toFixed(1)} Td ${cadenaPdf(cab)} Tj ET`);
-    y -= 7;
-    ops.push("0.6 w", `${MARGEN} ${y.toFixed(1)} m ${ANCHO - MARGEN} ${y.toFixed(1)} l S`);
-    y -= SALTO + 1;
-  };
-  const texto = (t, negrita, sangria = 0) => {
-    for (const l of partirLineas(t, TAM, UTIL - sangria, negrita)) {
-      if (y < MARGEN + 2) nueva();
-      ops.push(`BT ${negrita ? "/F2" : "/F1"} ${TAM} Tf ${(IZQ + sangria).toFixed(1)} ${y.toFixed(1)} Td ${cadenaPdf(l)} Tj ET`);
-      y -= SALTO;
-    }
+    ops.push(`BT /F2 14 Tf ${((ANCHO - anchoTexto(cab, 14)) / 2).toFixed(1)} ${yCab.toFixed(1)} Td ${cadenaPdf(cab)} Tj ET`);
+    ops.push("0.6 w", `${MARGEN} ${(yCab - 7).toFixed(1)} m ${ANCHO - MARGEN} ${(yCab - 7).toFixed(1)} l S`);
+    y = ARRIBA;
   };
   nueva();
-  for (const g of resumen.grupos) {
-    if (y < MARGEN + 2 + SALTO) nueva();
-    texto(String(g.origen).toUpperCase(), true);
-    for (const r of g.filas) texto(`${r.pedido}   ${r.producto}${r.cantidad > 1 ? "   x" + r.cantidad : ""}`, false, 8);
-    y -= 3;
+  for (const r of resumen.lineas) {
+    const partes = partirLineas(`${r.cantidad > 1 ? r.cantidad : 1} x ${r.producto}`, TAM, COL - 8, true);
+    if (y - (partes.length - 1) * SALTO < MARGEN + 2) {
+      if (col === 0) { col = 1; y = ARRIBA; } else nueva();
+    }
+    const x = MARGEN + 4 + col * (COL + HUECO);
+    partes.forEach((l, i) => {
+      ops.push(`BT /F2 ${TAM} Tf ${(x + (i ? 8 : 0)).toFixed(1)} ${y.toFixed(1)} Td ${cadenaPdf(l)} Tj ET`);
+      y -= SALTO;
+    });
   }
-  return paginas.map((p) => p.join("\n"));
+  return paginas.map((pg) => pg.join(NL));
 }
 export function resumenSeurPdf(resumen) {
   return pdfDePaginas(paginasResumenSeur(resumen));
