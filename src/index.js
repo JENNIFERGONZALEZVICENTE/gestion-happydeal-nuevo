@@ -2558,7 +2558,9 @@ const PLAZO_LIMITE_DESDE = { "Carrefour": "2026-09-29" };
 // vencido hace semanas).
 // Maison du Monde desde el 22/09 (Jennifer, 2026-10-01: "el primer pedido
 // que pone esperando envío", 10002308790-A).
-const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18", "Leroy Merlin": "2026-09-23", "Maison Du Monde": "2026-09-22" };
+// Conforama (Francia) desde el 28/09, igual que su tramitación (Jennifer,
+// 2026-10-01: "todos ya deben estar activos en ese sentido").
+const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18", "Leroy Merlin": "2026-09-23", "Maison Du Monde": "2026-09-22", "Conforama": "2026-09-28" };
 function plazoEnvioActivo(o) {
   if (!o || !o.limiteEnvio) return false;
   // Sin aviso mientras el cliente no ha pagado (Jennifer, 2026-09-29:
@@ -8428,6 +8430,25 @@ async function handleFetch(request, env) {
     // (handleUpsertOrder → mapOrder → /orders/upsert), así que respeta las
     // mismas reglas de siempre (SHOPIFY_PROCESAMIENTO_DESDE, etc.). No
     // expuesto en la UI todavía.
+    // Solo lectura (Jennifer, 2026-10-01: buscar dónde trae Shopify la fecha
+    // de entrega de cada pedido): campos en bruto de UN pedido, sin guardar
+    // nada. ?numero=12250
+    if (url.pathname === "/api/admin/shopify-pedido-bruto" && request.method === "GET") {
+      const numero = url.searchParams.get("numero");
+      const res = await fetch(`https://${env.SHOPIFY_SHOP_DOMAIN}/admin/api/2026-07/orders.json?status=any&name=%23${numero}`, {
+        headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN },
+      });
+      const data = await res.json();
+      const o = (data.orders || []).find((x) => String(x.order_number) === String(numero));
+      if (!o) return Response.json({ ok: false, error: "No encontrado." }, { status: 404 });
+      return Response.json({
+        ok: true, order_number: o.order_number, created_at: o.created_at, note: o.note, note_attributes: o.note_attributes, tags: o.tags,
+        shipping_lines: (o.shipping_lines || []).map((s) => ({ title: s.title, code: s.code, source: s.source, delivery_category: s.delivery_category })),
+        line_items: (o.line_items || []).map((li) => ({ title: li.title, variant_title: li.variant_title, properties: li.properties })),
+        estimated_delivery: o.estimated_delivery_at || null,
+      });
+    }
+
     if (url.pathname === "/api/admin/importar-pedido-suelto" && request.method === "POST") {
       const { numero } = await request.json();
       if (!numero) return Response.json({ ok: false, error: "Falta el número de pedido." }, { status: 400 });
