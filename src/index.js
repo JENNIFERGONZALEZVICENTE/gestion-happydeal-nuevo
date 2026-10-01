@@ -2269,6 +2269,12 @@ function renderPage() {
 </div>
 
 <div id="view-casos-revisar-seur" style="display:none">
+  <div class="toolbar" style="margin-bottom:6px">
+    <button type="button" id="tracking-seur-upload-btn" class="secondary">Actualizar seguimiento SEUR</button>
+    <input type="file" id="tracking-seur-upload-input" accept=".xlsx" style="display:none" />
+    <button type="button" id="tracking-seur-report-btn" class="secondary" style="display:none">Descargar reporte de esta subida</button>
+    <span id="tracking-seur-upload-status" class="inventario-count" style="padding:0"></span>
+  </div>
   <div class="toolbar">
     <input id="envios-seur-search" type="text" placeholder="Buscar por referencia, nombre u observaciones..." style="min-width:280px" />
     <select id="envios-seur-estado"><option value="">Todos los estados de SEUR</option></select>
@@ -2277,12 +2283,16 @@ function renderPage() {
       <option value="si">Solo reclamados a SEUR</option>
       <option value="no">Solo no reclamados</option>
     </select>
+    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;color:#b91c1c;font-weight:600"><input type="checkbox" id="envios-seur-solo-avisos" /> ⚠ Solo para reclamar (registrado +24 h)</label>
     <select id="envios-seur-pais"><option value="">Todos los países</option></select>
+    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="envios-seur-ocultar-entregados" checked /> Ocultar entregados</label>
+    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="envios-seur-ocultar-archivados" checked /> Ocultar archivados</label>
   </div>
+  <div id="envios-seur-aviso" style="display:none;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;border-radius:8px;padding:10px 14px;margin:6px 0;font-weight:600"></div>
   <div id="envios-seur-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="envios-seur-table">
-      <thead><tr><th>Carga</th><th>Referencia pedido</th><th>Nombre</th><th>País</th><th>Observaciones</th><th>Estado en SEUR</th><th>Reclamado a SEUR</th><th style="min-width:320px">Notas</th></tr></thead>
+      <thead><tr><th>Fecha de carga</th><th>Referencia pedido</th><th>Nombre</th><th>País</th><th>Observaciones</th><th>Estado en SEUR</th><th>Reclamado a SEUR</th><th style="min-width:320px">Notas</th><th>Archivar</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -2342,12 +2352,6 @@ function renderPage() {
 </div>
 
 <div id="view-seur" style="display:none">
-  <div class="toolbar">
-    <button type="button" id="tracking-seur-upload-btn" class="secondary">Actualizar seguimiento SEUR</button>
-    <input type="file" id="tracking-seur-upload-input" accept=".xlsx" style="display:none" />
-    <button type="button" id="tracking-seur-report-btn" class="secondary" style="display:none">Descargar reporte de esta subida</button>
-    <span id="tracking-seur-upload-status" class="inventario-count" style="padding:0"></span>
-  </div>
   <div id="seur-decision-box" class="carga-abierta-box" style="display:none">
     <div class="toolbar">
       <h3 style="margin:0">Pedidos con disponibilidad mixta — pendientes de decidir</h3>
@@ -6538,6 +6542,8 @@ document.getElementById("tracking-seur-upload-input").addEventListener("change",
   ultimoReporteSeur = construirFilasReporteSeur(sinMatchDetalle, data);
   reportBtn.style.display = ultimoReporteSeur.length ? "" : "none";
   await loadOrders();
+  // El botón está en "Envíos SEUR": se refresca la lista con los estados nuevos.
+  await loadCasosRevisarSeur();
 });
 
 // Ficheros de "marketplace" tipo Mirakl Connect (Carrefour, Fase 1,
@@ -6851,12 +6857,27 @@ function renderEnviosSeur() {
   const estado = document.getElementById("envios-seur-estado").value;
   const reclamado = document.getElementById("envios-seur-reclamado").value;
   const pais = document.getElementById("envios-seur-pais").value;
+  // Entregado = "entregado" o retirado de un punto pickup (mismo criterio
+  // que el antiguo "Casos a revisar").
+  const ocultarEntregados = document.getElementById("envios-seur-ocultar-entregados").checked;
+  const esEntregado = e => /ENTREGAD/i.test(e.estadoSeur || "") || /retirado el envío/i.test(e.estadoSeur || "");
+  const ocultarArchivados = document.getElementById("envios-seur-ocultar-archivados").checked;
+  const soloAvisos = document.getElementById("envios-seur-solo-avisos").checked;
   const filas = enviosSeur.filter(e =>
-    (!q || [e.ref, e.nombre, e.observaciones, e.nota].join(" ").toLowerCase().includes(q)) &&
+    (!soloAvisos || (e.aviso24h && !e.reclamado && !e.archivado)) &&
+    (!ocultarEntregados || !esEntregado(e)) &&
+    (!ocultarArchivados || !e.archivado) &&
+    (!q ||[e.ref, e.nombre, e.observaciones, e.nota].join(" ").toLowerCase().includes(q)) &&
     (!estado || (e.estadoSeur || "__sin__") === estado) &&
     (!reclamado || (reclamado === "si" ? e.reclamado : !e.reclamado)) &&
     (!pais || e.pais === pais));
   document.getElementById("envios-seur-count").textContent = filas.length + " de " + enviosSeur.length + " líneas enviadas por SEUR";
+  const pendientesReclamar = enviosSeur.filter(e => e.aviso24h && !e.reclamado && !e.archivado).length;
+  const avisoEl = document.getElementById("envios-seur-aviso");
+  avisoEl.style.display = pendientesReclamar ? "" : "none";
+  avisoEl.textContent = "⚠ " + pendientesReclamar + (pendientesReclamar === 1 ? " envío sigue" : " envíos siguen") + " como «El envío ha sido registrado» más de 24 h después de cerrar la carga — hay que reclamarlos a SEUR. Marca «⚠ Solo para reclamar» para verlos.";
+  actualizarAvisoMenuSeur(pendientesReclamar);
+  const diaSemana = iso => iso ? ["DOMINGO", "LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO"][new Date(iso + "T12:00:00Z").getUTCDay()] : "";
   const fechaCorta = iso => iso ? iso.slice(8, 10) + "/" + iso.slice(5, 7) + "/" + iso.slice(0, 4) : "";
   const tbody = document.querySelector("#envios-seur-table tbody");
   tbody.innerHTML = filas.length ? filas.map(e => {
@@ -6864,12 +6885,13 @@ function renderEnviosSeur() {
     const estadoTxt = e.estadoSeur
       ? escapeAttr(e.estadoSeur) + (e.fechaSituacion ? '<br><span style="color:var(--muted);font-size:11px">' + escapeAttr(e.fechaSituacion) + '</span>' : "")
       : '<span style="color:var(--muted)">Sin seguimiento</span>';
-    const seguimiento = e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver</a>' : "";
+    const avisoCelda = e.aviso24h && !e.archivado ? '<br><span class="badge" style="background:' + (e.reclamado ? "#fde68a;color:#78350f" : "#fee2e2;color:#b91c1c") + '">⚠ Sin recoger ' + Math.floor(e.horasDesdeCierre / 24) + ' día(s) tras cerrar la carga' + (e.reclamado ? " (reclamado)" : " — reclamar") + '</span>' : "";
+    const seguimiento = avisoCelda + (e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver</a>' : "");
     const recl = e.reclamado
       ? '<span class="badge" style="background:#fde68a;color:#78350f">✔ Reclamado ' + (e.fechaReclamado ? new Date(e.fechaReclamado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Quitar</button>'
       : '<button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="1">Reclamado a SEUR</button>';
     return '<tr' + (e.reclamado ? ' style="background:rgba(253,230,138,.25)"' : '') + '>' +
-      '<td>' + escapeAttr(fechaCorta(e.fechaCarga)) + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío con seguimiento de SEUR que no está en ninguna carga del sistema">fuera de carga</span>' : '') + '</td>' +
+      '<td style="white-space:nowrap">' + (e.sinCarga ? "" : '<span style="font-size:11px;color:var(--muted)">' + escapeAttr(e.diaCarga || diaSemana(e.fechaCarga)) + '</span><br>') + '<strong>' + escapeAttr(fechaCorta(e.fechaCarga)) + '</strong>' + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío con seguimiento de SEUR que no está en ninguna carga del sistema">fuera de carga</span>' : '') + '</td>' +
       '<td><strong>' + escapeAttr(e.ref) + '</strong></td>' +
       '<td>' + escapeAttr(e.nombre || "") + '</td>' +
       '<td>' + escapeAttr(e.pais || "") + '</td>' +
@@ -6877,8 +6899,11 @@ function renderEnviosSeur() {
       '<td>' + estadoTxt + seguimiento + '</td>' +
       '<td>' + recl + '</td>' +
       '<td><textarea class="envio-seur-nota" data-i="' + i + '" rows="3" style="width:100%;min-width:320px;resize:vertical" placeholder="Notas...">' + escapeAttr(e.nota || "") + '</textarea></td>' +
+      '<td>' + (e.archivado
+        ? '<span class="badge" style="background:#e5e7eb;color:#374151">Archivado ' + (e.fechaArchivado ? new Date(e.fechaArchivado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-archivar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Desarchivar</button>'
+        : '<button type="button" class="secondary envio-seur-archivar" data-i="' + i + '" data-valor="1" title="No hay nada más que revisar en este envío">Archivar</button>') + '</td>' +
       '</tr>';
-  }).join("") : '<tr><td colspan="8" style="color:var(--muted)">No hay líneas con estos filtros.</td></tr>';
+  }).join("") : '<tr><td colspan="9" style="color:var(--muted)">No hay líneas con estos filtros.</td></tr>';
   tbody.querySelectorAll(".envio-seur-nota").forEach(ta => {
     ta.addEventListener("focus", () => { editing = true; });
     ta.addEventListener("blur", async () => {
@@ -6887,6 +6912,19 @@ function renderEnviosSeur() {
       if (ta.value === (e.nota || "")) return;
       e.nota = ta.value;
       await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, nota: ta.value }) });
+    });
+  });
+  tbody.querySelectorAll(".envio-seur-archivar").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const e = enviosSeur[Number(btn.dataset.i)];
+      const valor = btn.dataset.valor === "1";
+      btn.disabled = true;
+      const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, archivado: valor }) });
+      const d = await res.json().catch(() => ({}));
+      if (!d.ok) { alert("No se pudo guardar."); btn.disabled = false; return; }
+      e.archivado = valor;
+      e.fechaArchivado = d.info.fechaArchivado;
+      renderEnviosSeur();
     });
   });
   tbody.querySelectorAll(".envio-seur-reclamar").forEach(btn => {
@@ -6903,6 +6941,32 @@ function renderEnviosSeur() {
     });
   });
 }
+try {
+  const guardado = localStorage.getItem("enviosSeurOcultarEntregados");
+  if (guardado !== null) document.getElementById("envios-seur-ocultar-entregados").checked = guardado === "1";
+} catch (err) {}
+document.getElementById("envios-seur-ocultar-archivados").addEventListener("change", renderEnviosSeur);
+document.getElementById("envios-seur-solo-avisos").addEventListener("change", renderEnviosSeur);
+// Aviso en el menú "Envíos SEUR" con los envíos por reclamar, visible
+// desde cualquier pantalla (se calcula al abrir la app y cada hora).
+function actualizarAvisoMenuSeur(n) {
+  const link = document.querySelector('[data-logistica="casos-revisar-seur"]');
+  if (!link) return;
+  link.innerHTML = "Envíos SEUR" + (n ? ' <span class="badge" style="background:#dc2626;color:#fff;padding:1px 6px">⚠ ' + n + '</span>' : "");
+}
+async function comprobarAvisosSeur() {
+  try {
+    const res = await fetch("/api/seur/envios");
+    const lista = await res.json();
+    actualizarAvisoMenuSeur(lista.filter(e => e.aviso24h && !e.reclamado && !e.archivado).length);
+  } catch (err) {}
+}
+comprobarAvisosSeur();
+setInterval(comprobarAvisosSeur, 3600000);
+document.getElementById("envios-seur-ocultar-entregados").addEventListener("change", e => {
+  try { localStorage.setItem("enviosSeurOcultarEntregados", e.target.checked ? "1" : "0"); } catch (err) {}
+  renderEnviosSeur();
+});
 ["envios-seur-estado", "envios-seur-reclamado", "envios-seur-pais"].forEach(id => document.getElementById(id).addEventListener("change", renderEnviosSeur));
 document.getElementById("envios-seur-search").addEventListener("input", renderEnviosSeur);
 
@@ -9608,27 +9672,26 @@ async function handleFetch(request, env) {
           if (t) usados.add(t);
           const info = (o && o.enviosSeurInfo && o.enviosSeurInfo[e.ref]) || {};
           lista.push({
-            ...e, cargaId: c.id, fechaCarga: c.fecha, diaCarga: c.dia,
+            ...e, cargaId: c.id, fechaCarga: c.fecha, diaCarga: c.dia, fechaCierre: c.fechaCierre || null,
             estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
             nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
+            archivado: !!info.archivado, fechaArchivado: info.fechaArchivado || null,
           });
         }
       }
-      // Envíos con seguimiento de SEUR que no están en ninguna carga del
-      // sistema (anteriores a las cargas, o hechos fuera): también salen.
-      for (const o of datos.orders) {
-        for (const t of o.seurTracking || []) {
-          if (t.anulado || usados.has(t)) continue;
-          const ref = t.referencia || referenciaPedido(o);
-          const info = (o.enviosSeurInfo && o.enviosSeurInfo[ref]) || {};
-          const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(t.fechaCreacion || "").trim());
-          lista.push({
-            orderId: o.id, ref, nombre: o.name || "", pais: o.countryCode || "", observaciones: "",
-            cargaId: null, fechaCarga: m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : "", diaCarga: "", sinCarga: true,
-            estadoSeur: t.estado || "", fechaSituacion: t.fechaSituacion || "", seguimiento: t.seguimiento || "",
-            nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
-          });
-        }
+      // Solo líneas de cargas cerradas (Jennifer, 2026-10-01: lo que no se
+      // ha metido en ninguna carga no ha salido y no hay nada que revisar).
+      // Aviso (Jennifer, 2026-10-01): si 24 h después de cerrar la carga el
+      // envío sigue "El envío ha sido registrado." (SEUR no lo ha recogido),
+      // hay que reclamarlo. Sin fecha de cierre (fuera de carga) cuenta
+      // desde el día en que SEUR registró el envío.
+      const ahora = Date.now();
+      for (const e of lista) {
+        let desde = e.fechaCierre ? Date.parse(e.fechaCierre) : NaN;
+        if (isNaN(desde) && e.sinCarga && e.fechaCarga) desde = Date.parse(e.fechaCarga + "T23:59:59+02:00");
+        const registrado = /^el envío ha sido registrado\.?$/i.test((e.estadoSeur || "").trim());
+        e.horasDesdeCierre = isNaN(desde) ? null : Math.floor((ahora - desde) / 3600000);
+        e.aviso24h = registrado && e.horasDesdeCierre !== null && e.horasDesdeCierre >= 24;
       }
       lista.sort((a, b) => (b.fechaCarga || "").localeCompare(a.fechaCarga || "") || a.ref.localeCompare(b.ref));
       return Response.json(lista);
