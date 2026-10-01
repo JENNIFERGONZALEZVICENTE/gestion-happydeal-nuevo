@@ -7175,7 +7175,17 @@ async function descargarFicheroSeur(cargaId) {
     const seguir = confirm(data.avisos.length + " aviso(s):\\n\\n" + data.avisos.join("\\n") + "\\n\\n¿Descargar igualmente?");
     if (!seguir) return;
   }
-  window.location.href = "/api/cargas/seur/export?cargaId=" + encodeURIComponent(cargaId);
+  // En .xlsx (Jennifer, 2026-10-01). Todas las casillas van como texto
+  // salvo los números de verdad, para que el CP y el teléfono no pierdan
+  // ceros a la izquierda.
+  const r = await fetch("/api/cargas/seur/export?formato=json&cargaId=" + encodeURIComponent(cargaId));
+  if (!r.ok) { alert("No se pudo generar el fichero: " + (await r.text())); return; }
+  const d = await r.json();
+  const filas = d.filas.map(f => f.map((v, i) => ((i === 7 || i === 8) && v !== "" && !isNaN(Number(v)) ? Number(v) : v)));
+  const ws = XLSX.utils.aoa_to_sheet([d.cabeceras, ...filas]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Hoja1");
+  XLSX.writeFile(wb, "SEUR_" + d.fecha + ".xlsx");
 }
 
 // Une los dos orígenes de envío de una carga de SEUR: pedidos que se
@@ -9540,6 +9550,11 @@ async function handleFetch(request, env) {
       if (!cargaId) return new Response("Falta cargaId", { status: 400 });
       const result = await buildSeurExport(env, cargaId);
       if (result.error) return new Response(result.error, { status: 400 });
+      // ?formato=json: las filas para que el navegador monte el .xlsx
+      // (Jennifer, 2026-10-01: el fichero de SEUR tiene que ser xlsx).
+      if (url.searchParams.get("formato") === "json") {
+        return Response.json({ cabeceras: SEUR_CSV_HEADERS, filas: result.rows, fecha: result.carga.fecha });
+      }
       const csv = buildSeurCsv(result.rows);
       const filename = `SEUR_${result.carga.fecha}.csv`;
       return new Response(csv, {
