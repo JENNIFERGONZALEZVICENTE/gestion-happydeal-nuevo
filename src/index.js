@@ -2556,7 +2556,9 @@ const PLAZO_LIMITE_DESDE = { "Carrefour": "2026-09-29" };
 // Leroy Merlin desde el 23/09 (Jennifer, 2026-10-01: "en Leroy también me
 // tienes que avisar de la fecha límite"; lo anterior ya tiene el plazo
 // vencido hace semanas).
-const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18", "Leroy Merlin": "2026-09-23" };
+// Maison du Monde desde el 22/09 (Jennifer, 2026-10-01: "el primer pedido
+// que pone esperando envío", 10002308790-A).
+const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18", "Leroy Merlin": "2026-09-23", "Maison Du Monde": "2026-09-22" };
 function plazoEnvioActivo(o) {
   if (!o || !o.limiteEnvio) return false;
   // Sin aviso mientras el cliente no ha pagado (Jennifer, 2026-09-29:
