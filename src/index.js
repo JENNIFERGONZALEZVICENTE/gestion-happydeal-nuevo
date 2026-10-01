@@ -1274,6 +1274,13 @@ function renderPage() {
   #pendientes-table .fabricacion-input { min-height: 22px; padding: 3px 6px; }
   #pendientes-table input, #pendientes-table select, #pendientes-table textarea { font-size: 12px; }
   #pendientes-table .resolver-btn, #pendientes-table .resolver-seur-btn, #pendientes-table .sustituir-btn { padding: 3px 8px; font-size: 12px; }
+  /* Proveedores (Jennifer, 2026-10-01: "necesito una fila de scroll... para
+     poder ir de izquierda a derecha porque la lista ahora es muy larga"): la
+     tabla ocupa como mucho el alto de la pantalla, así la barra horizontal
+     de abajo siempre se ve, y hay otra barra igual encima de la tabla. */
+  #pendientes-wrap { max-height: calc(100vh - 200px); margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+  .scroll-arriba { margin: 0 2rem; overflow-x: auto; overflow-y: hidden; height: 16px; border: 1px solid var(--border); border-bottom: none; border-radius: 12px 12px 0 0; background: var(--panel); }
+  .scroll-arriba > div { height: 1px; }
   /* La caja de la tabla se limita a la altura visible de la pantalla, para
      que su barra de scroll horizontal quede siempre a mano sin tener que
      bajar hasta el final de la página (Jennifer, 2026-09-16). */
@@ -2123,7 +2130,8 @@ function renderPage() {
     <span id="seleccion-count" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="pendientes-count" class="inventario-count"></div>
-  <div class="table-wrap">
+  <div class="scroll-arriba" id="pendientes-scroll-arriba"><div></div></div>
+  <div class="table-wrap" id="pendientes-wrap">
     <table id="pendientes-table">
       <thead>
         <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Plataforma</th><th>Modelo</th><th>Color</th><th>Talla</th><th id="pendientes-sku-head">SKU</th><th>Cantidad</th><th id="pendientes-coste-head" title="Coste según la tarifa vigente del proveedor (precio unidad × unidades)">Coste tarifa</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Notas</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
@@ -3772,6 +3780,24 @@ function grupoEnvioTag(order) {
 // debajo, cortando el texto (Jennifer, 2026-09-25, caso real: "Modelo" en la
 // primera fila de Luso/New). Se mide la altura real de la cabecera después
 // de pintar la tabla y se aplica ese valor exacto en vez de adivinarlo.
+// Barra de scroll horizontal encima de la tabla de Proveedores, movida a la
+// par que la de la propia tabla (Jennifer, 2026-10-01).
+function ajustarScrollArriba() {
+  const arriba = document.getElementById("pendientes-scroll-arriba");
+  const wrap = document.getElementById("pendientes-wrap");
+  if (!arriba || !wrap) return;
+  arriba.firstElementChild.style.width = wrap.scrollWidth + "px";
+  arriba.style.display = wrap.scrollWidth > wrap.clientWidth + 1 ? "" : "none";
+}
+(() => {
+  const arriba = document.getElementById("pendientes-scroll-arriba");
+  const wrap = document.getElementById("pendientes-wrap");
+  let moviendo = false;
+  arriba.addEventListener("scroll", () => { if (moviendo) { moviendo = false; return; } moviendo = true; wrap.scrollLeft = arriba.scrollLeft; });
+  wrap.addEventListener("scroll", () => { if (moviendo) { moviendo = false; return; } moviendo = true; arriba.scrollLeft = wrap.scrollLeft; });
+  window.addEventListener("resize", ajustarScrollArriba);
+})();
+
 function sincronizarTopFilaFiltro(tablaId, filaFiltroId) {
   const cabecera = document.querySelector("#" + tablaId + " thead tr:first-child");
   const filaFiltro = document.getElementById(filaFiltroId);
@@ -4451,7 +4477,9 @@ document.addEventListener("click", async (e) => {
 // diferencia). No salen en la lista normal ni se pueden pedir a fábrica
 // hasta pulsar "Revisado: se puede pedir".
 function renderRevision() {
-  const enRevision = backorders.filter(b => b.revision && b.estado === "pendiente")
+  // Solo los del proveedor de la pestaña abierta (Jennifer, 2026-10-01: "solo
+  // estarán en el apartado del proveedor que le corresponda").
+  const enRevision = backorders.filter(b => b.revision && b.estado === "pendiente" && b.proveedor === String(currentProveedorFilter || "").toUpperCase())
     .sort((a, b) => parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha));
   document.getElementById("revision-box").style.display = enRevision.length ? "" : "none";
   if (!enRevision.length) return;
@@ -4467,7 +4495,10 @@ function renderRevision() {
     + '<td class="revision-motivo">' + escapeAttr(b.revision.motivo || "") + "</td>"
     + "<td>" + notasPedidoInput(b) + "</td>"
     + "<td>" + new Date(parseFechaGenerica(b.fecha)).toLocaleDateString("es-ES") + "</td>"
-    + '<td><button type="button" class="revision-ok-btn" data-id="' + escapeAttr(b.id) + '">Revisado: se puede pedir</button></td>'
+    + '<td><button type="button" class="revision-ok-btn" data-id="' + escapeAttr(b.id) + '">Revisado: se puede pedir</button>'
+    // Cancelar también desde aquí (Jennifer, 2026-10-01: si el cliente no
+    // paga la diferencia) — mismo botón y comportamiento que en la lista.
+    + ' <button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="' + escapeAttr(b.id) + '" title="El cliente ha cancelado: se quita del proveedor y queda cancelado en el pedido">✕ Cancelar</button></td>'
     + "</tr>").join("");
   document.querySelectorAll(".revision-ok-btn").forEach(btn => btn.addEventListener("click", async () => {
     const b = backorders.find(x => x.id === btn.dataset.id);
@@ -4509,7 +4540,7 @@ function renderPendientes() {
   renderRevision();
   const pendientes = backorders.filter(b => {
     if (b.estado !== "pendiente" && !(mostrarCancelados && b.estado === "cancelado")) return false;
-    if (b.revision) return false; // en su propio recuadro, no se puede pedir todavía
+    if (b.revision && b.estado === "pendiente") return false; // en su propio recuadro, no se puede pedir todavía
     if (ocultarRecibidos && b.recibidoFabrica) return false;
     if (busquedaReferencia && !(b.referencia || "").toLowerCase().includes(busquedaReferencia)) return false;
     if (busquedaSku && !skuDePendiente(b).toLowerCase().includes(busquedaSku)) return false;
@@ -4737,6 +4768,7 @@ function renderPendientes() {
   document.getElementById("pendientes-count").textContent = (pendientes.length - nCancelados) + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)" + (nCancelados ? " · " + nCancelados + " cancelados a la vista" : "") + textoCoste;
   actualizarSeleccionUI();
   sincronizarTopFilaFiltro("pendientes-table", "pendientes-filter-row");
+  ajustarScrollArriba();
 
   tbody.querySelectorAll(".pendiente-check").forEach(chk => {
     chk.addEventListener("change", () => {
