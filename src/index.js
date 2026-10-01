@@ -7182,10 +7182,19 @@ async function descargarFicheroSeur(cargaId) {
   if (!r.ok) { alert("No se pudo generar el fichero: " + (await r.text())); return; }
   const d = await r.json();
   const filas = d.filas.map(f => f.map((v, i) => ((i === 7 || i === 8) && v !== "" && !isNaN(Number(v)) ? Number(v) : v)));
-  const ws = XLSX.utils.aoa_to_sheet([d.cabeceras, ...filas]);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Hoja1");
-  XLSX.writeFile(wb, "SEUR_" + d.fecha + ".xlsx");
+  // Un fichero por código de remitente (63235 nacional, 48297
+  // internacional): en SEUR se suben por separado (Jennifer, 2026-10-01).
+  const porRemitente = {};
+  for (const f of filas) (porRemitente[f[9] || "SIN_REMITENTE"] = porRemitente[f[9] || "SIN_REMITENTE"] || []).push(f);
+  const codigos = Object.keys(porRemitente).sort();
+  for (let i = 0; i < codigos.length; i++) {
+    if (i) await new Promise(ok => setTimeout(ok, 800));
+    const ws = XLSX.utils.aoa_to_sheet([d.cabeceras, ...porRemitente[codigos[i]]]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Hoja1");
+    XLSX.writeFile(wb, "SEUR_" + d.fecha + "_" + codigos[i] + ".xlsx");
+  }
+  if (codigos.length > 1) alert("Se han descargado " + codigos.length + " ficheros, uno por remitente (" + codigos.join(" y ") + "). Súbelos a SEUR por separado.");
 }
 
 // Une los dos orígenes de envío de una carga de SEUR: pedidos que se
