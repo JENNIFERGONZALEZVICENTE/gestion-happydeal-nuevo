@@ -1754,6 +1754,11 @@ function renderPage() {
   .cargas-tabs { display: flex; gap: 6px; flex-wrap: wrap; padding: 0.75rem 1rem 0; }
   .carga-tab { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border, #d1d5db); background: transparent; color: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
   .carga-tab.activa { background: #1f8a4c; border-color: #1f8a4c; color: #fff; }
+  .carga-tab.vencida { border-color: #dc2626; color: #b91c1c; }
+  .carga-tab.vencida.activa { background: #dc2626; color: #fff; }
+  .aviso-sin-cerrar { margin: 0.75rem 2rem; padding: 10px 14px; border: 2px solid #dc2626; border-radius: 10px; background: #fef2f2; color: #991b1b; font-size: 14px; }
+  #furniture-cargas-tabs .aviso-sin-cerrar { margin: 0 0 6px; }
+  @media (prefers-color-scheme: dark) { .aviso-sin-cerrar { background: #450a0a; color: #fecaca; } }
   .mover-seur input, .mover-seur button { padding: 3px 6px; font-size: 12px; }
   .seur-programados { margin: 1rem 2rem; }
   .seur-programados > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
@@ -5424,8 +5429,14 @@ function pedidosEnCargaFurniture(cargaId) {
 function renderPestanasFurniture() {
   const abiertas = cargasFurnitureAbiertas();
   const cont = document.getElementById("furniture-cargas-tabs");
-  cont.innerHTML = abiertas.map(c => '<button type="button" class="carga-tab' + (cargaAbierta && c.id === cargaAbierta.id ? " activa" : "") + '" data-carga-tab="' + c.id + '">'
-    + formatCargaTitulo(c) + ' · ' + pedidosEnCargaFurniture(c.id) + ' pedidos</button>').join("");
+  // Carga con la fecha ya pasada y sin cerrar (Jennifer, 2026-10-01): aviso
+  // arriba y su pestaña en rojo, para revisarla y cerrarla.
+  const sinCerrar = abiertas.filter(c => c.fecha < hoyMadrid());
+  cont.innerHTML = (sinCerrar.length
+      ? '<div class="aviso-sin-cerrar" style="flex-basis:100%">⚠ <strong>Pendiente de cerrar:</strong> ' + sinCerrar.map(c => formatCargaTitulo(c) + " (" + pedidosEnCargaFurniture(c.id) + " pedidos)").join(", ") + ". Ábrela en su pestaña, revísala y pulsa «Cerrar carga» si ya salió.</div>"
+      : "")
+    + abiertas.map(c => '<button type="button" class="carga-tab' + (cargaAbierta && c.id === cargaAbierta.id ? " activa" : "") + (c.fecha < hoyMadrid() ? " vencida" : "") + '" data-carga-tab="' + c.id + '">'
+    + (c.fecha < hoyMadrid() ? "⚠ " : "") + formatCargaTitulo(c) + ' · ' + pedidosEnCargaFurniture(c.id) + ' pedidos</button>').join("");
   cont.querySelectorAll("[data-carga-tab]").forEach(btn => btn.addEventListener("click", () => {
     cargaFurnitureElegidaId = btn.dataset.cargaTab;
     elegirCargaFurniture();
@@ -7024,7 +7035,16 @@ function renderSeurCargas() {
     \`;
   };
   const nProgramados = programadas.reduce((n, c) => n + seurEnviosDeCarga(c.id).length, 0);
-  cont.innerHTML = aLaVista.map(tarjeta).join("") + (programadas.length ? \`
+  // Aviso de cargas con la fecha ya pasada y sin cerrar (Jennifer,
+  // 2026-10-01: "si una carga no se ha cerrado, me salga un aviso como que
+  // está pendiente de cerrar para poderla revisar y que se cierre").
+  const sinCerrar = cargasAbiertas.filter(c => c.fecha < hoyMadrid());
+  const avisoSinCerrar = sinCerrar.length
+    ? '<div class="aviso-sin-cerrar">⚠ <strong>Carga' + (sinCerrar.length > 1 ? "s" : "") + " de SEUR pendiente" + (sinCerrar.length > 1 ? "s" : "") + " de cerrar:</strong> "
+      + sinCerrar.map(c => formatSeurCargaTitulo(c) + " (" + seurEnviosDeCarga(c.id).length + " envíos)").join(", ")
+      + ". Revísala" + (sinCerrar.length > 1 ? "s" : "") + " abajo y ciérrala" + (sinCerrar.length > 1 ? "s" : "") + " si ya salió.</div>"
+    : "";
+  cont.innerHTML = avisoSinCerrar + aLaVista.map(tarjeta).join("") + (programadas.length ? \`
     <details class="seur-programados">
       <summary>Envíos programados más adelante — \${nProgramados} envío(s) en \${programadas.length} carga(s): \${programadas.map(c => new Date(c.fecha + "T00:00:00").toLocaleDateString("es-ES")).join(", ")}</summary>
       \${programadas.map(tarjeta).join("")}
