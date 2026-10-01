@@ -1696,6 +1696,8 @@ function renderPage() {
   .cantidad-baja { color: #991b1b; font-weight: 700; }
   .resolver-btn { padding: 6px 12px; font-size: 12.5px; }
   .fabricacion-input { width: 100%; min-width: 220px; min-height: 54px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical; }
+  .notas-pendiente-input { width: 100%; min-width: 150px; min-height: 22px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; font: inherit; font-size: 12px; resize: vertical; }
+  .revisar-pendiente-btn { padding: 2px 6px; font-size: 11px; }
   .ocultar-recibidos-label { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--brand-dark); cursor: pointer; }
   .carga-abierta-box { margin: 0 2rem 1.5rem; border: 2px solid var(--brand); border-radius: 12px; overflow: hidden; background: var(--brand-light); }
   .carga-abierta-box.tener-en-cuenta-box { border-color: #b45309; background: #fef3c7; }
@@ -2109,7 +2111,7 @@ function renderPage() {
     <div id="revision-count" class="inventario-count"></div>
     <div class="table-wrap">
       <table id="revision-table">
-        <thead><tr><th>Pedido</th><th>Proveedor</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Coste tarifa</th><th>Motivo</th><th>Fecha del pedido</th><th></th></tr></thead>
+        <thead><tr><th>Pedido</th><th>Proveedor</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Coste tarifa</th><th>Motivo</th><th>Notas</th><th>Fecha del pedido</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -2124,14 +2126,14 @@ function renderPage() {
   <div class="table-wrap">
     <table id="pendientes-table">
       <thead>
-        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Plataforma</th><th>Modelo</th><th>Color</th><th>Talla</th><th id="pendientes-sku-head">SKU</th><th>Cantidad</th><th id="pendientes-coste-head" title="Coste según la tarifa vigente del proveedor (precio unidad × unidades)">Coste tarifa</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
+        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Plataforma</th><th>Modelo</th><th>Color</th><th>Talla</th><th id="pendientes-sku-head">SKU</th><th>Cantidad</th><th id="pendientes-coste-head" title="Coste según la tarifa vigente del proveedor (precio unidad × unidades)">Coste tarifa</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Notas</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
         <tr id="pendientes-filter-row">
           <th></th>
           <th><input id="pendientes-pedido-search" type="text" placeholder="Filtrar..." /></th>
           <th></th>
           <th></th><th></th><th></th><th id="pendientes-sku-filter"><input id="pendientes-sku-search" type="text" placeholder="ej. COLZNIR105X180" /></th><th></th><th id="pendientes-coste-filter"></th>
           <th id="pendientes-refpolival-filter" style="display:none"><input id="pendientes-referencia-search" type="text" placeholder="Filtrar..." /></th>
-          <th></th><th></th><th id="pendientes-furfpk-filter"></th><th></th><th></th>
+          <th></th><th></th><th></th><th id="pendientes-furfpk-filter"></th><th></th><th></th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -3375,6 +3377,7 @@ document.getElementById("descargar-excel-pendientes-btn").addEventListener("clic
       "Mercancía para pedir a fábrica": b.mercanciaFabrica || "",
       "Fecha del pedido": b.fecha || "",
       "En revisión": b.revision ? (b.revision.motivo || "Sí") : "",
+      Notas: (allOrders.find(o => String(o.id) === String(b.orderId)) || {}).notas || "",
       "Pedido a fábrica": b.pedidoGenerado ? "Sí" + (b.fechaPedidoFabrica ? " (" + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") + ")" : "") : "No",
       "Recibido de fábrica": b.recibidoFabrica ? "Sí" + (b.fechaRecibido ? " (" + new Date(b.fechaRecibido).toLocaleDateString("es-ES") + ")" : "") : "No",
     }));
@@ -4412,6 +4415,37 @@ function totalCostesTarifa(lista) {
   return { total, sinPrecio };
 }
 
+// Notas del pedido en cada pendiente (Jennifer, 2026-10-01: "todos los
+// pedidos tengan un apartado de notas para poder [añadir] información
+// adicional"): son las mismas notas del pedido que ya se ven en Furniture.
+function notasPedidoInput(b) {
+  const o = allOrders.find(x => String(x.id) === String(b.orderId));
+  if (!o) return "";
+  return '<textarea class="notas-pendiente-input" data-order-id="' + escapeAttr(String(o.id)) + '" placeholder="Notas...">' + escapeAttr(o.notas || "") + "</textarea>";
+}
+document.addEventListener("change", (e) => {
+  const inp = e.target.closest(".notas-pendiente-input");
+  if (!inp) return;
+  const o = allOrders.find(x => String(x.id) === inp.dataset.orderId);
+  if (o) o.notas = inp.value;
+  saveMeta(inp.dataset.orderId, { notas: inp.value });
+});
+// Botón "Revisar" en cualquier pendiente (Jennifer, 2026-10-01: "por si hay
+// algo que ver"): pide el motivo y lo pasa al recuadro de revisión.
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-revisar-pendiente]");
+  if (!btn) return;
+  const b = backorders.find(x => x.id === btn.dataset.revisarPendiente);
+  if (!b) return;
+  const motivo = prompt("¿Qué hay que revisar de " + refLabel(b) + (b.refSuffix || "") + " (" + b.stockModel + " " + b.talla + ") antes de pedirlo?");
+  if (motivo === null) return;
+  const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: b.id, revision: { motivo: motivo.trim() || "Revisar antes de pedir" } }) });
+  if (!res.ok) { alert("No se ha podido pasar a revisión."); return; }
+  b.revision = { motivo: motivo.trim() || "Revisar antes de pedir" };
+  pedidoFabricaSeleccion.delete(b.id);
+  renderPendientes();
+});
+
 // Pendientes de revisión antes de pedir (Jennifer, 2026-10-01: pedidos que
 // entraron con un precio incorrecto, a la espera de que el cliente pague la
 // diferencia). No salen en la lista normal ni se pueden pedir a fábrica
@@ -4431,6 +4465,7 @@ function renderRevision() {
     + "<td>" + b.cantidad + "</td>"
     + ((b.proveedor === "LUSO" || b.proveedor === "NEW") ? costeTarifaCell(b) : "<td>—</td>")
     + '<td class="revision-motivo">' + escapeAttr(b.revision.motivo || "") + "</td>"
+    + "<td>" + notasPedidoInput(b) + "</td>"
     + "<td>" + new Date(parseFechaGenerica(b.fecha)).toLocaleDateString("es-ES") + "</td>"
     + '<td><button type="button" class="revision-ok-btn" data-id="' + escapeAttr(b.id) + '">Revisado: se puede pedir</button></td>'
     + "</tr>").join("");
@@ -4668,7 +4703,7 @@ function renderPendientes() {
       : esColchonSeur
       ? \`<button type="button" class="recibido-seur-btn" data-id="\${b.id}" title="Recibido: entra solo en la próxima carga de SEUR (antes de las 15:00, la de mañana; después, la de pasado mañana)">Marcar recibido</button> <button type="button" class="secondary resolver-seur-btn" data-id="\${b.id}" title="Recibido y programado para el día que pida el cliente">📅 Otro día</button>\${sustituirBtnHtml}\`
       : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${sustituirBtnHtml}\`;
-    const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button></div>\`;
+    const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button> <button type="button" class="secondary revisar-pendiente-btn" data-revisar-pendiente="\${escapeAttr(b.id)}" title="Hay algo que ver antes de pedirlo: pasa al recuadro de revisión y no se puede pedir hasta marcarlo revisado">🔍 Revisar</button></div>\`;
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
@@ -4682,6 +4717,7 @@ function renderPendientes() {
       \${showSkuCol ? costeTarifaCell(b) : ""}
       \${refPolivalCell}
       <td><textarea class="fabricacion-input" data-id="\${b.id}" placeholder="cómo pedirlo a fábrica...">\${escapeAttr(b.mercanciaFabrica != null ? b.mercanciaFabrica : (b.nombreFabricacion || ""))}</textarea></td>
+      <td>\${notasPedidoInput(b)}</td>
       <td>\${new Date(parseFechaGenerica(b.fecha)).toLocaleDateString("es-ES")}</td>
       \${showFurFpkCol ? \`<td>\${referenciaCell}</td>\` : ""}
       \${fechaCell}
