@@ -1843,7 +1843,7 @@ function renderPage() {
     <li class="sublista-header">SEUR</li>
     <li><a href="#" class="nav-link sublink" data-logistica="seur">Pedidos pendientes</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas-seur">Historial de cargas</a></li>
-    <li><a href="#" class="nav-link sublink" data-logistica="casos-revisar-seur">Casos a revisar</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="casos-revisar-seur">Envíos SEUR</a></li>
   </ul>
   <button class="section-title" id="historico-toggle">
     <span>Histórico</span>
@@ -2269,10 +2269,20 @@ function renderPage() {
 </div>
 
 <div id="view-casos-revisar-seur" style="display:none">
-  <div id="casos-revisar-seur-count" class="inventario-count"></div>
+  <div class="toolbar">
+    <input id="envios-seur-search" type="text" placeholder="Buscar por referencia, nombre u observaciones..." style="min-width:280px" />
+    <select id="envios-seur-estado"><option value="">Todos los estados de SEUR</option></select>
+    <select id="envios-seur-reclamado">
+      <option value="">Reclamados y no reclamados</option>
+      <option value="si">Solo reclamados a SEUR</option>
+      <option value="no">Solo no reclamados</option>
+    </select>
+    <select id="envios-seur-pais"><option value="">Todos los países</option></select>
+  </div>
+  <div id="envios-seur-count" class="inventario-count"></div>
   <div class="table-wrap">
-    <table id="casos-revisar-seur-table">
-      <thead><tr><th>Pedido</th><th>Nombre</th><th>Referencia</th><th>Estado SEUR</th><th>Motivo</th><th>Seguimiento</th><th>Notas</th></tr></thead>
+    <table id="envios-seur-table">
+      <thead><tr><th>Carga</th><th>Referencia pedido</th><th>Nombre</th><th>País</th><th>Observaciones</th><th>Estado en SEUR</th><th>Reclamado a SEUR</th><th style="min-width:320px">Notas</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -3568,7 +3578,7 @@ function selectProveedores(id) {
   loadPendientes();
 }
 
-const LOGISTICA_LABELS = { furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Casos a revisar" };
+const LOGISTICA_LABELS = { furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR" };
 function selectLogistica(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.logistica === id));
   document.getElementById("view-title").textContent = "Logística · " + LOGISTICA_LABELS[id];
@@ -6817,12 +6827,84 @@ async function loadCasosRevisar() {
   renderCasosRevisarTable(casos, "#casos-revisar-table tbody", 7, "albaran");
 }
 
+// "Envíos SEUR" (Jennifer, 2026-10-01): sustituye a "Casos a revisar".
+// Todas las líneas de las cargas de SEUR ya cerradas, filtrables por estado
+// en SEUR para ir revisando, con notas amplias y botón "Reclamado a SEUR".
+let enviosSeur = [];
 async function loadCasosRevisarSeur() {
-  const res = await fetch("/api/seur/casos-revisar");
-  const casos = await res.json();
-  document.getElementById("casos-revisar-seur-count").textContent = casos.length + " casos a revisar";
-  renderCasosRevisarTable(casos, "#casos-revisar-seur-table tbody", 7, "referencia");
+  const res = await fetch("/api/seur/envios");
+  enviosSeur = await res.json();
+  const rellenar = (id, valores, primera) => {
+    const sel = document.getElementById(id);
+    const actual = sel.value;
+    sel.innerHTML = '<option value="">' + primera + '</option>' + valores.map(v => '<option value="' + escapeAttr(v) + '">' + escapeAttr(v === "__sin__" ? "Sin estado (aún no hay seguimiento)" : v) + '</option>').join("");
+    if (valores.includes(actual)) sel.value = actual;
+  };
+  const estados = [...new Set(enviosSeur.map(e => e.estadoSeur || "__sin__"))].sort();
+  rellenar("envios-seur-estado", estados, "Todos los estados de SEUR");
+  rellenar("envios-seur-pais", [...new Set(enviosSeur.map(e => e.pais).filter(Boolean))].sort(), "Todos los países");
+  renderEnviosSeur();
 }
+
+function renderEnviosSeur() {
+  const q = document.getElementById("envios-seur-search").value.trim().toLowerCase();
+  const estado = document.getElementById("envios-seur-estado").value;
+  const reclamado = document.getElementById("envios-seur-reclamado").value;
+  const pais = document.getElementById("envios-seur-pais").value;
+  const filas = enviosSeur.filter(e =>
+    (!q || [e.ref, e.nombre, e.observaciones, e.nota].join(" ").toLowerCase().includes(q)) &&
+    (!estado || (e.estadoSeur || "__sin__") === estado) &&
+    (!reclamado || (reclamado === "si" ? e.reclamado : !e.reclamado)) &&
+    (!pais || e.pais === pais));
+  document.getElementById("envios-seur-count").textContent = filas.length + " de " + enviosSeur.length + " líneas enviadas por SEUR";
+  const fechaCorta = iso => iso ? iso.slice(8, 10) + "/" + iso.slice(5, 7) + "/" + iso.slice(0, 4) : "";
+  const tbody = document.querySelector("#envios-seur-table tbody");
+  tbody.innerHTML = filas.length ? filas.map(e => {
+    const i = enviosSeur.indexOf(e);
+    const estadoTxt = e.estadoSeur
+      ? escapeAttr(e.estadoSeur) + (e.fechaSituacion ? '<br><span style="color:var(--muted);font-size:11px">' + escapeAttr(e.fechaSituacion) + '</span>' : "")
+      : '<span style="color:var(--muted)">Sin seguimiento</span>';
+    const seguimiento = e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver</a>' : "";
+    const recl = e.reclamado
+      ? '<span class="badge" style="background:#fde68a;color:#78350f">✔ Reclamado ' + (e.fechaReclamado ? new Date(e.fechaReclamado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Quitar</button>'
+      : '<button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="1">Reclamado a SEUR</button>';
+    return '<tr' + (e.reclamado ? ' style="background:rgba(253,230,138,.25)"' : '') + '>' +
+      '<td>' + escapeAttr(fechaCorta(e.fechaCarga)) + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío con seguimiento de SEUR que no está en ninguna carga del sistema">fuera de carga</span>' : '') + '</td>' +
+      '<td><strong>' + escapeAttr(e.ref) + '</strong></td>' +
+      '<td>' + escapeAttr(e.nombre || "") + '</td>' +
+      '<td>' + escapeAttr(e.pais || "") + '</td>' +
+      '<td>' + escapeAttr(e.observaciones || "") + '</td>' +
+      '<td>' + estadoTxt + seguimiento + '</td>' +
+      '<td>' + recl + '</td>' +
+      '<td><textarea class="envio-seur-nota" data-i="' + i + '" rows="3" style="width:100%;min-width:320px;resize:vertical" placeholder="Notas...">' + escapeAttr(e.nota || "") + '</textarea></td>' +
+      '</tr>';
+  }).join("") : '<tr><td colspan="8" style="color:var(--muted)">No hay líneas con estos filtros.</td></tr>';
+  tbody.querySelectorAll(".envio-seur-nota").forEach(ta => {
+    ta.addEventListener("focus", () => { editing = true; });
+    ta.addEventListener("blur", async () => {
+      editing = false;
+      const e = enviosSeur[Number(ta.dataset.i)];
+      if (ta.value === (e.nota || "")) return;
+      e.nota = ta.value;
+      await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, nota: ta.value }) });
+    });
+  });
+  tbody.querySelectorAll(".envio-seur-reclamar").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const e = enviosSeur[Number(btn.dataset.i)];
+      const valor = btn.dataset.valor === "1";
+      btn.disabled = true;
+      const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, reclamado: valor }) });
+      const d = await res.json().catch(() => ({}));
+      if (!d.ok) { alert("No se pudo guardar."); btn.disabled = false; return; }
+      e.reclamado = valor;
+      e.fechaReclamado = d.info.fechaReclamado;
+      renderEnviosSeur();
+    });
+  });
+}
+["envios-seur-estado", "envios-seur-reclamado", "envios-seur-pais"].forEach(id => document.getElementById(id).addEventListener("change", renderEnviosSeur));
+document.getElementById("envios-seur-search").addEventListener("input", renderEnviosSeur);
 
 async function loadHistorialCargas() {
   const [pendRes, cargasRes] = await Promise.all([
@@ -8424,9 +8506,10 @@ function cpSeur(o) {
   return String(o.countryCode || "").toUpperCase() === "PT" ? cp.replace(/[^0-9]/g, "") : cp;
 }
 
-async function buildSeurExport(env, cargaId) {
-  const ordersId = env.ORDERS_STORE.idFromName("shopify");
-  const ordersStub = env.ORDERS_STORE.get(ordersId);
+// Todo lo que necesita buildSeurExport, para cargarlo una sola vez cuando
+// se recorren muchas cargas (lista de "Envíos SEUR").
+async function cargarDatosSeurExport(env) {
+  const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
   const invStub = inventoryStub(env);
   const [orders, cargas, backorders, catalog, pesosList] = await Promise.all([
     ordersStub.fetch("https://do/orders").then((r) => r.json()),
@@ -8435,6 +8518,15 @@ async function buildSeurExport(env, cargaId) {
     invStub.fetch("https://do/catalog").then((r) => r.json()),
     invStub.fetch("https://do/pesos").then((r) => r.json()),
   ]);
+  return { orders, cargas, backorders, catalog, pesosList };
+}
+
+// opts.datos: lo de cargarDatosSeurExport ya cargado. opts.incluirServidos:
+// para rehacer una carga ya cerrada, cuyos artículos pasaron a "servido"
+// al enviarse.
+async function buildSeurExport(env, cargaId, opts = {}) {
+  const { orders, cargas, backorders, catalog, pesosList } = opts.datos || (await cargarDatosSeurExport(env));
+  const servido = (b) => opts.incluirServidos && b.estado === "servido";
 
   const carga = cargas.find((c) => c.id === cargaId && c.tipo === "seur");
   if (!carga) return { error: "No se encuentra esa carga de SEUR." };
@@ -8468,14 +8560,15 @@ async function buildSeurExport(env, cargaId) {
   for (const o of orders) {
     if (o.agencia !== "SEUR" || o.cargaId !== carga.id) continue;
     for (const b of backorders) {
-      if (b.orderId === o.id && b.estado === "cubierto") agregarItem(o.id, b);
+      if (b.orderId === o.id && (b.estado === "cubierto" || (servido(b) && !b.cargaId))) agregarItem(o.id, b);
     }
   }
   for (const b of backorders) {
-    if (b.estado === "listo-seur" && b.cargaId === carga.id) agregarItem(b.orderId, b);
+    if ((b.estado === "listo-seur" || servido(b)) && b.cargaId === carga.id) agregarItem(b.orderId, b);
   }
 
   const rows = [];
+  const rowOrderIds = []; // orderId de cada fila de rows, mismo orden
   const avisos = [];
   for (const [orderId, piezas] of itemsPorPedido) {
     const o = ordersById.get(orderId);
@@ -8524,11 +8617,29 @@ async function buildSeurExport(env, cargaId) {
           codRemitente, o.countryCode || "", observacionesSeur(linea),
           "", "", "", o.email || "", servicio, producto,
         ]);
+        rowOrderIds.push(o.id);
       });
     }
   }
 
-  return { rows, carga, avisos };
+  return { rows, rowOrderIds, carga, avisos };
+}
+
+// Líneas de una carga para la lista "Envíos SEUR": REF (0), NOMBRE (1),
+// PAIS (10), OBSERVACIONES (11) del fichero de SEUR.
+function enviosDeExportSeur(result) {
+  return result.rows.map((r, i) => ({ orderId: result.rowOrderIds[i], ref: r[0], nombre: r[1], pais: r[10], observaciones: r[11] }));
+}
+
+// Estado en SEUR de una línea: la entrada de seguimiento con la misma
+// referencia (sin espacios ni guiones). Si el pedido solo tiene un envío y
+// una entrada, se usa esa.
+function estadoSeurDeLinea(order, ref, lineasDelPedido) {
+  const norm = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const tracking = (order && order.seurTracking ? order.seurTracking : []).filter((t) => !t.anulado);
+  let t = tracking.find((x) => norm(x.referencia) === norm(ref));
+  if (!t && tracking.length === 1 && lineasDelPedido === 1) t = tracking[0];
+  return t || null;
 }
 
 function seurSkuExport(product, talla) {
@@ -9459,8 +9570,74 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/cargas/close" && request.method === "POST") {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
-      const res = await stub.fetch("https://do/cargas/close", { method: "POST", body: await request.text() });
+      const cuerpo = await request.text();
+      // Al cerrar una carga de SEUR se guarda la foto de sus líneas para
+      // "Envíos SEUR" (Jennifer, 2026-10-01). Si falla, la carga se cierra
+      // igual y la lista la rehace con los artículos servidos.
+      try {
+        const { cargaId } = JSON.parse(cuerpo);
+        const ex = await buildSeurExport(env, cargaId);
+        if (!ex.error) {
+          await stub.fetch("https://do/cargas/seur/envios-guardar", { method: "POST", body: JSON.stringify({ cargaId, envios: enviosDeExportSeur(ex) }) });
+        }
+      } catch (e) { /* no bloquea el cierre */ }
+      const res = await stub.fetch("https://do/cargas/close", { method: "POST", body: cuerpo });
       return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    // "Envíos SEUR" (Jennifer, 2026-10-01): sustituye a "Casos a revisar".
+    // Todas las líneas de todas las cargas de SEUR cerradas, con su estado
+    // en SEUR, notas y "Reclamado a SEUR".
+    if (url.pathname === "/api/seur/envios" && request.method === "GET") {
+      const datos = await cargarDatosSeurExport(env);
+      const ordersById = new Map(datos.orders.map((o) => [o.id, o]));
+      const lista = [];
+      const usados = new Set(); // entradas de seguimiento ya ligadas a una línea
+      const cerradas = datos.cargas.filter((c) => c.tipo === "seur" && c.estado === "cerrada");
+      for (const c of cerradas) {
+        let envios = c.envios;
+        if (!envios) {
+          const ex = await buildSeurExport(env, c.id, { datos, incluirServidos: true });
+          envios = ex.error ? [] : enviosDeExportSeur(ex);
+        }
+        const porPedido = {};
+        for (const e of envios) porPedido[e.orderId] = (porPedido[e.orderId] || 0) + 1;
+        for (const e of envios) {
+          const o = ordersById.get(e.orderId);
+          const t = estadoSeurDeLinea(o, e.ref, porPedido[e.orderId]);
+          if (t) usados.add(t);
+          const info = (o && o.enviosSeurInfo && o.enviosSeurInfo[e.ref]) || {};
+          lista.push({
+            ...e, cargaId: c.id, fechaCarga: c.fecha, diaCarga: c.dia,
+            estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
+            nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
+          });
+        }
+      }
+      // Envíos con seguimiento de SEUR que no están en ninguna carga del
+      // sistema (anteriores a las cargas, o hechos fuera): también salen.
+      for (const o of datos.orders) {
+        for (const t of o.seurTracking || []) {
+          if (t.anulado || usados.has(t)) continue;
+          const ref = t.referencia || referenciaPedido(o);
+          const info = (o.enviosSeurInfo && o.enviosSeurInfo[ref]) || {};
+          const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(t.fechaCreacion || "").trim());
+          lista.push({
+            orderId: o.id, ref, nombre: o.name || "", pais: o.countryCode || "", observaciones: "",
+            cargaId: null, fechaCarga: m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : "", diaCarga: "", sinCarga: true,
+            estadoSeur: t.estado || "", fechaSituacion: t.fechaSituacion || "", seguimiento: t.seguimiento || "",
+            nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
+          });
+        }
+      }
+      lista.sort((a, b) => (b.fechaCarga || "").localeCompare(a.fechaCarga || "") || a.ref.localeCompare(b.ref));
+      return Response.json(lista);
+    }
+
+    if (url.pathname === "/api/seur/envios/info" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/envio-seur-info", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     // Resumen de la carga de SEUR en una etiqueta 15×10 enviada al email

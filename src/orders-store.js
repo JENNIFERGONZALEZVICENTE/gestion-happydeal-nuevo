@@ -35,7 +35,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -1210,6 +1210,37 @@ export class OrdersStore {
     // propia entrada de tracking (furnitureTracking/seurTracking), no en una
     // colección aparte, para que sobreviva igual que el resto del
     // seguimiento (ACUMULA, ver /orders/tracking-import[-seur]).
+    // Notas y "Reclamado a SEUR" por línea enviada (Jennifer, 2026-10-01),
+    // guardado en el pedido por referencia de SEUR.
+    if (url.pathname === "/orders/envio-seur-info" && request.method === "POST") {
+      const { orderId, ref, nota, reclamado } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order || !ref) return new Response("not found", { status: 404 });
+      const info = (order.enviosSeurInfo = order.enviosSeurInfo || {});
+      const e = (info[ref] = info[ref] || {});
+      if (nota !== undefined) e.nota = String(nota);
+      if (reclamado !== undefined) {
+        e.reclamado = !!reclamado;
+        e.fechaReclamado = reclamado ? new Date().toISOString() : null;
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, info: e });
+    }
+
+    // Foto de las líneas enviadas de una carga de SEUR al cerrarla, para la
+    // lista "Envíos SEUR" (los artículos pasan luego a "servido").
+    if (url.pathname === "/cargas/seur/envios-guardar" && request.method === "POST") {
+      const { cargaId, envios } = await request.json();
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const carga = cargas.find((c) => c.id === cargaId && c.tipo === "seur");
+      if (!carga) return new Response("not found", { status: 404 });
+      carga.envios = envios || [];
+      await this.state.storage.put("cargas", cargas);
+      return Response.json({ ok: true });
+    }
+
     if (url.pathname === "/orders/casos-revisar/nota" && request.method === "POST") {
       const { orderId, tipo, key, nota } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
