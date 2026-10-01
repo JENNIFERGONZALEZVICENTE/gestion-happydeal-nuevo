@@ -28,7 +28,11 @@ const PROCESAMIENTO_DESDE = {
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para poder probar de
   // verdad el cruce de seguimiento de Furniture/SEUR contra pedidos reales
   // de estas dos tiendas, no solo los que lleguen desde hoy.
-  "Maison Du Monde": "2026-09-13",
+  // Desactivado (Jennifer, 2026-10-01): "he subido el fichero de Maison du
+  // Monde, pero no quiero que hagas nada con ellos, por ahora solo actualizar
+  // el listado" — la subida de esa mañana tramitó 19 pedidos y se deshizo a
+  // mano. Antes: "2026-09-13".
+  "Maison Du Monde": "2099-12-31",
   // Reactivado (Jennifer, 2026-09-29): "a partir de este pedido 83752933-A
   // (24/09 21:09, único de ese día, ya con su pendiente manual) todos se
   // van a tramitar con normalidad". Lo anterior se dejó pendiente a mano.
@@ -60,7 +64,9 @@ const PROCESAMIENTO_DESDE = {
   "Conforama ES": "2026-09-25",
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para procesar todo el
   // histórico real de prueba (95 pedidos desde el 24/06).
-  "Leroy Merlin": "2026-06-24",
+  // Desactivado (Jennifer, 2026-10-01: "vamos a ir plataforma a plataforma y
+  // yo te aviso cuando lo tengas que activar"). Antes: "2026-06-24".
+  "Leroy Merlin": "2099-12-31",
 };
 // Prefijo del id interno por plataforma (para no chocar entre sí ni con los
 // pedidos de Shopify, que usan el id numérico real de Shopify tal cual).
