@@ -8153,9 +8153,18 @@ function referenciaSeur(o, refSuffix, prefijo) {
   // Leroy Merlin (Jennifer, 2026-10-01): la referencia real lleva "00"
   // delante ("001-26263L32415-A"), pero en SEUR tiene que salir sin esos
   // ceros ("1-26263L32415-A").
-  const ref = o && o.platform === "Leroy Merlin" ? referenciaPedido(o).replace(/^0+/, "") : referenciaPedido(o);
-  const base = (prefijo || "") + ref;
-  return truncarReferenciaSeur(`${base}${refSuffix || ""}`);
+  let ref = o && o.platform === "Leroy Merlin" ? referenciaPedido(o).replace(/^0+/, "") : referenciaPedido(o);
+  const pre = prefijo || "";
+  // Segundo envío de Leroy Merlin que no cabe: primero se quita el primer
+  // guion ("1-26263L32415-A2" -> "126263L32415-A2") (Jennifer, 2026-10-01).
+  if (o && o.platform === "Leroy Merlin" && !pre && (ref + (refSuffix || "")).length > 15) ref = ref.replace("-", "");
+  // El prefijo (REP de una reposición, GC de un gesto comercial) se conserva
+  // siempre; si no cabe, se quitan caracteres del principio de la
+  // referencia, nunca del prefijo (Jennifer, 2026-10-01: "metemos el REP
+  // delante y quitamos dígitos de delante hasta que hagamos los 15").
+  let cuerpo = ref + (refSuffix || "");
+  if (pre.length + cuerpo.length > 15) cuerpo = cuerpo.slice(cuerpo.length - (15 - pre.length));
+  return truncarReferenciaSeur(pre + cuerpo);
 }
 
 // Reparte las unidades de un pedido en líneas del fichero según las reglas
