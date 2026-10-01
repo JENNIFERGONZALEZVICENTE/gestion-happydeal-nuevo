@@ -115,6 +115,50 @@ function paginaReserva(datos) {
   return c.ops.join("\n");
 }
 
+// Resumen de una carga de SEUR para el almacén (Jennifer, 2026-10-01: "el
+// resumen de listado almacén lo metas en una etiqueta de 10x15 y que se
+// envíe al email del almacén"). El mismo contenido que el Excel "Listado
+// almacén", agrupado por de dónde sale; si no cabe, sigue en otra etiqueta.
+// resumen: { titulo, grupos: [{ origen, filas: [{ pedido, producto, cantidad }] }] }
+function paginasResumenSeur(resumen) {
+  const MARGEN = 8 * MM;
+  const IZQ = MARGEN + 2;
+  const UTIL = ANCHO - 2 * MARGEN - 4;
+  const TAM = 9;
+  const SALTO = 11.5;
+  const paginas = [];
+  let ops, y, num = 0;
+  const nueva = () => {
+    num++;
+    ops = ["1.5 w", `${MARGEN / 2} ${MARGEN / 2} ${ANCHO - MARGEN} ${ALTO - MARGEN} re S`];
+    paginas.push(ops);
+    y = ALTO - MARGEN - 4 - 14 * 0.74;
+    const cab = resumen.titulo + (num > 1 ? "  (sigue)" : "");
+    ops.push(`BT /F2 14 Tf ${((ANCHO - anchoTexto(cab, 14)) / 2).toFixed(1)} ${y.toFixed(1)} Td ${cadenaPdf(cab)} Tj ET`);
+    y -= 7;
+    ops.push("0.6 w", `${MARGEN} ${y.toFixed(1)} m ${ANCHO - MARGEN} ${y.toFixed(1)} l S`);
+    y -= SALTO + 1;
+  };
+  const texto = (t, negrita, sangria = 0) => {
+    for (const l of partirLineas(t, TAM, UTIL - sangria, negrita)) {
+      if (y < MARGEN + 2) nueva();
+      ops.push(`BT ${negrita ? "/F2" : "/F1"} ${TAM} Tf ${(IZQ + sangria).toFixed(1)} ${y.toFixed(1)} Td ${cadenaPdf(l)} Tj ET`);
+      y -= SALTO;
+    }
+  };
+  nueva();
+  for (const g of resumen.grupos) {
+    if (y < MARGEN + 2 + SALTO) nueva();
+    texto(String(g.origen).toUpperCase(), true);
+    for (const r of g.filas) texto(`${r.pedido}   ${r.producto}${r.cantidad > 1 ? "   x" + r.cantidad : ""}`, false, 8);
+    y -= 3;
+  }
+  return paginas.map((p) => p.join("\n"));
+}
+export function resumenSeurPdf(resumen) {
+  return pdfDePaginas(paginasResumenSeur(resumen));
+}
+
 // Un PDF con una etiqueta por página.
 function pdfDePaginas(contenidos) {
   const objetos = [

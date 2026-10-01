@@ -1,7 +1,7 @@
 export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
 import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES, findBestPrefixMatch, PREGUNTA_FORMATO_160 } from "./inventory-store.js";
-import { etiquetaTransformacionPdf } from "./etiqueta-pdf.js";
+import { etiquetaTransformacionPdf, resumenSeurPdf } from "./etiqueta-pdf.js";
 import { enviarEmailAlmacen, enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, fechaHoyEs, referenciaPedidoAlmacen, modeloCorto } from "./avisos-almacen.js";
 
 // Interruptor de Fase 2 de cada "marketplace" (Carrefour, Jennifer,
@@ -6179,6 +6179,20 @@ document.addEventListener("click", async (e) => {
 });
 
 document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".resumen-almacen-seur-btn");
+  if (!btn) return;
+  if (!confirm("¿Enviar al email del almacén el resumen de " + btn.dataset.titulo + " (etiqueta 15×10)?")) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/cargas/seur/almacen-email?cargaId=" + encodeURIComponent(btn.dataset.id), { method: "POST" });
+    const d = await res.json().catch(() => ({}));
+    if (d.ok) alert("Resumen enviado al almacén.");
+    else alert("No se pudo enviar: " + (d.error || d.reason || res.status));
+  } catch (err) { alert("No se pudo enviar: " + err.message); }
+  finally { btn.disabled = false; }
+});
+
+document.addEventListener("click", async (e) => {
   const btn = e.target.closest(".listado-almacen-btn");
   if (!btn) return;
   const cargaId = btn.dataset.id || (cargaAbierta && cargaAbierta.id);
@@ -7065,6 +7079,7 @@ function renderSeurCargas() {
           <h3 style="margin:0">\${formatSeurCargaTitulo(carga)}</h3>
           <button type="button" class="secondary descargar-seur-btn" data-id="\${carga.id}">Descargar fichero SEUR</button>
           <button type="button" class="secondary listado-almacen-seur-btn" data-id="\${carga.id}">Listado almacén</button>
+          <button type="button" class="secondary resumen-almacen-seur-btn" data-id="\${carga.id}" data-titulo="\${escapeAttr(formatCargaTitulo(carga))}" title="Manda al email del almacén el listado de esta carga en una etiqueta 15×10 para imprimir">📧 Enviar resumen al almacén (15×10)</button>
           <button type="button" class="cerrar-carga-seur-btn" data-id="\${carga.id}">Cerrar carga</button>
         </div>
         <div class="inventario-count">\${filas.length} pedidos en esta carga</div>
@@ -8364,8 +8379,8 @@ async function buildListadoAlmacenSeur(env, cargaId) {
   for (const o of orders) {
     if (o.agencia !== "SEUR" || o.cargaId !== carga.id) continue;
     const cubiertos = backorders.filter((b) => b.orderId === o.id && b.estado === "cubierto");
-    if (!cubiertos.length) { filas.push({ pedido: referenciaSeur(o, "", ""), producto: o.product || "", cantidad: 1, origen: "STOCK" }); continue; }
-    for (const b of cubiertos) filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", ""), producto: producto(b), cantidad: b.cantidad || 1, origen: "STOCK" });
+    if (!cubiertos.length) { filas.push({ pedido: referenciaSeur(o, "", ""), cliente: o.name || "", producto: o.product || "", cantidad: 1, origen: "STOCK" }); continue; }
+    for (const b of cubiertos) filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", ""), cliente: o.name || "", producto: producto(b), cantidad: b.cantidad || 1, origen: "STOCK" });
   }
   for (const b of backorders) {
     if (b.estado !== "listo-seur" || b.cargaId !== carga.id) continue;
@@ -8376,7 +8391,7 @@ async function buildListadoAlmacenSeur(env, cargaId) {
     if (/^ENVÍO SUELTO/i.test(b.mercanciaFabrica || "")) origen = "APARTADO EN ALMACÉN";
     else if (b.fechaRecibido) origen = diaDe(b.fechaRecibido) === hoy ? "RECIBIDO HOY (" + (b.proveedor || "fábrica") + ")" : "RECIBIDO " + corto(b.fechaRecibido) + " (" + (b.proveedor || "fábrica") + ")";
     else origen = "RECIBIDO DE " + (b.proveedor || "FÁBRICA");
-    filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", prefijo), producto: producto(b), cantidad: b.cantidad || 1, origen });
+    filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", prefijo), cliente: o.name || "", producto: producto(b), cantidad: b.cantidad || 1, origen });
   }
   filas.sort((a, b) => a.origen.localeCompare(b.origen) || a.pedido.localeCompare(b.pedido));
   return { carga, filas };
@@ -9419,6 +9434,39 @@ async function handleFetch(request, env) {
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/cargas/close", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    // Resumen de la carga de SEUR en una etiqueta 15×10 enviada al email
+    // del almacén (Jennifer, 2026-10-01: lo imprimen desde ahí directamente).
+    // ?ver=1 descarga el mismo PDF sin enviar nada, para revisarlo.
+    if (url.pathname === "/api/cargas/seur/almacen-email" && (request.method === "POST" || request.method === "GET")) {
+      const cargaId = url.searchParams.get("cargaId") || "";
+      const result = await buildListadoAlmacenSeur(env, cargaId);
+      if (result.error) return Response.json({ ok: false, error: result.error }, { status: 400 });
+      if (!result.filas.length) return Response.json({ ok: false, error: "Esta carga no tiene envíos." }, { status: 400 });
+      const c = result.carga;
+      const fechaCorta = c.fecha.slice(8, 10) + "/" + c.fecha.slice(5, 7);
+      const bultos = result.filas.reduce((n, f) => n + (f.cantidad || 1), 0);
+      const grupos = [];
+      for (const f of result.filas) {
+        let g = grupos.find((x) => x.origen === f.origen);
+        if (!g) grupos.push((g = { origen: f.origen, filas: [] }));
+        g.filas.push(f);
+      }
+      const pdf = resumenSeurPdf({ titulo: `SEUR  ${c.dia} ${fechaCorta}  ·  ${bultos} ${bultos === 1 ? "BULTO" : "BULTOS"}`, grupos });
+      const nombrePdf = `Carga SEUR ${c.fecha}.pdf`;
+      if (request.method === "GET" && url.searchParams.get("ver") === "1") {
+        return new Response(pdf, { headers: { "content-type": "application/pdf", "content-disposition": `inline; filename="${nombrePdf}"` } });
+      }
+      if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+      const texto = [
+        `Carga de SEUR del ${c.dia.toLowerCase()} ${fechaCorta}: ${bultos} ${bultos === 1 ? "bulto" : "bultos"}.`,
+        "",
+        ...grupos.flatMap((g) => [g.origen + ":", ...g.filas.map((f) => `  ${f.pedido} — ${f.producto}${f.cantidad > 1 ? " x" + f.cantidad : ""}`), ""]),
+        "Se adjunta el resumen en etiqueta 15×10 para imprimir.",
+      ].join("\n");
+      const r = await enviarEmailAlmacen(env, { asunto: `Carga SEUR ${c.dia} ${fechaCorta}`, texto, pdf, nombrePdf });
+      return Response.json(r, { status: r.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/cargas/seur/almacen" && request.method === "GET") {
