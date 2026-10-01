@@ -8150,7 +8150,11 @@ function referenciaPedido(o) {
 // no hace falta ningún recorte especial aparte, basta con anteponer "REP"
 // antes de truncar.
 function referenciaSeur(o, refSuffix, prefijo) {
-  const base = (prefijo || "") + referenciaPedido(o);
+  // Leroy Merlin (Jennifer, 2026-10-01): la referencia real lleva "00"
+  // delante ("001-26263L32415-A"), pero en SEUR tiene que salir sin esos
+  // ceros ("1-26263L32415-A").
+  const ref = o && o.platform === "Leroy Merlin" ? referenciaPedido(o).replace(/^0+/, "") : referenciaPedido(o);
+  const base = (prefijo || "") + ref;
   return truncarReferenciaSeur(`${base}${refSuffix || ""}`);
 }
 
