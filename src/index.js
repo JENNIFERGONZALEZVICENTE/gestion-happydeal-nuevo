@@ -28,11 +28,11 @@ const PROCESAMIENTO_DESDE = {
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para poder probar de
   // verdad el cruce de seguimiento de Furniture/SEUR contra pedidos reales
   // de estas dos tiendas, no solo los que lleguen desde hoy.
-  // Desactivado (Jennifer, 2026-10-01): "he subido el fichero de Maison du
-  // Monde, pero no quiero que hagas nada con ellos, por ahora solo actualizar
-  // el listado" — la subida de esa mañana tramitó 19 pedidos y se deshizo a
-  // mano. Antes: "2026-09-13".
-  "Maison Du Monde": "2099-12-31",
+  // Reactivado (Jennifer, 2026-10-01: "Maison tiene que tramitar también")
+  // desde el 30/09: el último pedido (2001791372-A, 29/09) y todo lo
+  // anterior se metió a mano ese día. Estuvo desactivado unas horas
+  // ("2099-12-31") tras la subida de la mañana; antes "2026-09-13".
+  "Maison Du Monde": "2026-09-30",
   // Reactivado (Jennifer, 2026-09-29): "a partir de este pedido 83752933-A
   // (24/09 21:09, único de ese día, ya con su pendiente manual) todos se
   // van a tramitar con normalidad". Lo anterior se dejó pendiente a mano.
@@ -2553,7 +2553,10 @@ const PLAZO_LIMITE_DESDE = { "Carrefour": "2026-09-29" };
 // 2026-09-29, Conforama ES: "que el aviso sobre el vencimiento sea solo
 // visible en los pedidos a partir del día 24/09").
 // Worten desde 83706555-A (18/09, único pedido de ese día).
-const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18" };
+// Leroy Merlin desde el 23/09 (Jennifer, 2026-10-01: "en Leroy también me
+// tienes que avisar de la fecha límite"; lo anterior ya tiene el plazo
+// vencido hace semanas).
+const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18", "Leroy Merlin": "2026-09-23" };
 function plazoEnvioActivo(o) {
   if (!o || !o.limiteEnvio) return false;
   // Sin aviso mientras el cliente no ha pagado (Jennifer, 2026-09-29:
