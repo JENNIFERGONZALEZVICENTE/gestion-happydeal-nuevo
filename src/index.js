@@ -64,9 +64,11 @@ const PROCESAMIENTO_DESDE = {
   "Conforama ES": "2026-09-25",
   // Ampliado hacia atrás (Jennifer, 2026-09-21) para procesar todo el
   // histórico real de prueba (95 pedidos desde el 24/06).
-  // Desactivado (Jennifer, 2026-10-01: "vamos a ir plataforma a plataforma y
-  // yo te aviso cuando lo tengas que activar"). Antes: "2026-06-24".
-  "Leroy Merlin": "2099-12-31",
+  // Reactivado (Jennifer, 2026-10-01): "el contador de Leroy ya puede
+  // funcionar con normalidad" — desde los pedidos del 28/09; lo anterior se
+  // metió a mano. Antes: "2099-12-31" (desactivado ese mismo día) y antes
+  // "2026-06-24".
+  "Leroy Merlin": "2026-09-28",
 };
 // Prefijo del id interno por plataforma (para no chocar entre sí ni con los
 // pedidos de Shopify, que usan el id numérico real de Shopify tal cual).
