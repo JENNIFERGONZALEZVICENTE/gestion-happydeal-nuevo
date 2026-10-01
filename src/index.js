@@ -1715,6 +1715,8 @@ function renderPage() {
   .carga-abierta-box.retenidos-box h3 { color: #5b21b6; }
   .retenido-listo { color: #15803d; font-weight: 600; }
   .coste-tarifa { text-align: right; white-space: nowrap; }
+  .reservar-almacen-btn { padding: 2px 8px; font-size: 11px; margin-left: 4px; }
+  .reserva-tag { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 4px; background: #ede9fe; color: #5b21b6; font-size: 11px; font-weight: 700; }
   .carga-abierta-box.revision-box { border-color: #dc2626; background: #fef2f2; }
   .carga-abierta-box.revision-box h3 { color: #b91c1c; }
   .revision-motivo { font-weight: 600; color: #b91c1c; }
@@ -4747,7 +4749,7 @@ function renderPendientes() {
       ? \`<span class="cancelado-tag">✕ CANCELADO\${b.fechaCancelado ? " " + new Date(b.fechaCancelado).toLocaleDateString("es-ES") : ""}</span>\`
       : esColchonSeur
       ? \`<button type="button" class="recibido-seur-btn" data-id="\${b.id}" title="Recibido: entra solo en la carga de SEUR (antes de las 15:00, la de hoy; después, la de mañana)">Marcar recibido</button> <button type="button" class="secondary resolver-seur-btn" data-id="\${b.id}" title="Recibido y programado para el día que pida el cliente">📅 Otro día</button>\${sustituirBtnHtml}\`
-      : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${sustituirBtnHtml}\`;
+      : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${reservaAlmacenHtml(b)}\${sustituirBtnHtml}\`;
     const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button> <button type="button" class="secondary revisar-pendiente-btn" data-revisar-pendiente="\${escapeAttr(b.id)}" title="Hay algo que ver antes de pedirlo: pasa al recuadro de revisión y no se puede pedir hasta marcarlo revisado">🔍 Revisar</button></div>\`;
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
@@ -5474,6 +5476,35 @@ function esMiembroSecundario(o) {
     && allOrders.some(p => p.id === o.grupoEnvio && p.shippingStatus !== "fulfilled");
 }
 
+// Reserva en almacén (Jennifer, 2026-10-01): artículo recibido de un pedido
+// de Furniture que todavía espera a otra cosa — botón para mandar el email
+// con sus etiquetas, o la fecha si ya se mandó. Lo decide ella en cada caso
+// (BEZEN12211 no la llevó porque salía al día siguiente).
+function reservaAlmacenHtml(b) {
+  if (!b || !b.recibidoFabrica || b.estado === "cancelado" || b.estado === "servido") return "";
+  if (b.reservaEnviada) return ' <span class="reserva-tag" title="Email de reserva enviado al almacén">📦 Reservado ' + new Date(b.reservaEnviada).toLocaleDateString("es-ES") + "</span>";
+  const o = allOrders.find(x => String(x.id) === String(b.orderId));
+  if (!o || o.agencia !== "FURNITURE") return "";
+  const resto = backordersPorPedido(o.id).filter(x => x.id !== b.id && !(x.esPack && x.tipo === "colchon" && x.tipoEnvio === "FPK"));
+  if (!resto.some(x => !x.recibidoFabrica)) return ""; // ya está todo: sale en la carga
+  return ' <button type="button" class="secondary reservar-almacen-btn" data-reservar-almacen="' + escapeAttr(b.id) + '" title="Manda al almacén el email con las etiquetas de reserva para que lo aparten para este cliente">📦 Reservar en almacén</button>';
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-reservar-almacen]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const b = backorders.find(x => x.id === btn.dataset.reservarAlmacen);
+  if (!b || !confirm("¿Mandar al almacén el email de reserva de " + b.cantidad + "x " + b.stockModel + " " + b.talla + " (" + refLabel(b) + ")?")) return;
+  btn.disabled = true;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/reservar-almacen", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { alert("No se ha podido mandar el email de reserva" + (data.avisoReserva && data.avisoReserva.reason ? " (" + data.avisoReserva.reason + ")" : "") + ". Avisa al almacén a mano."); btn.disabled = false; return; }
+  b.reservaEnviada = new Date().toISOString();
+  mostrarAvisoBreve("Reserva enviada al almacén: " + refLabel(b));
+  if (document.getElementById("view-furniture").style.display !== "none") renderFurniture(); else renderPendientes();
+}, true);
+
 // Entregas en Valdemoro (Jennifer, 2026-09-30: "cuando un pedido sea para
 // entregar en Valdemoro por Furniture o por SEUR siempre me tendrás que
 // avisar o poner una nota por si lo entregamos por nuestros medios").
@@ -5532,7 +5563,7 @@ function furnitureRowCells(o) {
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
           \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + avisoRefDuplicada(b) + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}\${b.desdeAbierto ? ' <span class="abierto-tag">🟣 Sale de un colchón ABIERTO</span>' : ""}
-        </label>\${items.length > 1 ? \`<button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="1" title="Sacar este artículo del envío: se queda pendiente como línea propia con la referencia terminada en 2">Enviar aparte</button>\` : ""}\${abiertoTagHtml(b)}
+        </label>\${reservaAlmacenHtml(b)}\${items.length > 1 ? \`<button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="1" title="Sacar este artículo del envío: se queda pendiente como línea propia con la referencia terminada en 2">Enviar aparte</button>\` : ""}\${abiertoTagHtml(b)}
       \`;
       }).join("")
     : "<em>Todo en stock</em>";
@@ -8846,6 +8877,22 @@ async function handleFetch(request, env) {
         return Response.json({ ...data, avisoReserva });
       }
       return new Response(texto, { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
+    // Reserva en almacén de un artículo ya recibido que espera al resto de
+    // su pedido (Jennifer, 2026-10-01: "cuando viene el camión vienen
+    // colchones que van a salir por Furniture... necesito que hagamos las
+    // etiquetas de reserva y las mandemos al almacén"). Manda el email con
+    // sus etiquetas y lo marca como reservado.
+    const reservarMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/reservar-almacen$/);
+    if (reservarMatch && request.method === "POST") {
+      const id = decodeURIComponent(reservarMatch[1]);
+      const backorders = await inventoryStub(env).fetch("https://do/backorders").then((r) => r.json());
+      const entry = backorders.find((b) => b.id === id);
+      if (!entry) return Response.json({ ok: false, error: "Artículo no encontrado." }, { status: 404 });
+      const avisoReserva = await reservarStockManual(env, entry);
+      if (avisoReserva.ok) await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(id) + "/reserva-enviada", { method: "POST", body: "{}" });
+      return Response.json({ ok: !!avisoReserva.ok, avisoReserva });
     }
 
     const mercanciaPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/mercancia$/);
