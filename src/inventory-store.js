@@ -2173,7 +2173,7 @@ export class InventoryStore {
     // stock/agencia (evita duplicar backorders — pushBackorder no
     // sobreescribe uno con la misma id).
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
-      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica } = await request.json();
+      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return new Response("not found", { status: 404 });
@@ -2181,6 +2181,10 @@ export class InventoryStore {
       // por servidos sin haber salido).
       if (estado !== undefined && ["pendiente", "cubierto", "servido"].includes(estado)) entry.estado = estado;
       if (recibidoFabrica !== undefined) entry.recibidoFabrica = !!recibidoFabrica;
+      // "Pendiente de revisión antes de pedir" (Jennifer, 2026-10-01: pedidos
+      // de Maison du Monde que entraron con un precio incorrecto, a la
+      // espera de que el cliente pague la diferencia): { motivo } o null.
+      if (revision !== undefined) entry.revision = revision ? { motivo: String(revision.motivo || ""), desde: new Date().toISOString() } : null;
       if (referencia !== undefined) entry.referencia = referencia;
       if (mercanciaFabrica !== undefined) entry.mercanciaFabrica = mercanciaFabrica;
       // Tapa del canapé que ya está en el almacén (Jennifer, 2026-09-30,

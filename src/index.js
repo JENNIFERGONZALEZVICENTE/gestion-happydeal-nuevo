@@ -1704,6 +1704,13 @@ function renderPage() {
   .carga-abierta-box.retenidos-box h3 { color: #5b21b6; }
   .retenido-listo { color: #15803d; font-weight: 600; }
   .coste-tarifa { text-align: right; white-space: nowrap; }
+  .carga-abierta-box.revision-box { border-color: #dc2626; background: #fef2f2; }
+  .carga-abierta-box.revision-box h3 { color: #b91c1c; }
+  .revision-motivo { font-weight: 600; color: #b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    .carga-abierta-box.revision-box { background: #450a0a; border-color: #ef4444; }
+    .carga-abierta-box.revision-box h3, .revision-motivo { color: #fecaca; }
+  }
   .coste-unidad { color: var(--muted); font-size: 11px; }
   .valdemoro-tag { display: inline-block; background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .ref-duplicada { display: inline-block; background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
@@ -2096,6 +2103,16 @@ function renderPage() {
     <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-ocultar-recibidos"> Ocultar ya recibidos de fábrica</label>
     <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-mostrar-cancelados"> Mostrar cancelados</label>
     <button type="button" id="descargar-excel-pendientes-btn" class="secondary">Descargar Excel (todos los proveedores)</button>
+  </div>
+  <div class="carga-abierta-box revision-box" id="revision-box" style="display:none">
+    <div class="toolbar"><h3 style="margin:0">Pendientes de revisión antes de pedir</h3></div>
+    <div id="revision-count" class="inventario-count"></div>
+    <div class="table-wrap">
+      <table id="revision-table">
+        <thead><tr><th>Pedido</th><th>Proveedor</th><th>Modelo</th><th>Talla</th><th>Cantidad</th><th>Coste tarifa</th><th>Motivo</th><th>Fecha del pedido</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
   <div class="toolbar" id="pendientes-toolbar" style="display:none">
     <button type="button" id="generar-pedido-btn" disabled>Generar pedido a fábrica (PDF)</button>
@@ -3357,6 +3374,7 @@ document.getElementById("descargar-excel-pendientes-btn").addEventListener("clic
       "FUR/FPK": b.esPack && b.tipo === "colchon" ? (b.tipoEnvio || "") : "",
       "Mercancía para pedir a fábrica": b.mercanciaFabrica || "",
       "Fecha del pedido": b.fecha || "",
+      "En revisión": b.revision ? (b.revision.motivo || "Sí") : "",
       "Pedido a fábrica": b.pedidoGenerado ? "Sí" + (b.fechaPedidoFabrica ? " (" + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") + ")" : "") : "No",
       "Recibido de fábrica": b.recibidoFabrica ? "Sí" + (b.fechaRecibido ? " (" + new Date(b.fechaRecibido).toLocaleDateString("es-ES") + ")" : "") : "No",
     }));
@@ -4394,6 +4412,38 @@ function totalCostesTarifa(lista) {
   return { total, sinPrecio };
 }
 
+// Pendientes de revisión antes de pedir (Jennifer, 2026-10-01: pedidos que
+// entraron con un precio incorrecto, a la espera de que el cliente pague la
+// diferencia). No salen en la lista normal ni se pueden pedir a fábrica
+// hasta pulsar "Revisado: se puede pedir".
+function renderRevision() {
+  const enRevision = backorders.filter(b => b.revision && b.estado === "pendiente")
+    .sort((a, b) => parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha));
+  document.getElementById("revision-box").style.display = enRevision.length ? "" : "none";
+  if (!enRevision.length) return;
+  cargarCostesTarifa(enRevision.filter(b => b.proveedor === "LUSO" || b.proveedor === "NEW"));
+  document.getElementById("revision-count").textContent = enRevision.length + " artículo(s) en revisión: no se pueden pedir a fábrica hasta marcarlos como revisados.";
+  document.querySelector("#revision-table tbody").innerHTML = enRevision.map(b => "<tr>"
+    + "<td>" + refLabel(b) + (b.refSuffix || "") + "</td>"
+    + "<td>" + escapeAttr(b.proveedor || "") + "</td>"
+    + "<td>" + escapeAttr(b.stockModel) + "</td>"
+    + "<td>" + escapeAttr(b.talla) + "</td>"
+    + "<td>" + b.cantidad + "</td>"
+    + ((b.proveedor === "LUSO" || b.proveedor === "NEW") ? costeTarifaCell(b) : "<td>—</td>")
+    + '<td class="revision-motivo">' + escapeAttr(b.revision.motivo || "") + "</td>"
+    + "<td>" + new Date(parseFechaGenerica(b.fecha)).toLocaleDateString("es-ES") + "</td>"
+    + '<td><button type="button" class="revision-ok-btn" data-id="' + escapeAttr(b.id) + '">Revisado: se puede pedir</button></td>'
+    + "</tr>").join("");
+  document.querySelectorAll(".revision-ok-btn").forEach(btn => btn.addEventListener("click", async () => {
+    const b = backorders.find(x => x.id === btn.dataset.id);
+    if (!b || !confirm("¿" + refLabel(b) + (b.refSuffix || "") + " ya está revisado? Pasará a la lista normal de " + b.proveedor + " para pedirlo a fábrica.")) return;
+    const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: b.id, revision: null }) });
+    if (!res.ok) { alert("No se ha podido marcar como revisado."); return; }
+    b.revision = null;
+    renderPendientes();
+  }));
+}
+
 // Aviso que desaparece solo, sin bloquear la pantalla como un alert.
 function mostrarAvisoBreve(texto) {
   let el = document.getElementById("aviso-breve");
@@ -4421,8 +4471,10 @@ function renderPendientes() {
   const busquedaSku = document.getElementById("pendientes-sku-search").value.trim().toLowerCase();
   const ocultarRecibidos = document.getElementById("pendientes-ocultar-recibidos").checked;
   const mostrarCancelados = document.getElementById("pendientes-mostrar-cancelados").checked;
+  renderRevision();
   const pendientes = backorders.filter(b => {
     if (b.estado !== "pendiente" && !(mostrarCancelados && b.estado === "cancelado")) return false;
+    if (b.revision) return false; // en su propio recuadro, no se puede pedir todavía
     if (ocultarRecibidos && b.recibidoFabrica) return false;
     if (busquedaReferencia && !(b.referencia || "").toLowerCase().includes(busquedaReferencia)) return false;
     if (busquedaSku && !skuDePendiente(b).toLowerCase().includes(busquedaSku)) return false;
