@@ -8407,6 +8407,14 @@ async function buildListadoAlmacenSeur(env, cargaId) {
   return { carga, filas };
 }
 
+// Códigos postales de Portugal sin el guion (Jennifer, 2026-10-01: "para
+// que seur los coja bien les tenemos que quitar el - que hay entre los
+// números"): 1000-001 -> 1000001.
+function cpSeur(o) {
+  const cp = String(o.postalCode || "").trim();
+  return String(o.countryCode || "").toUpperCase() === "PT" ? cp.replace(/[^0-9]/g, "") : cp;
+}
+
 async function buildSeurExport(env, cargaId) {
   const ordersId = env.ORDERS_STORE.idFromName("shopify");
   const ordersStub = env.ORDERS_STORE.get(ordersId);
@@ -8502,7 +8510,7 @@ async function buildSeurExport(env, cargaId) {
         if (sinPeso.length) avisos.push(`${referenciaPedido(o)}: sin peso conocido para ${[...new Set(sinPeso.map((p) => p.sku))].join(", ")} — revisa Pesos SEUR.`);
 
         rows.push([
-          ref, o.name, direccion, o.postalCode || "", o.city || "",
+          ref, o.name, direccion, cpSeur(o), o.city || "",
           telefono, telefono, String(linea.bultos), String(linea.kilos),
           codRemitente, o.countryCode || "", observacionesSeur(linea),
           "", "", "", o.email || "", servicio, producto,
