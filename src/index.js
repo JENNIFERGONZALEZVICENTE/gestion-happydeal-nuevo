@@ -6064,6 +6064,66 @@ async function descargarListadoAlmacen(cargaId) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+// Listado para el almacén de una carga de SEUR (Jennifer, 2026-10-01): qué
+// sale y de dónde (STOCK / RECIBIDO HOY / APARTADO), para que lo busquen en
+// el sitio correcto.
+async function descargarListadoAlmacenSeur(cargaId) {
+  const res = await fetch("/api/cargas/seur/almacen?cargaId=" + encodeURIComponent(cargaId));
+  if (!res.ok) { alert("No se pudo sacar el listado: " + await res.text()); return; }
+  const { carga, filas } = await res.json();
+  const ExcelJS = await cargarExcelJs();
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Almacén SEUR", {
+    pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true,
+      margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 } },
+  });
+  const TAM = 13;
+  const anchos = [20, 46, 7, 28];
+  ws.columns = anchos.map(width => ({ width }));
+  ws.getCell("A1").value = "Carga SEUR — " + formatSeurCargaTitulo(carga);
+  ws.getCell("A1").font = { bold: true, size: 18 };
+  ws.getCell("A2").value = filas.reduce((n, f) => n + f.cantidad, 0) + " bultos · " + new Set(filas.map(f => f.pedido)).size + " envíos";
+  ws.getCell("A2").font = { size: 12 };
+  ws.addRow([]);
+  const borde = { style: "thin", color: { argb: "FF999999" } };
+  const bordes = { top: borde, left: borde, bottom: borde, right: borde };
+  const cabecera = ws.addRow(["Pedido", "Producto", "Uds", "De dónde sale"]);
+  cabecera.eachCell(c => {
+    c.font = { bold: true, size: TAM, color: { argb: "FFFFFFFF" } };
+    c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F8A4C" } };
+    c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    c.border = bordes;
+  });
+  ws.pageSetup.printTitlesRow = cabecera.number + ":" + cabecera.number;
+  filas.forEach(f => {
+    const row = ws.addRow([f.pedido, f.producto, f.cantidad, f.origen]);
+    row.height = Math.max(1, Math.ceil(f.producto.length / ((anchos[1] - 2) * 11 / TAM))) * (TAM * 1.35) + 6;
+    const color = /^STOCK/.test(f.origen) ? "FF1D4ED8" : /HOY/.test(f.origen) ? "FF15803D" : /APARTADO/.test(f.origen) ? "FF7C3AED" : "FF374151";
+    row.eachCell({ includeEmpty: true }, (c, col) => {
+      c.alignment = { vertical: "middle", horizontal: col === 2 ? "left" : "center", wrapText: true };
+      c.border = bordes;
+      c.font = col === 4 ? { size: TAM, bold: true, color: { argb: color } } : { size: TAM, bold: col === 1 };
+    });
+  });
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "Almacen_SEUR_" + carga.fecha + ".xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".listado-almacen-seur-btn");
+  if (!btn) return;
+  btn.disabled = true;
+  try { await descargarListadoAlmacenSeur(btn.dataset.id); }
+  catch (err) { alert("No se pudo generar el Excel: " + err.message); }
+  finally { btn.disabled = false; }
+});
+
 document.addEventListener("click", async (e) => {
   const btn = e.target.closest(".listado-almacen-btn");
   if (!btn) return;
@@ -6950,6 +7010,7 @@ function renderSeurCargas() {
         <div class="toolbar">
           <h3 style="margin:0">\${formatSeurCargaTitulo(carga)}</h3>
           <button type="button" class="secondary descargar-seur-btn" data-id="\${carga.id}">Descargar fichero SEUR</button>
+          <button type="button" class="secondary listado-almacen-seur-btn" data-id="\${carga.id}">Listado almacén</button>
           <button type="button" class="cerrar-carga-seur-btn" data-id="\${carga.id}">Cerrar carga</button>
         </div>
         <div class="inventario-count">\${filas.length} pedidos en esta carga</div>
@@ -8218,6 +8279,46 @@ function observacionesSeur(linea) {
   return [...porSku.entries()].map(([sku, n]) => (n > 1 ? `${sku} (${n}UD)` : sku)).join(" + ");
 }
 
+// Listado para el almacén de una carga de SEUR (Jennifer, 2026-10-01: "me
+// tengo que poder descargar un listado de todos los pedidos que salen para
+// el almacén... si es algo marcado como recibido hoy tiene que ponerlo, si
+// es de stock tiene que ponerlo para que así no lo busquen en el sitio
+// incorrecto"). Mismos artículos que el fichero de SEUR.
+async function buildListadoAlmacenSeur(env, cargaId) {
+  const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  const [orders, cargas, backorders] = await Promise.all([
+    ordersStub.fetch("https://do/orders").then((r) => r.json()),
+    ordersStub.fetch("https://do/cargas").then((r) => r.json()),
+    inventoryStub(env).fetch("https://do/backorders").then((r) => r.json()),
+  ]);
+  const carga = cargas.find((c) => c.id === cargaId && c.tipo === "seur");
+  if (!carga) return { error: "No se encuentra esa carga de SEUR." };
+  const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  const diaDe = (iso) => (iso ? new Date(iso).toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" }) : "");
+  const corto = (iso) => { const d = diaDe(iso); return d ? d.slice(8, 10) + "/" + d.slice(5, 7) : ""; };
+  const producto = (b) => [b.tipo === "almohada" ? "ALMOHADA" : b.tipo === "colchon" ? "COLCHÓN" : "", nombreCortoProducto(b.stockModel), b.talla].filter(Boolean).join(" ");
+  const filas = [];
+  for (const o of orders) {
+    if (o.agencia !== "SEUR" || o.cargaId !== carga.id) continue;
+    const cubiertos = backorders.filter((b) => b.orderId === o.id && b.estado === "cubierto");
+    if (!cubiertos.length) { filas.push({ pedido: referenciaSeur(o, "", ""), producto: o.product || "", cantidad: 1, origen: "STOCK" }); continue; }
+    for (const b of cubiertos) filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", ""), producto: producto(b), cantidad: b.cantidad || 1, origen: "STOCK" });
+  }
+  for (const b of backorders) {
+    if (b.estado !== "listo-seur" || b.cargaId !== carga.id) continue;
+    const o = orders.find((x) => x.id === b.orderId);
+    if (!o) continue;
+    const prefijo = b.reposicion ? "REP" : b.gestoComercial ? "GC" : "";
+    let origen;
+    if (/^ENVÍO SUELTO/i.test(b.mercanciaFabrica || "")) origen = "APARTADO EN ALMACÉN";
+    else if (b.fechaRecibido) origen = diaDe(b.fechaRecibido) === hoy ? "RECIBIDO HOY (" + (b.proveedor || "fábrica") + ")" : "RECIBIDO " + corto(b.fechaRecibido) + " (" + (b.proveedor || "fábrica") + ")";
+    else origen = "RECIBIDO DE " + (b.proveedor || "FÁBRICA");
+    filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", prefijo), producto: producto(b), cantidad: b.cantidad || 1, origen });
+  }
+  filas.sort((a, b) => a.origen.localeCompare(b.origen) || a.pedido.localeCompare(b.pedido));
+  return { carga, filas };
+}
+
 async function buildSeurExport(env, cargaId) {
   const ordersId = env.ORDERS_STORE.idFromName("shopify");
   const ordersStub = env.ORDERS_STORE.get(ordersId);
@@ -9215,6 +9316,12 @@ async function handleFetch(request, env) {
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/cargas/close", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/cargas/seur/almacen" && request.method === "GET") {
+      const result = await buildListadoAlmacenSeur(env, url.searchParams.get("cargaId") || "");
+      if (result.error) return new Response(result.error, { status: 400 });
+      return Response.json(result);
     }
 
     if (url.pathname === "/api/cargas/almacen" && request.method === "GET") {
