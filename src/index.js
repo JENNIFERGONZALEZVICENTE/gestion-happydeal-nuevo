@@ -5228,6 +5228,7 @@ async function resolverPendiente(id) {
   const orderId = before ? before.orderId : null;
   const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST" });
   const entry = await res.json();
+  avisarReservaAutomatica(entry);
   await loadPendientes();
   if (orderId != null && entry && entry.recibidoFabrica) await checkAutoAddCarga(orderId);
 }
@@ -5474,6 +5475,14 @@ function backordersPorPedido(orderId) {
 function esMiembroSecundario(o) {
   return !!o.grupoEnvio && o.grupoEnvio !== o.id
     && allOrders.some(p => p.id === o.grupoEnvio && p.shippingStatus !== "fulfilled");
+}
+
+// Aviso tras marcar recibido un colchón FUR que se reservó solo (ver la ruta
+// /resolver en el servidor).
+function avisarReservaAutomatica(entry) {
+  if (!entry || !entry.avisoReserva) return;
+  if (entry.avisoReserva.ok) mostrarAvisoBreve("Recibido y reservado: email de reserva enviado al almacén (" + refLabel(entry) + ").");
+  else alert("Recibido, pero NO se ha podido mandar el email de reserva al almacén" + (entry.avisoReserva.reason ? " (" + entry.avisoReserva.reason + ")" : "") + ". Avísales a mano o usa el botón «Reservar en almacén».");
 }
 
 // Reserva en almacén (Jennifer, 2026-10-01): artículo recibido de un pedido
@@ -5837,9 +5846,12 @@ function renderFurniture() {
 
   document.querySelectorAll(".item-recibido-check").forEach(chk => {
     chk.addEventListener("change", async () => {
-      await fetch("/api/inventario/pendientes/" + encodeURIComponent(chk.dataset.id) + "/resolver", { method: "POST" });
+      const resp = await fetch("/api/inventario/pendientes/" + encodeURIComponent(chk.dataset.id) + "/resolver", { method: "POST" });
+      const entry = await resp.json().catch(() => null);
+      avisarReservaAutomatica(entry);
       const b = backorders.find(x => x.id === chk.dataset.id);
       if (b) b.recibidoFabrica = chk.checked;
+      if (b && entry && entry.reservaEnviada) b.reservaEnviada = entry.reservaEnviada;
       if (chk.checked && b) await checkAutoAddCarga(b.orderId);
       renderFurniture();
     });
@@ -8765,7 +8777,31 @@ async function handleFetch(request, env) {
 
     const resolvePendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/resolver$/);
     if (resolvePendingMatch && request.method === "POST") {
-      return proxyInventory(env, `/backorders/${resolvePendingMatch[1]}/resolver`, request);
+      const res = await proxyInventory(env, `/backorders/${resolvePendingMatch[1]}/resolver`, request);
+      const texto = await res.text();
+      // Reserva automática (Jennifer, 2026-10-01: "cuando venga el camión y
+      // yo lo marque como recibido, si ese colchón tiene que esperar para
+      // juntarse con el resto de cosas porque tiene referencia FUR,
+      // directamente tú tienes que mandar el email"): colchón FUR recién
+      // recibido cuyo pedido todavía espera a otro artículo.
+      let entry = null;
+      try { entry = JSON.parse(texto); } catch (e) { /* respuesta no JSON */ }
+      if (res.ok && entry && entry.recibidoFabrica && entry.tipo === "colchon" && entry.tipoEnvio === "FUR" && !entry.reservaEnviada) {
+        const backorders = await inventoryStub(env).fetch("https://do/backorders").then((r) => r.json());
+        const resto = backorders.filter((b) => String(b.orderId) === String(entry.orderId) && b.id !== entry.id
+          && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial && !b.envioAparte
+          && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
+        if (resto.some((b) => !b.recibidoFabrica)) {
+          const avisoReserva = await reservarStockManual(env, entry);
+          if (avisoReserva.ok) {
+            await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(entry.id) + "/reserva-enviada", { method: "POST", body: "{}" });
+            entry.reservaEnviada = new Date().toISOString();
+          }
+          entry.avisoReserva = avisoReserva;
+        }
+        return Response.json(entry);
+      }
+      return new Response(texto, { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     const resolveSeurPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/resolver-seur$/);
