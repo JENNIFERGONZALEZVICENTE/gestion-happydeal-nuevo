@@ -2078,7 +2078,7 @@ function renderPage() {
   <div id="stock-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="stock-table">
-      <thead><tr><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th>Pedido a proveedor</th><th>Disponible al llegar</th><th>Ajustar</th></tr></thead>
+      <thead><tr><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th title="Pedidos para stock a Luso/New que aún no han llegado">Pedido para stock (en camino)</th><th title="Lo pedido para stock que todavía no tiene cliente: pasará al stock al llegar">Libre al llegar</th><th>Ajustar</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -2137,6 +2137,7 @@ function renderPage() {
     <button type="button" id="generar-pedido-btn" disabled>Generar pedido a fábrica (PDF)</button>
     <button type="button" id="generar-pedido-excel-btn" disabled>Generar pedido a fábrica (Excel)</button>
     <button type="button" id="marcar-ya-pedido-btn" class="secondary" disabled title="Ya se ha pedido a fábrica por otra vía: se marca como pedido sin descargar nada">Marcar como ya pedido</button>
+    <button type="button" id="pedido-stock-btn" class="secondary" style="display:none" title="Pedir colchones a este proveedor para tener en stock, sin pedido de cliente detrás">📦 Pedido para stock</button>
     <span id="seleccion-count" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="pendientes-count" class="inventario-count"></div>
@@ -2354,6 +2355,26 @@ function renderPage() {
     <div id="tarifas-desglose-pasos"></div>
     <div class="modal-actions">
       <button type="button" class="secondary" id="tarifas-desglose-cerrar">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="pedido-stock-overlay">
+  <div class="modal-box modal-box-wide">
+    <h3 id="pedido-stock-titulo">Pedido para stock</h3>
+    <p style="margin:0 0 8px;color:var(--muted);font-size:13px">Se añade a los pendientes de este proveedor y entra en el pedido a fábrica como los de clientes. Si entra un pedido de cliente de lo mismo, se queda con una de estas unidades y no se vuelve a pedir. Al recibirlo, lo que no tenga cliente pasa al stock.</p>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <input id="pedido-stock-modelo" list="pedido-stock-modelos" placeholder="Modelo (escribe para buscar)" style="flex:1;min-width:260px" />
+      <datalist id="pedido-stock-modelos"></datalist>
+      <input id="pedido-stock-talla" list="pedido-stock-tallas" placeholder="Medida (ej. 150X190)" style="width:140px" />
+      <datalist id="pedido-stock-tallas"></datalist>
+      <input id="pedido-stock-cantidad" type="number" min="1" value="1" style="width:70px" />
+      <button type="button" class="secondary" id="pedido-stock-anadir">Añadir línea</button>
+    </div>
+    <table style="width:100%;margin-top:10px"><thead><tr><th style="text-align:left">Modelo</th><th>Medida</th><th>Unidades</th><th></th></tr></thead><tbody id="pedido-stock-lineas"></tbody></table>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="pedido-stock-cerrar">Cancelar</button>
+      <button type="button" id="pedido-stock-crear">Crear pedido para stock</button>
     </div>
   </div>
 </div>
@@ -4354,14 +4375,17 @@ function renderStock() {
 
   const sorted = stockRows.filter(r => r.stockModel === model).sort((a, b) => compareTalla(a.talla, b.talla));
   tbody.innerHTML = sorted.map(r => {
+    // Pedidos para stock (Jennifer, 2026-10-02): lo en camino y lo que de
+    // eso ya tiene cliente.
     const pedido = r.pedidoProveedor || 0;
-    const disponible = pedido - (r.vendidoPendiente || 0);
+    const reservado = r.pedidoProveedorReservado || 0;
+    const disponible = pedido - reservado;
     return \`
     <tr>
       <td>\${r.talla}</td>
       <td class="\${r.cantidad <= 0 ? "cantidad-baja" : ""}">\${r.cantidad}</td>
       <td class="\${r.vendidoPendiente > 0 ? "cantidad-baja" : ""}">\${r.vendidoPendiente || 0}</td>
-      <td>\${pedido}</td>
+      <td>\${pedido}\${reservado ? ' <span style="color:var(--muted);font-size:11px">(' + reservado + ' con cliente)</span>' : ""}</td>
       <td class="\${disponible < 0 ? "cantidad-baja" : ""}">\${disponible}</td>
       <td>
         <span class="adjust-form">
@@ -4619,6 +4643,7 @@ function renderPendientes() {
   document.getElementById("pendientes-check-head").style.display = showCheckbox ? "" : "none";
   document.getElementById("pendientes-toolbar").style.display = showCheckbox ? "flex" : "none";
   if (!showCheckbox) pedidoFabricaSeleccion.clear();
+  document.getElementById("pedido-stock-btn").style.display = ["luso", "new"].includes(currentProveedorFilter) ? "" : "none";
   // En Polival nunca hay colchones de pack (esos van en Luso/New), así que
   // "Camión estimado" (que solo aplica a esos) siempre saldría vacío ahí —
   // Jennifer pidió quitarla directamente en esa pestaña.
@@ -4768,20 +4793,24 @@ function renderPendientes() {
     // un colchón de pack en FPK sale independiente por SEUR (Jennifer,
     // 2026-09-30, BEZEN12117: la tapicería ya salió y los colchones "cuando
     // vengan saldrán por SEUR") — antes no tenía forma de prepararse para SEUR.
-    const esColchonSeur = ((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial;
+    const esColchonSeur = !b.paraStock && (((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial);
     // Sustituir por otro modelo que sí hay en stock (Jennifer, 2026-09-18):
     // vale tanto para colchón suelto como de pack, mientras siga
     // "pendiente" — una vez preparado o sustituido ya no aplica. El propio
     // modal decide si hace falta fecha de SEUR o si sale con la tapicería
     // (ver decideSustitucionViaSeur en inventory-store.js).
-    const sustituirBtnHtml = b.tipo === "colchon" && b.estado === "pendiente"
+    const sustituirBtnHtml = b.tipo === "colchon" && b.estado === "pendiente" && !b.paraStock
       ? \`<button type="button" class="secondary sustituir-btn" data-id="\${b.id}" style="margin-left:4px">Sustituir modelo</button>\`
       : "";
     // Cancelado (Jennifer, 2026-09-29): se ve solo con "Mostrar cancelados",
     // en gris y sin botones.
     const esCancelado = b.estado === "cancelado";
-    const resolverCell = esCancelado
-      ? \`<span class="cancelado-tag">✕ CANCELADO\${b.fechaCancelado ? " " + new Date(b.fechaCancelado).toLocaleDateString("es-ES") : ""}</span>\`
+    const resolverCell = b.paraStock && !esCancelado
+      ? (b.recibidoFabrica
+          ? '<span class="pedido-generado-tag">✓ Recibido ' + (b.fechaRecibido ? new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") + '</span>'
+          : '<button type="button" class="recibir-stock-btn" data-id="' + escapeAttr(b.id) + '" title="Ha llegado del proveedor: lo que no tiene cliente pasa al stock">Marcar recibido (al stock)</button>')
+      : esCancelado
+      ?\`<span class="cancelado-tag">✕ CANCELADO\${b.fechaCancelado ? " " + new Date(b.fechaCancelado).toLocaleDateString("es-ES") : ""}</span>\`
       : esColchonSeur
       ? \`<button type="button" class="recibido-seur-btn" data-id="\${b.id}" title="Recibido: entra solo en la carga de SEUR (antes de las 15:00, la de hoy; después, la de mañana)">Marcar recibido</button> <button type="button" class="secondary resolver-seur-btn" data-id="\${b.id}" title="Recibido y programado para el día que pida el cliente">📅 Otro día</button>\${sustituirBtnHtml}\`
       : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${reservaAlmacenHtml(b)}\${sustituirBtnHtml}\`;
@@ -4789,7 +4818,7 @@ function renderPendientes() {
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
-      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}</td>
+      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
@@ -4851,6 +4880,9 @@ function renderPendientes() {
   });
   tbody.querySelectorAll(".resolver-btn").forEach(btn => {
     btn.addEventListener("click", () => resolverPendiente(btn.dataset.id));
+  });
+  tbody.querySelectorAll(".recibir-stock-btn").forEach(btn => {
+    btn.addEventListener("click", () => recibirPedidoStock(btn.dataset.id, btn));
   });
   tbody.querySelectorAll(".resolver-seur-btn").forEach(btn => {
     btn.addEventListener("click", () => abrirModalFechaSeur(btn.dataset.id));
@@ -5340,8 +5372,8 @@ async function updateBackorderPlan(id, patch) {
   loadPendientes();
 }
 
-const HISTORIAL_ORIGEN_LABELS = { manual: "Manual", venta: "Venta", envio: "Envío", camion: "Camión (proveedor)", sustitucion: "Sustitución", transformacion: "Transformación" };
-const HISTORIAL_CAMPO_LABELS = { cantidad: "Stock real", vendidoPendiente: "Vendido pendiente", pedidoProveedor: "Pedido a proveedor" };
+const HISTORIAL_ORIGEN_LABELS = { manual: "Manual", venta: "Venta", envio: "Envío", camion: "Camión (proveedor)", sustitucion: "Sustitución", transformacion: "Transformación", "pedido-stock": "Pedido para stock", "pedido-stock-cancelado": "Pedido para stock cancelado" };
+const HISTORIAL_CAMPO_LABELS = { cantidad: "Stock real", vendidoPendiente: "Vendido pendiente", pedidoProveedor: "Pedido para stock" };
 
 let historialMovimientos = [];
 async function loadHistorial() {
@@ -5593,6 +5625,93 @@ function esPreferenteSequra(b) {
   if (!o || o.paymentMethod !== "SEQURA") return false;
   return b.tipo === "tapiceria" || backorders.some(x => String(x.orderId) === String(b.orderId) && x.proveedor === "POLIVAL" && x.tipo === "tapiceria");
 }
+// Pedidos para stock a Luso/New (Jennifer, 2026-10-02).
+function pedidoStockTag(b) {
+  if (!b) return "";
+  if (b.paraStock) {
+    const asig = b.asignaciones || [];
+    const reservadas = asig.reduce((n, a) => n + (a.cantidad || 0), 0);
+    const quienes = asig.map(a => (a.platform && a.platform !== "Shopify" && a.orderRef ? a.orderRef : "BEZEN" + a.orderNumber) + (a.cantidad > 1 ? " x" + a.cantidad : "")).join(", ");
+    return '<span class="preferente-tag" style="background:#e0f2fe;color:#075985;border-color:#38bdf8" title="' + escapeAttr(quienes ? "Reservadas para: " + quienes : "Sin clientes todavía") + '">📦 PARA STOCK · ' + reservadas + ' de ' + b.cantidad + ' reservadas</span>' +
+      (b.recibidoFabrica && b.sobrantesAStock != null ? '<span class="preferente-tag" style="background:#dcfce7;color:#166534;border-color:#22c55e">+' + b.sobrantesAStock + ' al stock</span>' : "");
+  }
+  if (b.stockPedidoId) {
+    const ps = backorders.find(x => x.id === b.stockPedidoId);
+    if (b.llegadaPedidoStock) return '<span class="preferente-tag" style="background:#dcfce7;color:#166534;border-color:#22c55e" title="La unidad de este cliente ha llegado con el pedido para stock: márcalo recibido para que siga su camino">✅ Llegó con el pedido de stock ' + new Date(b.llegadaPedidoStock).toLocaleDateString("es-ES") + ' — márcalo recibido</span>';
+    return '<span class="preferente-tag" style="background:#e0f2fe;color:#075985;border-color:#38bdf8" title="No se pide aparte: va en un pedido para stock ya hecho a ' + escapeAttr(b.proveedor || "") + '">⏳ Cubierto por ' + escapeAttr(ps ? ps.orderRef : "un pedido para stock") + '</span>';
+  }
+  return "";
+}
+async function recibirPedidoStock(id, btn) {
+  const b = backorders.find(x => x.id === id);
+  if (!b) return;
+  const reservadas = (b.asignaciones || []).reduce((n, a) => n + (a.cantidad || 0), 0);
+  const sobran = b.cantidad - reservadas;
+  if (!confirm("¿Ha llegado el pedido para stock de " + b.cantidad + "x " + b.stockModel + " " + b.talla + "?\\n\\n" +
+    (reservadas ? reservadas + " ya tienen cliente: quedarán avisadas en su línea para que las marques recibidas como siempre.\\n" : "") +
+    (sobran > 0 ? sobran + " pasan al stock real." : "No sobra ninguna para el stock."))) return;
+  btn.disabled = true;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST" });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) { alert(d.error || "No se pudo marcar recibido."); btn.disabled = false; return; }
+  mostrarAvisoBreve("Pedido para stock recibido" + (d.sobrantesAStock ? ": +" + d.sobrantesAStock + " al stock." : "."));
+  loadPendientes();
+}
+let pedidoStockLineas = [];
+let pedidoStockFilas = [];
+function pintarLineasPedidoStock() {
+  const tbody = document.getElementById("pedido-stock-lineas");
+  tbody.innerHTML = pedidoStockLineas.length
+    ? pedidoStockLineas.map((l, i) => '<tr><td>' + escapeAttr(l.stockModel) + '</td><td style="text-align:center">' + escapeAttr(l.talla) + '</td><td style="text-align:center">' + l.cantidad + '</td><td><button type="button" class="secondary pedido-stock-quitar" data-i="' + i + '" style="padding:2px 8px">✕</button></td></tr>').join("")
+    : '<tr><td colspan="4" style="color:var(--muted)">Añade modelo, medida y unidades.</td></tr>';
+  tbody.querySelectorAll(".pedido-stock-quitar").forEach(btn => btn.addEventListener("click", () => { pedidoStockLineas.splice(Number(btn.dataset.i), 1); pintarLineasPedidoStock(); }));
+}
+document.getElementById("pedido-stock-btn").addEventListener("click", async () => {
+  pedidoStockLineas = [];
+  document.getElementById("pedido-stock-titulo").textContent = "Pedido para stock — " + currentProveedorFilter.toUpperCase();
+  pintarLineasPedidoStock();
+  document.getElementById("pedido-stock-overlay").classList.add("open");
+  try {
+    pedidoStockFilas = await (await fetch("/api/inventario/stock")).json();
+    const modelos = [...new Set(pedidoStockFilas.filter(r => /colch/i.test(r.stockModel)).map(r => r.stockModel))].sort();
+    document.getElementById("pedido-stock-modelos").innerHTML = modelos.map(m => '<option value="' + escapeAttr(m) + '"></option>').join("");
+  } catch (err) {}
+});
+document.getElementById("pedido-stock-modelo").addEventListener("change", () => {
+  const m = document.getElementById("pedido-stock-modelo").value;
+  const tallas = pedidoStockFilas.filter(r => r.stockModel === m).map(r => r.talla).sort(compareTalla);
+  document.getElementById("pedido-stock-tallas").innerHTML = tallas.map(t => '<option value="' + escapeAttr(t) + '"></option>').join("");
+});
+document.getElementById("pedido-stock-anadir").addEventListener("click", () => {
+  const stockModel = document.getElementById("pedido-stock-modelo").value.trim();
+  const talla = document.getElementById("pedido-stock-talla").value.trim().toUpperCase().replace(/\\s+/g, "");
+  const cantidad = Math.floor(Number(document.getElementById("pedido-stock-cantidad").value));
+  if (!pedidoStockFilas.some(r => r.stockModel === stockModel)) { alert("Elige un modelo de la lista."); return; }
+  if (!talla || !(cantidad > 0)) { alert("Pon la medida y las unidades."); return; }
+  if (!pedidoStockFilas.some(r => r.stockModel === stockModel && r.talla === talla) && !confirm("La medida " + talla + " no existe todavía en el stock de este modelo. ¿Añadirla igualmente?")) return;
+  pedidoStockLineas.push({ stockModel, talla, cantidad });
+  document.getElementById("pedido-stock-talla").value = "";
+  document.getElementById("pedido-stock-cantidad").value = "1";
+  pintarLineasPedidoStock();
+});
+document.getElementById("pedido-stock-cerrar").addEventListener("click", () => document.getElementById("pedido-stock-overlay").classList.remove("open"));
+document.getElementById("pedido-stock-crear").addEventListener("click", async () => {
+  if (!pedidoStockLineas.length) { alert("Añade al menos una línea."); return; }
+  const total = pedidoStockLineas.reduce((n, l) => n + l.cantidad, 0);
+  if (!confirm("¿Crear el pedido para stock a " + currentProveedorFilter.toUpperCase() + " (" + total + " colchones)? Quedará en pendientes para meterlo en el pedido a fábrica.")) return;
+  const btn = document.getElementById("pedido-stock-crear");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/inventario/pendientes/pedido-stock", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ proveedor: currentProveedorFilter.toUpperCase(), lineas: pedidoStockLineas, usuario: currentUser }) });
+    const d = await res.json().catch(() => ({}));
+    if (!d.ok) { alert(d.error || "No se pudo crear."); return; }
+    document.getElementById("pedido-stock-overlay").classList.remove("open");
+    mostrarAvisoBreve("Pedido para stock creado: " + d.creados.length + " línea(s). Ya están en pendientes.");
+    loadPendientes();
+  } finally {
+    btn.disabled = false;
+  }
+});
 function preferenteTag(b) {
   return esPreferenteSequra(b) ? '<span class="preferente-tag" title="Pagado con seQura: no cobramos hasta enviarlo. Sale como PREFERENTE en el pedido a fábrica.">⚡ PREFERENTE (seQura)</span>' : "";
 }
@@ -9409,6 +9528,11 @@ async function handleFetch(request, env) {
 
     if (url.pathname === "/api/inventario/admin/set-polival-counter" && request.method === "POST") {
       return proxyInventory(env, "/admin/set-polival-counter", request);
+    }
+
+    // Pedido para stock a Luso/New (Jennifer, 2026-10-02).
+    if (url.pathname === "/api/inventario/pendientes/pedido-stock" && request.method === "POST") {
+      return proxyInventory(env, "/backorders/pedido-stock", request);
     }
 
     if (url.pathname === "/api/inventario/pendientes/set-campo" && request.method === "POST") {

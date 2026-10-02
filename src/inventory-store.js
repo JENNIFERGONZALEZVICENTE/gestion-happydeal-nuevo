@@ -1104,6 +1104,11 @@ function stockKey(stockModel, talla) {
 // "dry run" mira la disponibilidad sin tocar el stock real — varios artículos
 // del mismo pedido pueden compartir modelo+talla, así que se lleva una copia
 // local para no contar el mismo stock dos veces.
+// Unidades de un pedido para stock que ya tienen cliente.
+function reservadasPedidoStock(ps) {
+  return (ps.asignaciones || []).reduce((n, a) => n + (a.cantidad || 0), 0);
+}
+
 function checkColchonesCoverage(stock, colchones) {
   const consumido = {};
   const detalle = colchones.map((item) => {
@@ -2172,6 +2177,10 @@ export class InventoryStore {
     // `mercanciaFabrica` a mano por id, sin volver a pasar por el motor de
     // stock/agencia (evita duplicar backorders — pushBackorder no
     // sobreescribe uno con la misma id).
+    if (url.pathname === "/backorders/pedido-stock" && method === "POST") {
+      return this.crearPedidoStock(await request.json());
+    }
+
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
       const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision } = await request.json();
       const backorders = await this.load("backorders", []);
@@ -2693,29 +2702,169 @@ export class InventoryStore {
           if (builtMercancia.needsReview) reviewNotes.push(builtMercancia.reason);
         }
       }
-      pushBackorder(backorders, {
-        id: refSuffix ? `${orderId}-${key}-${refSuffix}` : `${orderId}-${key}`,
-        orderId,
-        orderNumber,
-        stockModel: item.product.stockModel,
-        talla: item.talla,
-        color: item.color,
-        tipo: item.tipo,
-        cantidad: falta,
-        orderDate,
-        esPack,
-        proveedor,
-        needsDecision,
-        referencia,
-        mercanciaFabrica,
-        refSuffix,
-        platform,
-        orderRef,
-        tipoEnvio: item.tipo === "colchon" && item.product.exceptionFurniture ? "FUR" : undefined,
-      });
+      const idBase = refSuffix ? `${orderId}-${key}-${refSuffix}` : `${orderId}-${key}`;
+      // Pedido para stock ya hecho a Luso/New (Jennifer, 2026-10-02): si hay
+      // unidades pedidas para stock de este modelo y medida sin reservar, el
+      // cliente se queda con una de esas en vez de pedirse otra vez a fábrica.
+      let restante = falta;
+      if (item.tipo === "colchon") {
+        const pedidosStock = backorders
+          .filter((b) => b.paraStock && b.estado === "pendiente" && !b.recibidoFabrica && stockKey(b.stockModel, b.talla) === key)
+          .sort((a, b) => String(a.orderDate || "").localeCompare(String(b.orderDate || "")));
+        let n = 0;
+        for (const ps of pedidosStock) {
+          if (restante <= 0) break;
+          const libres = ps.cantidad - reservadasPedidoStock(ps);
+          if (libres <= 0) continue;
+          const tomar = Math.min(libres, restante);
+          const id = `${idBase}-pstock${n ? n + 1 : ""}`;
+          n++;
+          pushBackorder(backorders, {
+            id, orderId, orderNumber, stockModel: item.product.stockModel, talla: item.talla, color: item.color, tipo: item.tipo,
+            cantidad: tomar, orderDate, esPack, proveedor: ps.proveedor, needsDecision, refSuffix, platform, orderRef,
+            tipoEnvio: item.product.exceptionFurniture ? "FUR" : undefined,
+          });
+          const nuevo = backorders.find((b) => b.id === id);
+          nuevo.stockPedidoId = ps.id;
+          nuevo.pedidoGenerado = true; // va en el pedido de stock, no se pide aparte
+          nuevo.fechaPedidoFabrica = ps.fechaPedidoFabrica || null;
+          ps.asignaciones = [...(ps.asignaciones || []), { backorderId: id, orderId, orderNumber, platform, orderRef, cantidad: tomar }];
+          row.pedidoProveedorReservado = (row.pedidoProveedorReservado || 0) + tomar;
+          restante -= tomar;
+        }
+      }
+      if (restante > 0) {
+        pushBackorder(backorders, {
+          id: idBase,
+          orderId,
+          orderNumber,
+          stockModel: item.product.stockModel,
+          talla: item.talla,
+          color: item.color,
+          tipo: item.tipo,
+          cantidad: restante,
+          orderDate,
+          esPack,
+          proveedor,
+          needsDecision,
+          referencia,
+          mercanciaFabrica,
+          refSuffix,
+          platform,
+          orderRef,
+          tipoEnvio: item.tipo === "colchon" && item.product.exceptionFurniture ? "FUR" : undefined,
+        });
+      }
     }
     stock[key] = row;
     return { falta, covered, reviewNotes };
+  }
+
+  // === Pedidos para stock a Luso/New (Jennifer, 2026-10-02) ===
+  // Un pendiente más (paraStock:true, sin pedido de cliente) que entra en el
+  // pedido a fábrica como cualquier otro. stock.pedidoProveedor = unidades
+  // pedidas para stock que aún no han llegado; pedidoProveedorReservado =
+  // las que ya tienen cliente. Al recibirlo, lo no reservado suma al stock.
+  async crearPedidoStock({ proveedor, lineas, usuario }) {
+    const prov = String(proveedor || "").toUpperCase();
+    if (!["LUSO", "NEW"].includes(prov)) return Response.json({ ok: false, error: "Solo para Luso o New." }, { status: 400 });
+    const validas = (lineas || []).filter((l) => l && l.stockModel && l.talla && Number(l.cantidad) > 0);
+    if (!validas.length) return Response.json({ ok: false, error: "No hay líneas." }, { status: 400 });
+    const backorders = await this.load("backorders", []);
+    const stock = await this.load("stock", {});
+    const ahora = new Date();
+    const ts = ahora.getTime();
+    const fechaTxt = ahora.toLocaleDateString("es-ES", { timeZone: "Europe/Madrid", day: "2-digit", month: "2-digit" });
+    const creados = [];
+    for (const l of validas) {
+      const talla = normalizeTalla(l.talla) || String(l.talla).toUpperCase();
+      const key = stockKey(l.stockModel, talla);
+      const cantidad = Math.floor(Number(l.cantidad));
+      const id = `STOCK-${ts}-${key}`;
+      pushBackorder(backorders, {
+        id, orderId: `STOCK-${ts}`, orderNumber: null, stockModel: l.stockModel, talla, tipo: "colchon", cantidad,
+        orderDate: ahora.toISOString(), esPack: false, proveedor: prov, platform: "STOCK", orderRef: "PEDIDO STOCK " + fechaTxt,
+      });
+      const b = backorders.find((x) => x.id === id);
+      b.paraStock = true;
+      b.asignaciones = [];
+      b.creadoPor = usuario || null;
+      const row = stock[key] || { stockModel: l.stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
+      row.pedidoProveedor = (row.pedidoProveedor || 0) + cantidad;
+      stock[key] = row;
+      await this.logMovement({ stockModel: l.stockModel, talla, campo: "pedidoProveedor", delta: cantidad, resultante: row.pedidoProveedor, origen: "pedido-stock", usuario, orderRef: b.orderRef });
+      creados.push(b);
+    }
+    await this.state.storage.put("backorders", backorders);
+    await this.state.storage.put("stock", stock);
+    return Response.json({ ok: true, creados });
+  }
+
+  // Llega un pedido para stock: lo reservado queda avisado en la línea de
+  // cada cliente (se marca recibido como siempre, para no saltarse SEUR /
+  // Furniture); lo que sobra pasa al stock real.
+  async recibirPedidoStock(backorders, entry) {
+    const stock = await this.load("stock", {});
+    const key = stockKey(entry.stockModel, entry.talla);
+    const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
+    const reservadas = reservadasPedidoStock(entry);
+    const sobran = Math.max(0, entry.cantidad - reservadas);
+    const ahora = new Date().toISOString();
+    const mov = { stockModel: entry.stockModel, talla: entry.talla, origen: "pedido-stock", orderRef: entry.orderRef };
+    row.pedidoProveedor = Math.max(0, (row.pedidoProveedor || 0) - entry.cantidad);
+    await this.logMovement({ ...mov, campo: "pedidoProveedor", delta: -entry.cantidad, resultante: row.pedidoProveedor });
+    row.pedidoProveedorReservado = Math.max(0, (row.pedidoProveedorReservado || 0) - reservadas);
+    if (sobran > 0) {
+      row.cantidad = (row.cantidad || 0) + sobran;
+      await this.logMovement({ ...mov, campo: "cantidad", delta: sobran, resultante: row.cantidad });
+    }
+    stock[key] = row;
+    for (const a of entry.asignaciones || []) {
+      const c = backorders.find((b) => b.stockPedidoId === entry.id && b.orderId === a.orderId);
+      if (c) c.llegadaPedidoStock = ahora;
+    }
+    entry.recibidoFabrica = true;
+    entry.fechaRecibido = ahora;
+    entry.estado = "servido";
+    entry.sobrantesAStock = sobran;
+    await this.state.storage.put("stock", stock);
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ...entry, ok: true });
+  }
+
+  // Quita n unidades de reserva de un pedido para stock (cliente cancelado)
+  // o, si lo que se cancela es el propio pedido para stock, devuelve a sus
+  // clientes a "sin pedir" para que se pidan como siempre.
+  async liberarPedidoStock(backorders, e, n) {
+    const stock = await this.load("stock", {});
+    if (e.stockPedidoId) {
+      const ps = backorders.find((b) => b.id === e.stockPedidoId);
+      if (ps && ps.paraStock && !ps.recibidoFabrica) {
+        const a = (ps.asignaciones || []).find((x) => x.orderId === e.orderId && x.cantidad > 0);
+        if (a) {
+          const quitar = Math.min(a.cantidad, n);
+          a.cantidad -= quitar;
+          ps.asignaciones = ps.asignaciones.filter((x) => x.cantidad > 0);
+          const key = stockKey(ps.stockModel, ps.talla);
+          if (stock[key]) stock[key].pedidoProveedorReservado = Math.max(0, (stock[key].pedidoProveedorReservado || 0) - quitar);
+        }
+      }
+    }
+    if (e.paraStock && !e.recibidoFabrica) {
+      const key = stockKey(e.stockModel, e.talla);
+      const row = stock[key] || { stockModel: e.stockModel, talla: e.talla, cantidad: 0, vendidoPendiente: 0 };
+      row.pedidoProveedor = Math.max(0, (row.pedidoProveedor || 0) - e.cantidad);
+      row.pedidoProveedorReservado = Math.max(0, (row.pedidoProveedorReservado || 0) - reservadasPedidoStock(e));
+      stock[key] = row;
+      await this.logMovement({ stockModel: e.stockModel, talla: e.talla, campo: "pedidoProveedor", delta: -e.cantidad, resultante: row.pedidoProveedor, origen: "pedido-stock-cancelado", orderRef: e.orderRef });
+      for (const c of backorders.filter((b) => b.stockPedidoId === e.id && b.estado === "pendiente")) {
+        delete c.stockPedidoId;
+        c.pedidoGenerado = false;
+        c.fechaPedidoFabrica = null;
+      }
+      e.asignaciones = [];
+    }
+    await this.state.storage.put("stock", stock);
   }
 
   // Para productos "no llevamos stock" (fabricación bajo pedido siempre,
@@ -3022,6 +3171,14 @@ export class InventoryStore {
   // - transformado: no se devuelve nada (ya está cortado).
   async cancelarUnidadesDe(backorders, entry, n) {
     const e = separarUnidades(backorders, entry, n, "cx");
+    // Pedido para stock: ni toca "vendido pendiente" ni stock real.
+    if (e.paraStock || e.stockPedidoId) await this.liberarPedidoStock(backorders, e, e.cantidad);
+    if (e.paraStock) {
+      e.estadoAntesDeCancelar = e.estado;
+      e.estado = "cancelado";
+      e.fechaCancelado = new Date().toISOString();
+      return e;
+    }
     const stock = await this.load("stock", {});
     const key = stockKey(e.stockModel, e.talla);
     const row = stock[key] || { stockModel: e.stockModel, talla: e.talla, cantidad: 0, vendidoPendiente: 0 };
@@ -3065,6 +3222,8 @@ export class InventoryStore {
 
   async deleteBackorder(id) {
     const backorders = await this.load("backorders", []);
+    const borrado = backorders.find((b) => b.id === id);
+    if (borrado && (borrado.paraStock || borrado.stockPedidoId) && borrado.estado === "pendiente") await this.liberarPedidoStock(backorders, borrado, borrado.cantidad);
     const filtered = backorders.filter((b) => b.id !== id);
     const existed = filtered.length !== backorders.length;
     await this.state.storage.put("backorders", filtered);
@@ -3178,6 +3337,10 @@ export class InventoryStore {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
+    if (entry.paraStock) {
+      if (entry.recibidoFabrica) return Response.json({ ok: false, error: "Este pedido para stock ya se recibió y sumó al stock." }, { status: 400 });
+      return this.recibirPedidoStock(backorders, entry);
+    }
     entry.recibidoFabrica = !entry.recibidoFabrica;
     // Fecha del cambio a recibido (Jennifer, 2026-08-26): la fila ya no
     // desaparece de Proveedores al marcarla, así que necesita mostrar
@@ -3203,6 +3366,7 @@ export class InventoryStore {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
+    if (entry.paraStock) return Response.json({ ok: false, error: "Es un pedido para stock: se marca recibido y pasa al stock." }, { status: 400 });
     if (entry.estado !== "pendiente") {
       return Response.json({ ok: false, error: "Este pendiente ya no está pendiente." }, { status: 409 });
     }
@@ -3333,6 +3497,7 @@ export class InventoryStore {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
+    if (entry.paraStock) return Response.json({ ok: false, error: "Un pedido para stock no se sustituye." }, { status: 400 });
     if (entry.estado !== "pendiente") {
       return Response.json({ ok: false, error: "Este pendiente ya no está pendiente." }, { status: 409 });
     }
