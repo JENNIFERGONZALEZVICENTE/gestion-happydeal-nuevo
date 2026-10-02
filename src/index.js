@@ -8888,7 +8888,9 @@ async function actualizarCorreosSeur(env, segundaPasada) {
     nuevos += mensajes.filter((m) => m.deSeur && !antes.has(m.id)).length;
     const correo = { threadIds: [...ids], mensajes, actualizado: new Date().toISOString() };
     if (l.sinConversacion) { correo.destino = l.correo.destino; correo.asunto = mensajes[0].asunto || ""; }
-    cambios.push({ orderId: l.o.id, ref: l.ref, correo, ...(l.sinConversacion ? { reclamado: true } : {}) });
+    // No se marca "reclamado": puede ser SEUR quien abre la conversación
+    // ("Solicitud entrega Pedido…" pidiendo instrucciones).
+    cambios.push({ orderId: l.o.id, ref: l.ref, correo });
   }
   if (cambios.length) await ordersStubSeur(env).fetch("https://do/orders/envios-seur-correos", { method: "POST", body: JSON.stringify({ cambios }) });
   // Conversación recién enganchada: otra pasada para traer el hilo entero
