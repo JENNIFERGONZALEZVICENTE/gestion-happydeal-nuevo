@@ -1249,6 +1249,7 @@ export class OrdersStore {
         const info = (order.enviosSeurInfo = order.enviosSeurInfo || {});
         const e = (info[c.ref] = info[c.ref] || {});
         e.correo = { ...(e.correo || {}), ...c.correo };
+        if (c.reclamado && !e.reclamado) { e.reclamado = true; e.fechaReclamado = new Date().toISOString(); }
         n++;
       }
       if (n) { await this.state.storage.put("orders", orders); this.broadcast(); }

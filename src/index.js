@@ -6905,7 +6905,7 @@ async function loadCasosRevisarSeur(sinCorreo) {
   rellenar("envios-seur-pais", [...new Set(enviosSeur.map(e => e.pais).filter(Boolean))].sort(), "Todos los países");
   renderEnviosSeur();
   // Al abrir: se mira en Gmail si SEUR ha contestado y se repinta.
-  if (!sinCorreo && enviosSeur.some(e => e.correo)) {
+  if (!sinCorreo) {
     fetch("/api/seur/correos/actualizar", { method: "POST" }).then(r => r.json()).then(d => { if (d.ok) loadCasosRevisarSeur(true); }).catch(() => {});
   }
 }
@@ -8844,7 +8844,7 @@ function noLeidosCorreo(correo) {
 // guarda los mensajes nuevos. Los correos de SEUR fuera de esos hilos (si
 // abren un correo nuevo con nº de incidencia) se enganchan a la línea cuya
 // referencia o nº de expedición aparezca en el asunto o el texto.
-async function actualizarCorreosSeur(env) {
+async function actualizarCorreosSeur(env, segundaPasada) {
   const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
   const norm = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   const lineas = [];
@@ -8853,6 +8853,16 @@ async function actualizarCorreosSeur(env) {
       if (!info.correo || !(info.correo.threadIds || []).length) continue;
       const t = (o.seurTracking || []).find((x) => norm(x.referencia) === norm(ref));
       lineas.push({ o, ref, correo: info.correo, expedicion: t ? String(t.numeroExpedicion || "") : "" });
+    }
+    // Envíos SIN conversación guardada (Jennifer, 2026-10-02, 76414228-A:
+    // el email salió pero la app no lo apuntó): si SEUR contesta citando la
+    // referencia o la expedición, la conversación se engancha sola.
+    for (const t of o.seurTracking || []) {
+      const ref = t.referencia;
+      if (t.anulado || !ref || norm(ref).length < 8) continue;
+      const info = (o.enviosSeurInfo || {})[ref];
+      if (info && info.correo && (info.correo.threadIds || []).length) continue;
+      lineas.push({ o, ref, correo: { threadIds: [], destino: destinoSeurDePedido(o) }, expedicion: String(t.numeroExpedicion || ""), sinConversacion: true });
     }
   }
   if (!lineas.length) return { ok: true, lineas: 0, nuevos: 0 };
@@ -8876,10 +8886,16 @@ async function actualizarCorreosSeur(env) {
     if (!mensajes.length) continue;
     const antes = new Set((l.correo.mensajes || []).map((m) => m.id));
     nuevos += mensajes.filter((m) => m.deSeur && !antes.has(m.id)).length;
-    cambios.push({ orderId: l.o.id, ref: l.ref, correo: { threadIds: [...ids], mensajes, actualizado: new Date().toISOString() } });
+    const correo = { threadIds: [...ids], mensajes, actualizado: new Date().toISOString() };
+    if (l.sinConversacion) { correo.destino = l.correo.destino; correo.asunto = mensajes[0].asunto || ""; }
+    cambios.push({ orderId: l.o.id, ref: l.ref, correo, ...(l.sinConversacion ? { reclamado: true } : {}) });
   }
   if (cambios.length) await ordersStubSeur(env).fetch("https://do/orders/envios-seur-correos", { method: "POST", body: JSON.stringify({ cambios }) });
-  return { ok: true, lineas: lineas.length, nuevos };
+  // Conversación recién enganchada: otra pasada para traer el hilo entero
+  // (también el email que mandamos nosotros).
+  const enganchadas = lineas.filter((l) => l.sinConversacion && cambios.some((c) => c.orderId === l.o.id && c.ref === l.ref)).length;
+  if (enganchadas && !segundaPasada) await actualizarCorreosSeur(env, true);
+  return { ok: true, lineas: lineas.length, nuevos, enganchadas };
 }
 
 // Estado en SEUR de una línea: la entrada de seguimiento con la misma
