@@ -6953,7 +6953,7 @@ function renderEnviosSeur() {
     const correoBtn = '<br><button type="button" class="secondary envio-seur-correo" data-i="' + i + '" style="margin-top:4px;padding:2px 8px;font-size:11px' + (e.correoNoLeidos ? ';background:#dc2626;color:#fff;border-color:#dc2626' : '') + '">' +
       (e.correoNoLeidos ? "💬 SEUR ha respondido (" + e.correoNoLeidos + ")" : nMsg ? "💬 Ver conversación (" + nMsg + ")" : "✉ Escribir a SEUR") + '</button>';
     return '<tr' + (e.reclamado ? ' style="background:rgba(253,230,138,.25)"' : '') + '>' +
-      '<td style="white-space:nowrap">' + (e.sinCarga ? "" : '<span style="font-size:11px;color:var(--muted)">' + escapeAttr(e.diaCarga || diaSemana(e.fechaCarga)) + '</span><br>') + '<strong>' + escapeAttr(fechaCorta(e.fechaCarga)) + '</strong>' + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío con seguimiento de SEUR que no está en ninguna carga del sistema">fuera de carga</span>' : '') + '</td>' +
+      '<td style="white-space:nowrap">' + (e.sinCarga ? "" : '<span style="font-size:11px;color:var(--muted)">' + escapeAttr(e.diaCarga || diaSemana(e.fechaCarga)) + '</span><br>') + '<strong>' + escapeAttr(fechaCorta(e.fechaCarga)) + '</strong>' + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío anterior a las cargas del sistema: sale aquí porque tiene conversación con SEUR">anterior a las cargas</span>' : '') + '</td>' +
       '<td><strong>' + escapeAttr(e.ref) + '</strong></td>' +
       '<td>' + escapeAttr(e.nombre || "") + '</td>' +
       '<td>' + escapeAttr(e.pais || "") + '</td>' +
@@ -9895,6 +9895,25 @@ async function handleFetch(request, env) {
       }
       // Solo líneas de cargas cerradas (Jennifer, 2026-10-01: lo que no se
       // ha metido en ninguna carga no ha salido y no hay nada que revisar).
+      // Excepción (Jennifer, 2026-10-02): los envíos de antes de las cargas
+      // con conversación con SEUR sí salen, para poder seguirla desde aquí.
+      const yaEnLista = new Set(lista.map((e) => String(e.orderId) + "|" + e.ref));
+      for (const o of datos.orders) {
+        for (const [ref, info] of Object.entries(o.enviosSeurInfo || {})) {
+          if (!info.correo || !(info.correo.mensajes || []).length || yaEnLista.has(String(o.id) + "|" + ref)) continue;
+          const t = estadoSeurDeLinea(o, ref, 1);
+          const m = t ? /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(t.fechaCreacion || "").trim()) : null;
+          lista.push({
+            orderId: o.id, ref, nombre: o.name || "", pais: o.countryCode || "", observaciones: "",
+            cargaId: null, fechaCarga: m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : "", diaCarga: "", sinCarga: true,
+            estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
+            nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
+            archivado: !!info.archivado, fechaArchivado: info.fechaArchivado || null,
+            numeroExpedicion: t ? t.numeroExpedicion || "" : "",
+            correo: info.correo, correoNoLeidos: noLeidosCorreo(info.correo),
+          });
+        }
+      }
       // Aviso (Jennifer, 2026-10-01): si 24 h después de cerrar la carga el
       // envío sigue "El envío ha sido registrado." (SEUR no lo ha recogido),
       // hay que reclamarlo. Sin fecha de cierre (fuera de carga) cuenta
@@ -9902,7 +9921,6 @@ async function handleFetch(request, env) {
       const ahora = Date.now();
       for (const e of lista) {
         let desde = e.fechaCierre ? Date.parse(e.fechaCierre) : NaN;
-        if (isNaN(desde) && e.sinCarga && e.fechaCarga) desde = Date.parse(e.fechaCarga + "T23:59:59+02:00");
         const registrado = /^el envío ha sido registrado\.?$/i.test((e.estadoSeur || "").trim());
         e.horasDesdeCierre = isNaN(desde) ? null : Math.floor((ahora - desde) / 3600000);
         e.aviso24h = registrado && e.horasDesdeCierre !== null && e.horasDesdeCierre >= 24;
