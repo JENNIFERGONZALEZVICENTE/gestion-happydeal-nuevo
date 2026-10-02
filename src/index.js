@@ -9904,7 +9904,7 @@ async function handleFetch(request, env) {
       const t = estadoSeurDeLinea(o, ref, 1);
       const exp = t && t.numeroExpedicion ? String(t.numeroExpedicion) : "";
       const destino = destinoSeurDePedido(o);
-      const asunto = `Consulta envío ${ref}${exp ? " · Expedición " + exp : ""} — Happy Deal`;
+      const asunto = `Consulta envío ${ref}${exp ? " · Expedición " + exp : ""} — Global Happy Deal`;
       const cuerpo = [
         `Referencia: ${ref}`,
         exp ? `Nº de expedición: ${exp}` : null,
@@ -9913,7 +9913,7 @@ async function handleFetch(request, env) {
         String(texto).trim(),
         "",
         "Un saludo,",
-        "Happy Deal",
+        "Global Happy Deal",
       ].filter((x) => x !== null).join("\n");
       const r = await llamarScriptSeur(env, "seur-enviar", { destino, asunto, texto: cuerpo });
       if (!r.ok) return Response.json({ ok: false, error: r.error || "No se pudo enviar." }, { status: 502 });
