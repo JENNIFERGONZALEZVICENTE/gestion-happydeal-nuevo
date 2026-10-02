@@ -1725,6 +1725,7 @@ function renderPage() {
     .carga-abierta-box.revision-box h3, .revision-motivo { color: #fecaca; }
   }
   .coste-unidad { color: var(--muted); font-size: 11px; }
+  .preferente-tag { display: inline-block; background: #fee2e2; color: #b91c1c; border: 1px solid #ef4444; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .valdemoro-tag { display: inline-block; background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .ref-duplicada { display: inline-block; background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
   .retenido-falta { color: #b45309; font-weight: 600; }
@@ -4768,7 +4769,7 @@ function renderPendientes() {
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
-      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}</td>
+      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
@@ -4970,7 +4971,10 @@ function filasPedidoFabrica(seleccionados) {
     // TAPA (Jennifer, 2026-09-30: "había que ponerlo en negrita y color rojo
     // para que llamara la atención").
     const resaltadas = [];
-    [...grupos.values()].forEach((items, g) => {
+    // Los pedidos PREFERENTES (seQura) van primero y con "PREFERENTE" en
+    // rojo como primera línea de cada artículo.
+    const gruposOrdenados = [...grupos.values()].sort((a, b) => (a.some(esPreferenteSequra) ? 0 : 1) - (b.some(esPreferenteSequra) ? 0 : 1));
+    gruposOrdenados.forEach((items, g) => {
       items.forEach(b => {
         // Producto primero y referencia a la DERECHA (Jennifer, 2026-09-28:
         // "la referencia siempre tiene que ir en la parte de la derecha").
@@ -4982,12 +4986,12 @@ function filasPedidoFabrica(seleccionados) {
         // Cada dato en su línea (MODELO / MEDIDA / COLOR / TAPA / TIRADOR /
         // EXTRA...) para que Polival lo lea más ordenado (Jennifer,
         // 2026-09-29). Solo en el PDF/Excel: el texto guardado no cambia.
-        const mercancia = (texto
+        const mercancia = ((esPreferenteSequra(b) ? "PREFERENTE · " : "") + (texto
           ? (cantidad > 1 ? texto + " · " + cantidad + " UNIDADES" : texto)
-          : formatMercanciaSinReceta(b)).split(" · ").join("\\n");
+          : formatMercanciaSinReceta(b))).split(" · ").join("\\n");
         filas.push([mercancia, b.referencia || "—"]);
         grupoDeFila.push(g);
-        resaltadas.push(mercancia.split("\\n").map(l => /TAPA PARTIDA|TAPA REFORZADA|SIN TAPA|\\d+ UNIDADES$/i.test(l)));
+        resaltadas.push(mercancia.split("\\n").map(l => /^PREFERENTE$|TAPA PARTIDA|TAPA REFORZADA|SIN TAPA|\\d+ UNIDADES$/i.test(l)));
       });
     });
     return { head: ["Mercancía para pedir a fábrica", "Referencia"], filas, grupoDeFila, resaltadas };
@@ -5546,6 +5550,18 @@ function esValdemoro(o) {
   if (VALDEMORO_AVISO_TAMBIEN.includes(o.orderNumber)) return true;
   const t = parseFechaGenerica(o.orderDate || o.createdAt);
   return !!t && t >= new Date(VALDEMORO_AVISO_DESDE + "T00:00:00").getTime();
+}
+// PREFERENTE (Jennifer, 2026-10-02): seQura no paga hasta que el pedido se
+// marca como enviado, así que la tapicería de los pedidos pagados con
+// seQura se pide a Polival como preferente para que la hagan antes.
+function esPreferenteSequra(b) {
+  if (!b || b.proveedor !== "POLIVAL") return false;
+  const o = allOrders.find(x => String(x.id) === String(b.orderId));
+  if (!o || o.paymentMethod !== "SEQURA") return false;
+  return b.tipo === "tapiceria" || backorders.some(x => String(x.orderId) === String(b.orderId) && x.proveedor === "POLIVAL" && x.tipo === "tapiceria");
+}
+function preferenteTag(b) {
+  return esPreferenteSequra(b) ? '<span class="preferente-tag" title="Pagado con seQura: no cobramos hasta enviarlo. Sale como PREFERENTE en el pedido a fábrica.">⚡ PREFERENTE (seQura)</span>' : "";
 }
 function valdemoroTag(o) {
   return esValdemoro(o) ? '<span class="valdemoro-tag" title="Entrega en Valdemoro: ¿lo llevamos nosotros en vez de Furniture/SEUR?">📍 VALDEMORO — ¿lo entregamos nosotros?</span>' : "";
