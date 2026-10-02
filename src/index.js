@@ -6332,7 +6332,10 @@ function extractTrackingOrderNumber(text, knownOrderNumbers) {
   // recortar primero a los últimos 15 caracteres, luego quitar letras —
   // así coincide con lo que trunca SEUR (ver esa función para el porqué).
   const truncado = t.slice(-15);
-  const digits = truncado.replace(/\D/g, "");
+  // Doble barra: está dentro de renderPage y una sola se perdía (salía
+  // /D/g), así que no casaban las referencias de Leroy Merlin ni las que
+  // llevan sufijo (…-A2) — Jennifer, 2026-10-02.
+  const digits = truncado.replace(/\\D/g, "");
   if (digits.length < 6) return null;
   return resolveKnownOrderNumber(digits, knownOrderNumbers);
 }
@@ -8885,8 +8888,10 @@ async function actualizarCorreosSeur(env) {
 function estadoSeurDeLinea(order, ref, lineasDelPedido) {
   const norm = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   const tracking = (order && order.seurTracking ? order.seurTracking : []).filter((t) => !t.anulado);
-  let t = tracking.find((x) => norm(x.referencia) === norm(ref));
-  if (!t && tracking.length === 1 && lineasDelPedido === 1) t = tracking[0];
+  // Solo la misma referencia exacta (Jennifer, 2026-10-02): antes, con una
+  // sola entrada se usaba esa aunque fuera de otro envío, y las líneas
+  // "…-A2" salían con el estado del primer envío "…-A".
+  const t = tracking.find((x) => norm(x.referencia) === norm(ref));
   return t || null;
 }
 
