@@ -6,6 +6,37 @@
 // Secrets del Worker: ALMACEN_AVISO_URL, ALMACEN_AVISO_SECRET.
 import { base64DeBytes, etiquetasReservaPdf } from "./etiqueta-pdf.js";
 
+// Correo con SEUR por el mismo Apps Script (Jennifer, 2026-10-02):
+// accion "seur-enviar" | "seur-leer" | "seur-responder" (ver la copia del
+// script en Downloads/AVISO-ALMACEN-y-SEUR-apps-script.txt). Devuelve la
+// respuesta JSON del script, o { ok:false, error }.
+export async function llamarScriptSeur(env, accion, datos) {
+  if (!env.ALMACEN_AVISO_URL || !env.ALMACEN_AVISO_SECRET) return { ok: false, error: "sin_configurar" };
+  try {
+    let res = await fetch(env.ALMACEN_AVISO_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      redirect: "manual",
+      // Seguro: si el script de Google sigue siendo la versión antigua (solo
+      // almacén), ese adjunto inválido le hace fallar ANTES de mandar nada,
+      // así nunca le llega al almacén un correo pensado para SEUR. El
+      // script nuevo ignora el adjunto en las acciones de SEUR.
+      body: JSON.stringify({ secreto: env.ALMACEN_AVISO_SECRET, accion, ...datos, adjunto: { nombre: "x.pdf", base64: "%%%no-es-base64%%%" } }),
+    });
+    const destino = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+    if (destino) res = await fetch(destino);
+    const r = await res.json().catch(() => null);
+    if (!r) return { ok: false, error: "respuesta_no_json_status_" + res.status };
+    // El script antiguo (sin SEUR) no conoce "accion" y manda un email al
+    // almacén: se detecta porque no devuelve nada propio de SEUR.
+    if (r.ok && accion === "seur-enviar" && !r.threadId) return { ok: false, error: "script_sin_actualizar" };
+    if (r.ok && accion === "seur-leer" && !r.hilos) return { ok: false, error: "script_sin_actualizar" };
+    return r;
+  } catch (e) {
+    return { ok: false, error: "error_red" };
+  }
+}
+
 // { asunto, texto, pdf (Uint8Array, opcional), nombrePdf } -> { ok, reason? }
 export async function enviarEmailAlmacen(env, { asunto, texto, pdf, nombrePdf }) {
   if (!env.ALMACEN_AVISO_URL || !env.ALMACEN_AVISO_SECRET) return { ok: false, reason: "sin_configurar" };

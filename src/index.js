@@ -2,7 +2,7 @@ export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
 import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES, findBestPrefixMatch, PREGUNTA_FORMATO_160 } from "./inventory-store.js";
 import { etiquetaTransformacionPdf, resumenSeurPdf } from "./etiqueta-pdf.js";
-import { enviarEmailAlmacen, enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, fechaHoyEs, referenciaPedidoAlmacen, modeloCorto } from "./avisos-almacen.js";
+import { enviarEmailAlmacen, llamarScriptSeur, enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, fechaHoyEs, referenciaPedidoAlmacen, modeloCorto } from "./avisos-almacen.js";
 
 // Interruptor de Fase 2 de cada "marketplace" (Carrefour, Jennifer,
 // 2026-09-17, activado parcialmente 2026-09-19; generalizado el mismo día
@@ -2283,6 +2283,8 @@ function renderPage() {
       <option value="">Reclamados y no reclamados</option>
       <option value="si">Solo reclamados a SEUR</option>
       <option value="no">Solo no reclamados</option>
+      <option value="respuesta">💬 Con respuesta de SEUR sin leer</option>
+      <option value="conversacion">✉ Con conversación con SEUR</option>
     </select>
     <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;color:#b91c1c;font-weight:600"><input type="checkbox" id="envios-seur-solo-avisos" /> ⚠ Solo para reclamar (registrado +24 h)</label>
     <select id="envios-seur-pais"><option value="">Todos los países</option></select>
@@ -2352,8 +2354,22 @@ function renderPage() {
   </div>
 </div>
 
+<div class="modal-overlay" id="seur-correo-overlay">
+  <div class="modal-box modal-box-wide">
+    <h3 id="seur-correo-titulo">Conversación con SEUR</h3>
+    <div id="seur-correo-destino" style="color:var(--muted);font-size:12px;margin-bottom:8px"></div>
+    <div id="seur-correo-mensajes" style="display:flex;flex-direction:column;gap:8px;max-height:45vh;overflow-y:auto;margin-bottom:10px"></div>
+    <textarea id="seur-correo-texto" rows="6" style="width:100%;resize:vertical" placeholder="Escribe aquí el problema o la duda para SEUR..."></textarea>
+    <div style="color:var(--muted);font-size:11px;margin-top:4px">Se envía desde tu Gmail (jennifer@colchonesbezen.com). La referencia, el nº de expedición y el destinatario se añaden solos arriba del mensaje.</div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="seur-correo-cerrar">Cerrar</button>
+      <button type="button" id="seur-correo-enviar">Enviar a SEUR</button>
+    </div>
+  </div>
+</div>
+
 <div id="view-seur" style="display:none">
-  <div id="seur-decision-box" class="carga-abierta-box" style="display:none">
+  <div id="seur-decision-box"class="carga-abierta-box" style="display:none">
     <div class="toolbar">
       <h3 style="margin:0">Pedidos con disponibilidad mixta — pendientes de decidir</h3>
     </div>
@@ -6872,7 +6888,7 @@ async function loadCasosRevisar() {
 // Todas las líneas de las cargas de SEUR ya cerradas, filtrables por estado
 // en SEUR para ir revisando, con notas amplias y botón "Reclamado a SEUR".
 let enviosSeur = [];
-async function loadCasosRevisarSeur() {
+async function loadCasosRevisarSeur(sinCorreo) {
   const res = await fetch("/api/seur/envios");
   enviosSeur = await res.json();
   const rellenar = (id, valores, primera) => {
@@ -6885,6 +6901,10 @@ async function loadCasosRevisarSeur() {
   rellenar("envios-seur-estado", estados, "Todos los estados de SEUR");
   rellenar("envios-seur-pais", [...new Set(enviosSeur.map(e => e.pais).filter(Boolean))].sort(), "Todos los países");
   renderEnviosSeur();
+  // Al abrir: se mira en Gmail si SEUR ha contestado y se repinta.
+  if (!sinCorreo && enviosSeur.some(e => e.correo)) {
+    fetch("/api/seur/correos/actualizar", { method: "POST" }).then(r => r.json()).then(d => { if (d.ok) loadCasosRevisarSeur(true); }).catch(() => {});
+  }
 }
 
 function renderEnviosSeur() {
@@ -6904,7 +6924,7 @@ function renderEnviosSeur() {
     (!ocultarArchivados || !e.archivado) &&
     (!q ||[e.ref, e.nombre, e.observaciones, e.nota].join(" ").toLowerCase().includes(q)) &&
     (!estado || (e.estadoSeur || "__sin__") === estado) &&
-    (!reclamado || (reclamado === "si" ? e.reclamado : !e.reclamado)) &&
+    (!reclamado || (reclamado === "si" ? e.reclamado : reclamado === "no" ? !e.reclamado : reclamado === "respuesta" ? e.correoNoLeidos > 0 : !!(e.correo && e.correo.mensajes && e.correo.mensajes.length))) &&
     (!pais || e.pais === pais));
   document.getElementById("envios-seur-count").textContent = filas.length + " de " + enviosSeur.length + " líneas enviadas por SEUR";
   const pendientesReclamar = enviosSeur.filter(e => e.aviso24h && !e.reclamado && !e.archivado).length;
@@ -6925,6 +6945,10 @@ function renderEnviosSeur() {
     const recl = e.reclamado
       ? '<span class="badge" style="background:#fde68a;color:#78350f">✔ Reclamado ' + (e.fechaReclamado ? new Date(e.fechaReclamado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Quitar</button>'
       : '<button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="1">Reclamado a SEUR</button>';
+    // Correo con SEUR (Jennifer, 2026-10-02).
+    const nMsg = e.correo && e.correo.mensajes ? e.correo.mensajes.length : 0;
+    const correoBtn = '<br><button type="button" class="secondary envio-seur-correo" data-i="' + i + '" style="margin-top:4px;padding:2px 8px;font-size:11px' + (e.correoNoLeidos ? ';background:#dc2626;color:#fff;border-color:#dc2626' : '') + '">' +
+      (e.correoNoLeidos ? "💬 SEUR ha respondido (" + e.correoNoLeidos + ")" : nMsg ? "💬 Ver conversación (" + nMsg + ")" : "✉ Escribir a SEUR") + '</button>';
     return '<tr' + (e.reclamado ? ' style="background:rgba(253,230,138,.25)"' : '') + '>' +
       '<td style="white-space:nowrap">' + (e.sinCarga ? "" : '<span style="font-size:11px;color:var(--muted)">' + escapeAttr(e.diaCarga || diaSemana(e.fechaCarga)) + '</span><br>') + '<strong>' + escapeAttr(fechaCorta(e.fechaCarga)) + '</strong>' + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío con seguimiento de SEUR que no está en ninguna carga del sistema">fuera de carga</span>' : '') + '</td>' +
       '<td><strong>' + escapeAttr(e.ref) + '</strong></td>' +
@@ -6932,7 +6956,7 @@ function renderEnviosSeur() {
       '<td>' + escapeAttr(e.pais || "") + '</td>' +
       '<td>' + escapeAttr(e.observaciones || "") + '</td>' +
       '<td>' + estadoTxt + seguimiento + '</td>' +
-      '<td>' + recl + '</td>' +
+      '<td>' + recl + correoBtn + '</td>' +
       '<td><textarea class="envio-seur-nota" data-i="' + i + '" rows="3" style="width:100%;min-width:320px;resize:vertical" placeholder="Notas...">' + escapeAttr(e.nota || "") + '</textarea></td>' +
       '<td>' + (e.archivado
         ? '<span class="badge" style="background:#e5e7eb;color:#374151">Archivado ' + (e.fechaArchivado ? new Date(e.fechaArchivado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-archivar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Desarchivar</button>'
@@ -6948,6 +6972,9 @@ function renderEnviosSeur() {
       e.nota = ta.value;
       await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, nota: ta.value }) });
     });
+  });
+  tbody.querySelectorAll(".envio-seur-correo").forEach(btn => {
+    btn.addEventListener("click", () => abrirCorreoSeur(enviosSeur[Number(btn.dataset.i)]));
   });
   tbody.querySelectorAll(".envio-seur-archivar").forEach(btn => {
     btn.addEventListener("click", async () => {
@@ -6976,6 +7003,61 @@ function renderEnviosSeur() {
     });
   });
 }
+// Conversación por email con SEUR de una línea (Jennifer, 2026-10-02): se
+// escribe y se contesta desde aquí; sale desde su Gmail y las respuestas de
+// SEUR se leen del mismo Gmail (cada hora y al abrir Envíos SEUR).
+let correoSeurAbierto = null;
+function pintarCorreoSeur() {
+  const e = correoSeurAbierto;
+  const mensajes = (e.correo && e.correo.mensajes) || [];
+  document.getElementById("seur-correo-titulo").textContent = "SEUR · " + e.ref + " · " + (e.nombre || "");
+  document.getElementById("seur-correo-destino").textContent = "Para: " + (["ES", "PT"].includes(String(e.pais || "").toUpperCase()) ? "atencionalcliente@seur.com (63235, nacional)" : "customerservice@seur.com (48297, internacional)") + (e.numeroExpedicion ? " · Expedición " + e.numeroExpedicion : "") + (e.estadoSeur ? " · Estado: " + e.estadoSeur : "");
+  document.getElementById("seur-correo-mensajes").innerHTML = mensajes.length
+    ? mensajes.map(m => '<div style="border-radius:8px;padding:8px 10px;' + (m.deSeur ? "background:#fef3c7;border:1px solid #f59e0b;margin-right:40px" : "background:#ecfdf5;border:1px solid #34d399;margin-left:40px") + '">' +
+        '<div style="font-size:11px;color:var(--muted);margin-bottom:4px"><strong>' + (m.deSeur ? "SEUR" : "Nosotros") + '</strong> · ' + escapeAttr(m.de || "") + ' · ' + new Date(m.fecha).toLocaleString("es-ES") + '</div>' +
+        '<div style="white-space:pre-wrap;font-size:13px">' + escapeAttr(m.texto || "") + '</div></div>').join("")
+    : '<div style="color:var(--muted)">Todavía no has escrito a SEUR por este envío.</div>';
+  const caja = document.getElementById("seur-correo-mensajes");
+  caja.scrollTop = caja.scrollHeight;
+  document.getElementById("seur-correo-enviar").textContent = mensajes.length ? "Responder a SEUR" : "Enviar a SEUR";
+}
+async function abrirCorreoSeur(e) {
+  correoSeurAbierto = e;
+  document.getElementById("seur-correo-texto").value = "";
+  pintarCorreoSeur();
+  document.getElementById("seur-correo-overlay").classList.add("open");
+  if (e.correoNoLeidos) {
+    e.correoNoLeidos = 0;
+    await fetch("/api/seur/envios/visto", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref }) });
+    renderEnviosSeur();
+  }
+}
+document.getElementById("seur-correo-cerrar").addEventListener("click", () => document.getElementById("seur-correo-overlay").classList.remove("open"));
+document.getElementById("seur-correo-enviar").addEventListener("click", async () => {
+  const e = correoSeurAbierto;
+  const texto = document.getElementById("seur-correo-texto").value.trim();
+  if (!e || !texto) { alert("Escribe el mensaje para SEUR."); return; }
+  const primera = !(e.correo && e.correo.mensajes && e.correo.mensajes.length);
+  if (!confirm((primera ? "¿Enviar este email a SEUR" : "¿Responder a SEUR") + " por el envío " + e.ref + "?")) return;
+  const btn = document.getElementById("seur-correo-enviar");
+  btn.disabled = true;
+  try {
+    const res = await fetch(primera ? "/api/seur/envios/escribir" : "/api/seur/envios/responder", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, texto }) });
+    const d = await res.json().catch(() => ({}));
+    if (!d.ok) {
+      alert("No se ha podido enviar: " + (d.error === "script_sin_actualizar" || /no_json/.test(d.error || "") ? "falta actualizar el script de Google (Aviso almacén) a la versión nueva." : (d.error || res.status)));
+      return;
+    }
+    mostrarAvisoBreve(primera ? "Email enviado a SEUR (" + e.ref + ")." : "Respuesta enviada a SEUR (" + e.ref + ").");
+    document.getElementById("seur-correo-overlay").classList.remove("open");
+    await loadCasosRevisarSeur();
+  } catch (err) {
+    alert("No se ha podido enviar: " + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 try {
   const guardado = localStorage.getItem("enviosSeurOcultarEntregados");
   if (guardado !== null) document.getElementById("envios-seur-ocultar-entregados").checked = guardado === "1";
@@ -6984,16 +7066,18 @@ document.getElementById("envios-seur-ocultar-archivados").addEventListener("chan
 document.getElementById("envios-seur-solo-avisos").addEventListener("change", renderEnviosSeur);
 // Aviso en el menú "Envíos SEUR" con los envíos por reclamar, visible
 // desde cualquier pantalla (se calcula al abrir la app y cada hora).
-function actualizarAvisoMenuSeur(n) {
+function actualizarAvisoMenuSeur(n, respuestas) {
   const link = document.querySelector('[data-logistica="casos-revisar-seur"]');
   if (!link) return;
-  link.innerHTML = "Envíos SEUR" + (n ? ' <span class="badge" style="background:#dc2626;color:#fff;padding:1px 6px">⚠ ' + n + '</span>' : "");
+  if (respuestas === undefined) respuestas = enviosSeur.filter(e => e.correoNoLeidos > 0).length;
+  link.innerHTML = "Envíos SEUR" + (n ? ' <span class="badge" style="background:#dc2626;color:#fff;padding:1px 6px">⚠ ' + n + '</span>' : "") +
+    (respuestas ? ' <span class="badge" style="background:#f59e0b;color:#fff;padding:1px 6px" title="Respuestas de SEUR sin leer">💬 ' + respuestas + '</span>' : "");
 }
 async function comprobarAvisosSeur() {
   try {
     const res = await fetch("/api/seur/envios");
     const lista = await res.json();
-    actualizarAvisoMenuSeur(lista.filter(e => e.aviso24h && !e.reclamado && !e.archivado).length);
+    actualizarAvisoMenuSeur(lista.filter(e => e.aviso24h && !e.reclamado && !e.archivado).length, lista.filter(e => e.correoNoLeidos > 0).length);
   } catch (err) {}
 }
 comprobarAvisosSeur();
@@ -8733,6 +8817,68 @@ function enviosDeExportSeur(result) {
   return result.rows.map((r, i) => ({ orderId: result.rowOrderIds[i], ref: r[0], nombre: r[1], pais: r[10], observaciones: r[11] }));
 }
 
+// === Correo con SEUR desde "Envíos SEUR" (Jennifer, 2026-10-02) ===
+// Se escribe desde la cuenta de Gmail de Jennifer vía el Apps Script; las
+// respuestas llegan a su bandeja y la app las lee del mismo script.
+// 63235 (España/Portugal) -> atención al cliente nacional; 48297 -> internacional.
+function destinoSeurDePedido(o) {
+  const cc = String((o && o.countryCode) || "").toUpperCase();
+  return cc === "ES" || cc === "PT" ? "nacional" : "internacional";
+}
+
+function ordersStubSeur(env) {
+  return env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+}
+
+// Mensajes de SEUR sin leer de una conversación.
+function noLeidosCorreo(correo) {
+  if (!correo || !correo.mensajes) return 0;
+  const visto = correo.vistoHasta || "";
+  return correo.mensajes.filter((m) => m.deSeur && (m.fecha || "") > visto).length;
+}
+
+// Relee del Gmail todas las conversaciones con SEUR abiertas desde la app y
+// guarda los mensajes nuevos. Los correos de SEUR fuera de esos hilos (si
+// abren un correo nuevo con nº de incidencia) se enganchan a la línea cuya
+// referencia o nº de expedición aparezca en el asunto o el texto.
+async function actualizarCorreosSeur(env) {
+  const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
+  const norm = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const lineas = [];
+  for (const o of orders) {
+    for (const [ref, info] of Object.entries(o.enviosSeurInfo || {})) {
+      if (!info.correo || !(info.correo.threadIds || []).length) continue;
+      const t = (o.seurTracking || []).find((x) => norm(x.referencia) === norm(ref));
+      lineas.push({ o, ref, correo: info.correo, expedicion: t ? String(t.numeroExpedicion || "") : "" });
+    }
+  }
+  if (!lineas.length) return { ok: true, lineas: 0, nuevos: 0 };
+  const threadIds = [...new Set(lineas.flatMap((l) => l.correo.threadIds))];
+  const r = await llamarScriptSeur(env, "seur-leer", { threadIds });
+  if (!r.ok) return { ok: false, error: r.error };
+  const cambios = [];
+  let nuevos = 0;
+  for (const l of lineas) {
+    const ids = new Set(l.correo.threadIds);
+    for (const m of r.sueltos || []) {
+      const texto = norm((m.asunto || "") + " " + (m.texto || ""));
+      if (texto.includes(norm(l.ref)) || (l.expedicion.length >= 6 && texto.includes(norm(l.expedicion)))) ids.add(m.threadId);
+    }
+    const porId = new Map();
+    for (const id of ids) for (const m of (r.hilos || {})[id] || []) porId.set(m.id, { ...m, threadId: id });
+    for (const m of r.sueltos || []) if (ids.has(m.threadId)) porId.set(m.id, m);
+    const mensajes = [...porId.values()].sort((a, b) => (a.fecha || "").localeCompare(b.fecha || ""))
+      .map((m) => ({ id: m.id, threadId: m.threadId, fecha: m.fecha, de: m.de, asunto: m.asunto, texto: String(m.texto || "").slice(0, 6000), deSeur: !!m.deSeur }))
+      .slice(-40);
+    if (!mensajes.length) continue;
+    const antes = new Set((l.correo.mensajes || []).map((m) => m.id));
+    nuevos += mensajes.filter((m) => m.deSeur && !antes.has(m.id)).length;
+    cambios.push({ orderId: l.o.id, ref: l.ref, correo: { threadIds: [...ids], mensajes, actualizado: new Date().toISOString() } });
+  }
+  if (cambios.length) await ordersStubSeur(env).fetch("https://do/orders/envios-seur-correos", { method: "POST", body: JSON.stringify({ cambios }) });
+  return { ok: true, lineas: lineas.length, nuevos };
+}
+
 // Estado en SEUR de una línea: la entrada de seguimiento con la misma
 // referencia (sin espacios ni guiones). Si el pedido solo tiene un envío y
 // una entrada, se usa esa.
@@ -9719,6 +9865,8 @@ async function handleFetch(request, env) {
             estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
             nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
             archivado: !!info.archivado, fechaArchivado: info.fechaArchivado || null,
+            numeroExpedicion: t ? t.numeroExpedicion || "" : "",
+            correo: info.correo || null, correoNoLeidos: noLeidosCorreo(info.correo),
           });
         }
       }
@@ -9738,6 +9886,75 @@ async function handleFetch(request, env) {
       }
       lista.sort((a, b) => (b.fechaCarga || "").localeCompare(a.fechaCarga || "") || a.ref.localeCompare(b.ref));
       return Response.json(lista);
+    }
+
+    // Escribir a SEUR por un envío (Jennifer, 2026-10-02). El asunto lleva
+    // la referencia y el nº de expedición para que SEUR lo localice.
+    if (url.pathname === "/api/seur/envios/escribir" && request.method === "POST") {
+      const { orderId, ref, texto } = await request.json();
+      if (!String(texto || "").trim()) return Response.json({ ok: false, error: "Escribe el mensaje." }, { status: 400 });
+      const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
+      const o = orders.find((x) => String(x.id) === String(orderId));
+      if (!o) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      const t = estadoSeurDeLinea(o, ref, 1);
+      const exp = t && t.numeroExpedicion ? String(t.numeroExpedicion) : "";
+      const destino = destinoSeurDePedido(o);
+      const asunto = `Consulta envío ${ref}${exp ? " · Expedición " + exp : ""} — Happy Deal`;
+      const cuerpo = [
+        `Referencia: ${ref}`,
+        exp ? `Nº de expedición: ${exp}` : null,
+        `Destinatario: ${o.name || ""} — ${o.postalCode || ""} ${o.city || ""}`.trim(),
+        "",
+        String(texto).trim(),
+        "",
+        "Un saludo,",
+        "Happy Deal",
+      ].filter((x) => x !== null).join("\n");
+      const r = await llamarScriptSeur(env, "seur-enviar", { destino, asunto, texto: cuerpo });
+      if (!r.ok) return Response.json({ ok: false, error: r.error || "No se pudo enviar." }, { status: 502 });
+      const ahora = new Date().toISOString();
+      const info = (o.enviosSeurInfo && o.enviosSeurInfo[ref]) || {};
+      const previo = info.correo || {};
+      const correo = {
+        threadIds: [...new Set([...(previo.threadIds || []), r.threadId])],
+        destino, asunto,
+        mensajes: [...(previo.mensajes || []), { id: "local-" + Date.now(), threadId: r.threadId, fecha: ahora, de: "Happy Deal", asunto, texto: cuerpo, deSeur: false }],
+        vistoHasta: ahora,
+      };
+      await ordersStubSeur(env).fetch("https://do/orders/envio-seur-info", { method: "POST", body: JSON.stringify({ orderId: o.id, ref, correo, ...(info.reclamado ? {} : { reclamado: true }) }) });
+      return Response.json({ ok: true, correo });
+    }
+
+    // Contestar en la misma conversación.
+    if (url.pathname === "/api/seur/envios/responder" && request.method === "POST") {
+      const { orderId, ref, texto } = await request.json();
+      if (!String(texto || "").trim()) return Response.json({ ok: false, error: "Escribe el mensaje." }, { status: 400 });
+      const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
+      const o = orders.find((x) => String(x.id) === String(orderId));
+      const correo = o && o.enviosSeurInfo && o.enviosSeurInfo[ref] && o.enviosSeurInfo[ref].correo;
+      if (!correo || !(correo.threadIds || []).length) return Response.json({ ok: false, error: "Este envío no tiene conversación con SEUR." }, { status: 400 });
+      // En el hilo del último mensaje de SEUR (o en el primero si aún no han escrito).
+      const ultimoSeur = [...(correo.mensajes || [])].reverse().find((m) => m.deSeur && m.threadId);
+      const threadId = ultimoSeur ? ultimoSeur.threadId : correo.threadIds[0];
+      const r = await llamarScriptSeur(env, "seur-responder", { threadId, texto: String(texto).trim(), destino: correo.destino || destinoSeurDePedido(o) });
+      if (!r.ok) return Response.json({ ok: false, error: r.error || "No se pudo enviar." }, { status: 502 });
+      const ahora = new Date().toISOString();
+      await ordersStubSeur(env).fetch("https://do/orders/envio-seur-info", { method: "POST", body: JSON.stringify({ orderId: o.id, ref, correo: {
+        mensajes: [...(correo.mensajes || []), { id: "local-" + Date.now(), threadId, fecha: ahora, de: "Happy Deal", asunto: correo.asunto || "", texto: String(texto).trim(), deSeur: false }],
+        vistoHasta: ahora,
+      } }) });
+      return Response.json({ ok: true });
+    }
+
+    if (url.pathname === "/api/seur/correos/actualizar" && request.method === "POST") {
+      return Response.json(await actualizarCorreosSeur(env));
+    }
+
+    // Conversación leída: deja de contar como respuesta nueva.
+    if (url.pathname === "/api/seur/envios/visto" && request.method === "POST") {
+      const { orderId, ref } = await request.json();
+      const res = await ordersStubSeur(env).fetch("https://do/orders/envio-seur-info", { method: "POST", body: JSON.stringify({ orderId, ref, correo: { vistoHasta: new Date().toISOString() } }) });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     if (url.pathname === "/api/seur/envios/info" && request.method === "POST") {
@@ -9898,5 +10115,7 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(handleSync(env));
+    // Respuestas de SEUR por email (Jennifer, 2026-10-02): cada hora.
+    ctx.waitUntil(actualizarCorreosSeur(env).catch(() => null));
   },
 };

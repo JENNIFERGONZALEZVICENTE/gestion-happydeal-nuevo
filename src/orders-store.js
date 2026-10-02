@@ -1213,7 +1213,7 @@ export class OrdersStore {
     // Notas y "Reclamado a SEUR" por línea enviada (Jennifer, 2026-10-01),
     // guardado en el pedido por referencia de SEUR.
     if (url.pathname === "/orders/envio-seur-info" && request.method === "POST") {
-      const { orderId, ref, nota, reclamado, archivado } = await request.json();
+      const { orderId, ref, nota, reclamado, archivado, correo } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const order = orders[orderId];
       if (!order || !ref) return new Response("not found", { status: 404 });
@@ -1230,9 +1230,29 @@ export class OrdersStore {
         e.archivado = !!archivado;
         e.fechaArchivado = archivado ? new Date().toISOString() : null;
       }
+      // Conversación por email con SEUR (Jennifer, 2026-10-02): se mezcla
+      // con lo que ya hubiera (threadIds, destino, asunto, mensajes, vistoHasta).
+      if (correo !== undefined) e.correo = correo ? { ...(e.correo || {}), ...correo } : null;
       await this.state.storage.put("orders", orders);
       this.broadcast();
       return Response.json({ ok: true, info: e });
+    }
+
+    // Varias conversaciones con SEUR a la vez (refresco de correos).
+    if (url.pathname === "/orders/envios-seur-correos" && request.method === "POST") {
+      const { cambios } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      let n = 0;
+      for (const c of cambios || []) {
+        const order = orders[c.orderId];
+        if (!order || !c.ref) continue;
+        const info = (order.enviosSeurInfo = order.enviosSeurInfo || {});
+        const e = (info[c.ref] = info[c.ref] || {});
+        e.correo = { ...(e.correo || {}), ...c.correo };
+        n++;
+      }
+      if (n) { await this.state.storage.put("orders", orders); this.broadcast(); }
+      return Response.json({ ok: true, n });
     }
 
     // Foto de las líneas enviadas de una carga de SEUR al cerrarla, para la
