@@ -2182,7 +2182,7 @@ export class InventoryStore {
     }
 
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
-      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision } = await request.json();
+      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, previsionEntrega } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return new Response("not found", { status: 404 });
@@ -2200,6 +2200,9 @@ export class InventoryStore {
       // BEZEN12211): la TAPA sale con referencia "STOCK" en Furniture y el
       // resto de piezas con la referencia nueva de Polival.
       if (tapaStock !== undefined) entry.tapaStock = !!tapaStock;
+      // Previsión de entrega del proveedor (Jennifer, 2026-10-02), solo
+      // informativa: a diferencia de fechaEstimadaLlegada no cambia FUR/FPK.
+      if (previsionEntrega !== undefined) entry.previsionEntrega = previsionEntrega || null;
       await this.state.storage.put("backorders", backorders);
       return Response.json(entry);
     }

@@ -2145,7 +2145,7 @@ function renderPage() {
   <div class="table-wrap" id="pendientes-wrap">
     <table id="pendientes-table">
       <thead>
-        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Plataforma</th><th>Modelo</th><th>Color</th><th>Talla</th><th id="pendientes-sku-head">SKU</th><th>Cantidad</th><th id="pendientes-coste-head" title="Coste según la tarifa vigente del proveedor (precio unidad × unidades)">Coste tarifa</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Notas</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head">Camión estimado</th><th>Recibido de fábrica</th></tr>
+        <tr><th id="pendientes-check-head" style="display:none"></th><th>Pedido</th><th>Plataforma</th><th>Modelo</th><th>Color</th><th>Talla</th><th id="pendientes-sku-head">SKU</th><th>Cantidad</th><th id="pendientes-coste-head" title="Coste según la tarifa vigente del proveedor (precio unidad × unidades)">Coste tarifa</th><th id="pendientes-refpolival-head" style="display:none">Ref. Polival</th><th>Mercancía para pedir a fábrica</th><th>Notas</th><th>Fecha del pedido</th><th id="pendientes-furfpk-head">FUR/FPK</th><th id="pendientes-camion-head" title="Cuándo se prevé que llegue del proveedor (para consultarlo). En colchones de pack es también el camión que decide FUR/FPK.">Previsión de entrega</th><th>Recibido de fábrica</th></tr>
         <tr id="pendientes-filter-row">
           <th></th>
           <th><input id="pendientes-pedido-search" type="text" placeholder="Filtrar..." /></th>
@@ -3456,7 +3456,8 @@ document.getElementById("descargar-excel-pendientes-btn").addEventListener("clic
       "FUR/FPK": b.esPack && b.tipo === "colchon" ? (b.tipoEnvio || "") : "",
       "Mercancía para pedir a fábrica": b.mercanciaFabrica || "",
       "Fecha del pedido": b.fecha || "",
-      "En revisión": b.revision ? (b.revision.motivo || "Sí") : "",
+      "Previsión de entrega": (b.fechaEstimadaLlegada || b.previsionEntrega) ? new Date((b.fechaEstimadaLlegada || b.previsionEntrega).slice(0, 10) + "T12:00:00").toLocaleDateString("es-ES") : "",
+      "En revisión":b.revision ? (b.revision.motivo || "Sí") : "",
       Notas: (allOrders.find(o => String(o.id) === String(b.orderId)) || {}).notas || "",
       "Pedido a fábrica": b.pedidoGenerado ? "Sí" + (b.fechaPedidoFabrica ? " (" + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") + ")" : "") : "No",
       "Recibido de fábrica": b.recibidoFabrica ? "Sí" + (b.fechaRecibido ? " (" + new Date(b.fechaRecibido).toLocaleDateString("es-ES") + ")" : "") : "No",
@@ -4743,7 +4744,11 @@ function renderPendientes() {
       ? ""
       : mostrarSelectorEnvio
       ? \`<td><input type="date" class="fecha-camion-input" data-id="\${b.id}" value="\${b.fechaEstimadaLlegada ? b.fechaEstimadaLlegada.slice(0, 10) : ""}"></td>\`
-      : "<td>—</td>";
+      // Previsión de entrega en el resto (Jennifer, 2026-10-02: "por si hay
+      // que consultarlo Sergio o yo"). Campo propio: no toca FUR/FPK.
+      : b.recibidoFabrica || b.estado !== "pendiente"
+      ? "<td>—</td>"
+      : \`<td><input type="date" class="prevision-entrega-input" data-id="\${b.id}" value="\${b.previsionEntrega ? b.previsionEntrega.slice(0, 10) : ""}" title="Previsión de entrega del proveedor"></td>\`;
     // Un pedido cancelado (Jennifer, 2026-08-26) se queda visible en rojo
     // para no perder el rastro, pero no se puede seleccionar para pedir a
     // fábrica.
@@ -4924,6 +4929,13 @@ function renderPendientes() {
   });
   tbody.querySelectorAll(".fecha-camion-input").forEach(inp => {
     inp.addEventListener("change", () => updateBackorderPlan(inp.dataset.id, { fechaEstimadaLlegada: inp.value || null }));
+  });
+  tbody.querySelectorAll(".prevision-entrega-input").forEach(inp => {
+    inp.addEventListener("change", async () => {
+      const b = backorders.find(x => x.id === inp.dataset.id);
+      if (b) b.previsionEntrega = inp.value || null;
+      await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: inp.dataset.id, previsionEntrega: inp.value || null }) });
+    });
   });
   tbody.querySelectorAll(".responder-btn").forEach(btn => {
     btn.addEventListener("click", () => {
