@@ -2260,6 +2260,10 @@ function renderPage() {
 </div>
 
 <div id="view-casos-revisar" style="display:none">
+  <div class="toolbar">
+    <select id="casos-revisar-estado"><option value="">Todos los estados de Furniture</option></select>
+    <input id="casos-revisar-search" type="text" placeholder="Buscar por pedido, nombre o albarán..." style="min-width:260px" />
+  </div>
   <div id="casos-revisar-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="casos-revisar-table">
@@ -6880,12 +6884,30 @@ function renderCasosRevisarTable(casos, tbodySel, colspan, refColLabel) {
     });
   });
 }
+// Filtro por estado de Furniture (Jennifer, 2026-10-02: "para revisar los
+// pedidos").
+let casosFurniture = [];
 async function loadCasosRevisar() {
   const res = await fetch("/api/furniture/casos-revisar");
-  const casos = await res.json();
-  document.getElementById("casos-revisar-count").textContent = casos.length + " casos a revisar";
+  casosFurniture = await res.json();
+  const sel = document.getElementById("casos-revisar-estado");
+  const actual = sel.value;
+  const estados = [...new Set(casosFurniture.map(c => c.estado || "(sin estado)"))].sort();
+  sel.innerHTML = '<option value="">Todos los estados de Furniture</option>' + estados.map(e => '<option value="' + escapeAttr(e) + '">' + escapeAttr(e) + ' (' + casosFurniture.filter(c => (c.estado || "(sin estado)") === e).length + ')</option>').join("");
+  if (estados.includes(actual)) sel.value = actual;
+  renderCasosFurnitureFiltrados();
+}
+function renderCasosFurnitureFiltrados() {
+  const estado = document.getElementById("casos-revisar-estado").value;
+  const q = document.getElementById("casos-revisar-search").value.trim().toLowerCase();
+  const casos = casosFurniture.filter(c =>
+    (!estado || (c.estado || "(sin estado)") === estado) &&
+    (!q || [c.orderNumber, c.name, c.albaran, c.nota].join(" ").toLowerCase().includes(q)));
+  document.getElementById("casos-revisar-count").textContent = casos.length + (casos.length === casosFurniture.length ? "" : " de " + casosFurniture.length) + " casos a revisar";
   renderCasosRevisarTable(casos, "#casos-revisar-table tbody", 7, "albaran");
 }
+document.getElementById("casos-revisar-estado").addEventListener("change", renderCasosFurnitureFiltrados);
+document.getElementById("casos-revisar-search").addEventListener("input", renderCasosFurnitureFiltrados);
 
 // "Envíos SEUR" (Jennifer, 2026-10-01): sustituye a "Casos a revisar".
 // Todas las líneas de las cargas de SEUR ya cerradas, filtrables por estado
