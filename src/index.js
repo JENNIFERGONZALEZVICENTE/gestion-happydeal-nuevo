@@ -1716,7 +1716,7 @@ function renderPage() {
   .retenido-listo { color: #15803d; font-weight: 600; }
   .coste-tarifa { text-align: right; white-space: nowrap; }
   .reservar-almacen-btn { padding: 2px 8px; font-size: 11px; margin-left: 4px; }
-  .reserva-tag { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 4px; background: #ede9fe; color: #5b21b6; font-size: 11px; font-weight: 700; }
+  .reserva-tag { display: inline-block; margin-left: 4px; padding: 3px 8px; border-radius: 4px; background: #dcfce7; color: #166534; border: 1px solid #22c55e; font-size: 11px; font-weight: 700; }
   .carga-abierta-box.revision-box { border-color: #dc2626; background: #fef2f2; }
   .carga-abierta-box.revision-box h3 { color: #b91c1c; }
   .revision-motivo { font-weight: 600; color: #b91c1c; }
@@ -5511,7 +5511,7 @@ function reservaAlmacenHtml(b) {
   if (!b || b.estado === "cancelado" || b.estado === "servido") return "";
   // Si ya se mandó se ve SIEMPRE, esté o no marcado como recibido
   // (Jennifer, 2026-10-02: para no mandarlo por duplicado).
-  if (b.reservaEnviada) return ' <span class="reserva-tag" title="Email de reserva YA enviado al almacén — no hace falta volver a mandarlo">📦 Reserva ya enviada ' + new Date(b.reservaEnviada).toLocaleDateString("es-ES") + "</span>";
+  if (b.reservaEnviada) return ' <span class="reserva-tag" title="Email de reserva YA enviado al almacén — no hace falta volver a mandarlo">✅ YA RESERVADO EN ALMACÉN · ' + new Date(b.reservaEnviada).toLocaleDateString("es-ES") + "</span>";
   if (!b.recibidoFabrica) return "";
   const o = allOrders.find(x => String(x.id) === String(b.orderId));
   if (!o || o.agencia !== "FURNITURE") return "";
