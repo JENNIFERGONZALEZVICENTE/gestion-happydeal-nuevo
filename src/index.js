@@ -6103,7 +6103,7 @@ async function descargarListadoAlmacen(cargaId) {
       margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 } },
   });
   const TAM = 13;
-  const anchos = [16, 13, 52, 7, 11];
+  const anchos = [16, 13, 52, 7, 11, 18];
   ws.columns = anchos.map(width => ({ width }));
   ws.getCell("A1").value = "Carga Furniture — " + formatCargaTitulo(carga);
   ws.getCell("A1").font = { bold: true, size: 18 };
@@ -6112,7 +6112,7 @@ async function descargarListadoAlmacen(cargaId) {
   ws.addRow([]);
   const borde = { style: "thin", color: { argb: "FF999999" } };
   const bordes = { top: borde, left: borde, bottom: borde, right: borde };
-  const cabecera = ws.addRow(["Pedido", "Ref. fábrica", "Producto", "Uds", "Montaje"]);
+  const cabecera = ws.addRow(["Pedido", "Ref. fábrica", "Producto", "Uds", "Montaje", "Reserva"]);
   cabecera.eachCell(c => {
     c.font = { bold: true, size: TAM, color: { argb: "FFFFFFFF" } };
     c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F8A4C" } };
@@ -6125,14 +6125,20 @@ async function descargarListadoAlmacen(cargaId) {
   const cerrarGrupo = (fin) => { if (anterior !== null && fin > inicio) ws.mergeCells(inicio, 1, fin, 1); };
   filas.forEach((f) => {
     if (f.pedido !== anterior) { cerrarGrupo(ws.rowCount); grupo++; anterior = f.pedido; inicio = ws.rowCount + 1; }
-    const row = ws.addRow([f.pedido, f.referencia, f.producto, f.cantidad, f.montaje ? "SÍ" : "NO"]);
-    const lineas = Math.max(1, Math.ceil(f.producto.length / ((anchos[2] - 2) * 11 / TAM)));
+    // Ya apartado con etiqueta de reserva (Jennifer, 2026-10-02): que no
+    // lo vuelvan a buscar ni preparar.
+    const reserva = f.reservado ? "YA APARTADO (etiqueta reserva " + new Date(f.reservado).toLocaleDateString("es-ES") + ")" : "";
+    const row = ws.addRow([f.pedido, f.referencia, f.producto, f.cantidad, f.montaje ? "SÍ" : "NO", reserva]);
+    const lineas = Math.max(1, Math.ceil(f.producto.length / ((anchos[2] - 2) * 11 / TAM)), reserva ? 2 : 1);
     row.height = lineas * (TAM * 1.35) + 6;
     row.eachCell({ includeEmpty: true }, (c, col) => {
       c.alignment = { vertical: "middle", horizontal: col === 3 ? "left" : "center", wrapText: true };
       c.border = bordes;
-      c.font = { size: TAM, bold: col === 1 || col === 2 || (col === 5 && f.montaje), color: col === 5 && f.montaje ? { argb: "FFC80000" } : undefined };
-      if (grupo % 2 === 1) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEAF4EE" } };
+      c.font = col === 6
+        ? { size: TAM - 1, bold: true, color: { argb: "FF7C3AED" } }
+        : { size: TAM, bold: col === 1 || col === 2 || (col === 5 && f.montaje), color: col === 5 && f.montaje ? { argb: "FFC80000" } : undefined };
+      if (f.reservado && col > 1) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEDE9FE" } };
+      else if (grupo % 2 === 1) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEAF4EE" } };
     });
   });
   cerrarGrupo(ws.rowCount);
@@ -8413,8 +8419,10 @@ async function buildListadoAlmacen(env, cargaId) {
   const pedidos = orders.filter((o) => o.cargaId === carga.id)
     .sort((a, b) => clavePedido(a).localeCompare(clavePedido(b)) || (a.id === a.grupoEnvio ? -1 : b.id === b.grupoEnvio ? 1 : 0));
   const filas = [];
-  const fila = (pedido, o, referencia, producto, cantidad) =>
-    filas.push({ pedido, referencia: referencia || "", producto, cantidad: cantidad || 1, montaje: tieneMontajeFurniture(o.services) });
+  // reservado (Jennifer, 2026-10-02): fecha del email con la etiqueta de
+  // reserva — ese artículo ya está apartado y etiquetado en el almacén.
+  const fila = (pedido, o, referencia, producto, cantidad, b) =>
+    filas.push({ pedido, referencia: referencia || "", producto, cantidad: cantidad || 1, montaje: tieneMontajeFurniture(o.services), reservado: (b && b.reservaEnviada) || null });
 
   for (const o of pedidos) {
     const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
@@ -8423,7 +8431,7 @@ async function buildListadoAlmacen(env, cargaId) {
       && !b.reposicion && !b.gestoComercial && !b.envioAparte
       && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
     if (!lineas.length) { fila(referenciaPedido(envio), o, "", o.product || "", 1); continue; }
-    for (const b of lineas) fila(referenciaPedido(envio), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad);
+    for (const b of lineas) fila(referenciaPedido(envio), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad, b);
   }
   for (const b of backorders.filter((b) => b.reposicion && b.estado === "pendiente" && b.cargaId === carga.id && !(b.tipo === "colchon" && b.agenciaReposicion === "SEUR"))) {
     const o = orders.find((x) => x.id === b.orderId);
@@ -8433,7 +8441,7 @@ async function buildListadoAlmacen(env, cargaId) {
     const o = orders.find((x) => x.id === b.orderId);
     if (!o) continue;
     const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
-    fila(referenciaPedido(envio) + (b.refSuffix || ""), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad);
+    fila(referenciaPedido(envio) + (b.refSuffix || ""), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad, b);
   }
   return { carga, filas };
 }
@@ -8561,7 +8569,7 @@ async function buildListadoAlmacenSeur(env, cargaId) {
     if (o.agencia !== "SEUR" || o.cargaId !== carga.id) continue;
     const cubiertos = backorders.filter((b) => b.orderId === o.id && b.estado === "cubierto");
     if (!cubiertos.length) { filas.push({ pedido: referenciaSeur(o, "", ""), cliente: o.name || "", producto: o.product || "", cantidad: 1, origen: "STOCK" }); continue; }
-    for (const b of cubiertos) filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", ""), cliente: o.name || "", producto: producto(b), cantidad: b.cantidad || 1, origen: "STOCK" });
+    for (const b of cubiertos) filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", ""), cliente: o.name || "", producto: producto(b), cantidad: b.cantidad || 1, origen: b.reservaEnviada ? "YA APARTADO CON ETIQUETA DE RESERVA (" + corto(b.reservaEnviada) + ")" : "STOCK" });
   }
   for (const b of backorders) {
     if (b.estado !== "listo-seur" || b.cargaId !== carga.id) continue;
@@ -8569,7 +8577,8 @@ async function buildListadoAlmacenSeur(env, cargaId) {
     if (!o) continue;
     const prefijo = b.reposicion ? "REP" : b.gestoComercial ? "GC" : "";
     let origen;
-    if (/^ENVÍO SUELTO/i.test(b.mercanciaFabrica || "")) origen = "APARTADO EN ALMACÉN";
+    if (b.reservaEnviada) origen = "YA APARTADO CON ETIQUETA DE RESERVA (" + corto(b.reservaEnviada) + ")";
+    else if (/^ENVÍO SUELTO/i.test(b.mercanciaFabrica || "")) origen = "APARTADO EN ALMACÉN";
     else if (b.fechaRecibido) origen = diaDe(b.fechaRecibido) === hoy ? "RECIBIDO HOY (" + (b.proveedor || "fábrica") + ")" : "RECIBIDO " + corto(b.fechaRecibido) + " (" + (b.proveedor || "fábrica") + ")";
     else origen = "RECIBIDO DE " + (b.proveedor || "FÁBRICA");
     filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", prefijo), cliente: o.name || "", producto: producto(b), cantidad: b.cantidad || 1, origen });
@@ -9733,7 +9742,7 @@ async function handleFetch(request, env) {
       // Solo modelo y medida, sumando las unidades iguales.
       const lineas = [];
       for (const f of result.filas) {
-        const producto = String(f.producto || "").replace(/^COLCHÓN\s+/i, "");
+        const producto = String(f.producto || "").replace(/^COLCHÓN\s+/i, "") + (/^YA APARTADO/.test(f.origen) ? " (YA APARTADO)" : "");
         const l = lineas.find((x) => x.producto === producto);
         if (l) l.cantidad += f.cantidad || 1;
         else lineas.push({ producto, cantidad: f.cantidad || 1 });
