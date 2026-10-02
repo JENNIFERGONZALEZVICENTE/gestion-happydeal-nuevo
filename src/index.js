@@ -5508,8 +5508,11 @@ function avisarReservaAutomatica(entry) {
 // con sus etiquetas, o la fecha si ya se mandó. Lo decide ella en cada caso
 // (BEZEN12211 no la llevó porque salía al día siguiente).
 function reservaAlmacenHtml(b) {
-  if (!b || !b.recibidoFabrica || b.estado === "cancelado" || b.estado === "servido") return "";
-  if (b.reservaEnviada) return ' <span class="reserva-tag" title="Email de reserva enviado al almacén">📦 Reservado ' + new Date(b.reservaEnviada).toLocaleDateString("es-ES") + "</span>";
+  if (!b || b.estado === "cancelado" || b.estado === "servido") return "";
+  // Si ya se mandó se ve SIEMPRE, esté o no marcado como recibido
+  // (Jennifer, 2026-10-02: para no mandarlo por duplicado).
+  if (b.reservaEnviada) return ' <span class="reserva-tag" title="Email de reserva YA enviado al almacén — no hace falta volver a mandarlo">📦 Reserva ya enviada ' + new Date(b.reservaEnviada).toLocaleDateString("es-ES") + "</span>";
+  if (!b.recibidoFabrica) return "";
   const o = allOrders.find(x => String(x.id) === String(b.orderId));
   if (!o || o.agencia !== "FURNITURE") return "";
   const resto = backordersPorPedido(o.id).filter(x => x.id !== b.id && !(x.esPack && x.tipo === "colchon" && x.tipoEnvio === "FPK"));
@@ -5524,8 +5527,18 @@ document.addEventListener("click", async (e) => {
   const b = backorders.find(x => x.id === btn.dataset.reservarAlmacen);
   if (!b || !confirm("¿Mandar al almacén el email de reserva de " + b.cantidad + "x " + b.stockModel + " " + b.talla + " (" + refLabel(b) + ")?")) return;
   btn.disabled = true;
-  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/reservar-almacen", { method: "POST" });
-  const data = await res.json().catch(() => ({}));
+  let res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/reservar-almacen", { method: "POST" });
+  let data = await res.json().catch(() => ({}));
+  if (data.yaEnviada) {
+    // Se mandó desde otra pantalla o de forma automática y esta aún no lo sabía.
+    b.reservaEnviada = data.yaEnviada;
+    if (!confirm("El email de reserva de este artículo YA se mandó al almacén el " + new Date(data.yaEnviada).toLocaleString("es-ES") + ".\\n\\n¿Seguro que quieres mandarlo OTRA VEZ?")) {
+      if (document.getElementById("view-furniture").style.display !== "none") renderFurniture(); else renderPendientes();
+      return;
+    }
+    res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/reservar-almacen?forzar=1", { method: "POST" });
+    data = await res.json().catch(() => ({}));
+  }
   if (!res.ok || !data.ok) { alert("No se ha podido mandar el email de reserva" + (data.avisoReserva && data.avisoReserva.reason ? " (" + data.avisoReserva.reason + ")" : "") + ". Avisa al almacén a mano."); btn.disabled = false; return; }
   b.reservaEnviada = new Date().toISOString();
   mostrarAvisoBreve("Reserva enviada al almacén: " + refLabel(b));
@@ -9168,6 +9181,11 @@ async function handleFetch(request, env) {
       const backorders = await inventoryStub(env).fetch("https://do/backorders").then((r) => r.json());
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return Response.json({ ok: false, error: "Artículo no encontrado." }, { status: 404 });
+      // Nunca dos veces sin querer (Jennifer, 2026-10-02): si ya se mandó,
+      // solo con ?forzar=1 (el navegador lo pregunta antes).
+      if (entry.reservaEnviada && url.searchParams.get("forzar") !== "1") {
+        return Response.json({ ok: false, yaEnviada: entry.reservaEnviada }, { status: 409 });
+      }
       const avisoReserva = await reservarStockManual(env, entry);
       if (avisoReserva.ok) await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(id) + "/reserva-enviada", { method: "POST", body: "{}" });
       return Response.json({ ok: !!avisoReserva.ok, avisoReserva });
