@@ -5549,6 +5549,14 @@ function backordersPorPedido(orderId) {
   return backorders.filter(b => b.orderId === orderId && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial && !b.envioAparte);
 }
 
+// Id de pedido leído de un data-id (Jennifer, 2026-10-05: 10002300804-A no
+// entraba en "tener en cuenta"): Shopify usa ids numéricos, pero los de
+// marketplace son texto ("MDM-10002300804-A") y Number() los dejaba en NaN.
+function idPedido(v) {
+  const n = Number(v);
+  return Number.isNaN(n) ? v : n;
+}
+
 // Envío conjunto (Jennifer, 2026-09-28): en Furniture el grupo es UNA sola
 // línea, la del pedido principal, con los artículos de todos sus pedidos
 // ("el colchón no aparece en la línea del pedido BEZEN12205"). Los demás
@@ -5980,7 +5988,7 @@ function renderFurniture() {
       await fetch("/api/pedidos/shopify/meta", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: Number(btn.dataset.id), paraTenerEnCuenta: false }),
+        body: JSON.stringify({ id: idPedido(btn.dataset.id), paraTenerEnCuenta: false }),
       });
       const order = allOrders.find(o => String(o.id) === btn.dataset.id);
       if (order) order.paraTenerEnCuenta = false;
@@ -5989,7 +5997,7 @@ function renderFurniture() {
   });
   document.querySelectorAll(".anadir-carga-tener-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const id = Number(btn.dataset.id);
+      const id = idPedido(btn.dataset.id);
       // Añadir manualmente desde "para tener en cuenta" (Jennifer,
       // 2026-09-18: "no tengo opción de añadirlo a la carga") — una vez en
       // la carga ya no hace falta seguir teniéndolo a golpe de vista aquí.
@@ -6021,7 +6029,7 @@ function renderFurniture() {
   \`).join("");
   document.querySelectorAll(".furniture-check").forEach(chk => {
     chk.addEventListener("change", () => {
-      const id = Number(chk.dataset.id);
+      const id = idPedido(chk.dataset.id);
       if (chk.checked) furnitureSeleccion.add(id);
       else furnitureSeleccion.delete(id);
       actualizarFurnitureSeleccionUI();
@@ -6055,7 +6063,7 @@ function renderFurniture() {
     inp.addEventListener("focus", () => { editing = true; });
     inp.addEventListener("blur", () => {
       editing = false;
-      const order = allOrders.find(o => o.id === Number(inp.dataset.id));
+      const order = allOrders.find(o => o.id === idPedido(inp.dataset.id));
       if (order) order.notas = inp.value;
       saveMeta(inp.dataset.id, { notas: inp.value });
     });
@@ -6131,10 +6139,10 @@ function renderRetenidos(retenidos) {
     renderFurniture();
   }));
   document.querySelectorAll(".quitar-retencion-btn").forEach(btn => btn.addEventListener("click", async () => {
-    await guardarRetencion([Number(btn.dataset.id)], null);
+    await guardarRetencion([idPedido(btn.dataset.id)], null);
     renderFurniture();
   }));
-  document.querySelectorAll(".cambiar-retencion-btn").forEach(btn => btn.addEventListener("click", () => abrirModalRetener([Number(btn.dataset.id)])));
+  document.querySelectorAll(".cambiar-retencion-btn").forEach(btn => btn.addEventListener("click", () => abrirModalRetener([idPedido(btn.dataset.id)])));
 }
 // Con fecha: al abrir Furniture, lo que ya toca y está todo recibido entra
 // solo en la carga abierta (y deja de estar retenido).
@@ -7290,7 +7298,7 @@ function renderHistorialCargas(cargas) {
   // afectar a un pedido que ya se consideraba listo para salir.
   document.querySelectorAll("#historial-cargas-list .sacar-carga-historial-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const id = Number(btn.dataset.id);
+      const id = idPedido(btn.dataset.id);
       const order = allOrders.find(o => o.id === id);
       if (!confirm("¿Sacar " + (order ? refLabel(order) : "este pedido") + " de esta carga cerrada? Volverá a la lista de pendientes de Furniture.")) return;
       await fetch("/api/cargas/remove", {
@@ -7315,7 +7323,7 @@ function renderHistorialCargas(cargas) {
     inp.addEventListener("focus", () => { editing = true; });
     inp.addEventListener("blur", () => {
       editing = false;
-      const order = allOrders.find(o => o.id === Number(inp.dataset.id));
+      const order = allOrders.find(o => o.id === idPedido(inp.dataset.id));
       if (order) order.notas = inp.value;
       saveMeta(inp.dataset.id, { notas: inp.value });
     });
