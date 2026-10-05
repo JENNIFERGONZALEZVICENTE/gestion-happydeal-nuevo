@@ -1491,6 +1491,10 @@ function renderPage() {
   .caso-historial-item:last-child { border-bottom: 0; }
   .caso-historial-item .meta { color: var(--muted); font-size: 11px; }
   .caso-tag { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #ccfbf1; color: #115e59; cursor: pointer; }
+  .tareas-dia { margin: 8px 0; background: var(--panel, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 8px; padding: 0 12px; }
+  .tareas-dia summary { cursor: pointer; padding: 10px 0; font-size: 14px; }
+  .tareas-dia[open] summary { border-bottom: 1px solid var(--border, #e5e7eb); margin-bottom: 6px; }
+  .tareas-dia .table-wrap { margin-bottom: 10px; }
   .caso-atrasado { color: #b91c1c; font-weight: 600; }
   .modal-box {
     background: var(--panel, #fff);
@@ -2407,12 +2411,7 @@ function renderPage() {
     <button type="button" class="secondary" id="tareas-email-prueba-btn" title="Manda ahora el email de recordatorio con las tareas de hoy">✉ Enviarme el recordatorio ahora</button>
   </div>
   <div id="tareas-count" class="inventario-count"></div>
-  <div class="table-wrap">
-    <table id="tareas-table">
-      <thead><tr><th style="width:40px">Hecha</th><th>Fecha</th><th>Qué hay que hacer</th><th>Pedido</th><th>Para</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
+  <div id="tareas-dias"></div>
 </div>
 
 <div id="view-plazos-marketplace" style="display:none">
@@ -8634,6 +8633,39 @@ function selectTareas() {
   loadTareas().then(renderTareas);
 }
 
+// Por días, desplegables tipo calendario (Jennifer, 2026-10-05: "que no me
+// aparezca un listado de todas las tareas, sino que salgan por días que
+// podamos ir desplegando"). Atrasadas y hoy abiertos de entrada; el resto
+// cerrados, y se recuerda lo que cada uno abre mientras no recargue.
+const tareasDiasAbiertos = new Set();
+const tareasDiasCerrados = new Set();
+const DIAS_SEMANA = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+const MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+function sumarDias(iso, n) {
+  const d = new Date(iso + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function tituloDia(iso, hoy) {
+  const d = new Date(iso + "T12:00:00Z");
+  const base = DIAS_SEMANA[d.getUTCDay()] + " " + d.getUTCDate() + " de " + MESES[d.getUTCMonth()] + (iso.slice(0, 4) !== hoy.slice(0, 4) ? " de " + iso.slice(0, 4) : "");
+  if (iso === hoy) return "Hoy · " + base;
+  if (iso === sumarDias(hoy, 1)) return "Mañana · " + base;
+  if (iso === sumarDias(hoy, -1)) return "Ayer · " + base;
+  return base;
+}
+function filaTarea(t, hoy) {
+  const o = t.pedidoId != null ? allOrders.find(p => String(p.id) === String(t.pedidoId)) : null;
+  const atrasada = !t.hecha && t.fecha < hoy;
+  return '<tr>' +
+    '<td style="width:40px"><input type="checkbox" class="tarea-hecha-check" data-id="' + escapeAttr(t.id) + '"' + (t.hecha ? " checked" : "") + ' title="Marcar como hecha" /></td>' +
+    '<td>' + (atrasada ? '<span class="badge" style="background:#dc2626;color:#fff">Atrasada · era el ' + escapeAttr(fechaTarea(t.fecha).slice(0, 5)) + '</span><br>' : "") + escapeAttr(t.texto || "") +
+      (t.hecha ? '<div style="font-size:11.5px;color:var(--muted)">Hecha por ' + escapeAttr(t.hechaPor || "") + " el " + escapeAttr(fechaHoraCaso(t.fechaHecha)) + '</div>' : "") + '</td>' +
+    '<td><strong>' + escapeAttr(t.pedidoRef || "") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:300px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
+    '<td style="white-space:nowrap">' + escapeAttr(RESPONSABLE_LABELS[t.para] || "Los dos") + '</td>' +
+    '<td style="width:70px"><button type="button" class="secondary" data-tarea-abrir="' + escapeAttr(t.id) + '">Editar</button></td>' +
+    '</tr>';
+}
 function renderTareas() {
   const hoy = hoyMadrid();
   const q = document.getElementById("tareas-search").value.trim().toLowerCase();
@@ -8642,25 +8674,40 @@ function renderTareas() {
   const filas = tareas.filter(t => !!t.hecha === verHechas
     && (!para || !t.para || t.para === "AMBOS" || t.para === para)
     && (!q || [t.texto, t.pedidoRef].join(" ").toLowerCase().includes(q)));
-  filas.sort((a, b) => verHechas ? String(b.fechaHecha || "").localeCompare(String(a.fechaHecha || "")) : a.fecha.localeCompare(b.fecha));
   const nHoy = filas.filter(t => !t.hecha && t.fecha <= hoy).length;
   document.getElementById("tareas-count").textContent = verHechas ? filas.length + " tareas hechas" : filas.length + " tareas pendientes" + (nHoy ? " · " + nHoy + " para hoy o atrasadas" : "");
-  const tbody = document.querySelector("#tareas-table tbody");
-  tbody.innerHTML = filas.length ? filas.map(t => {
-    const atrasada = !t.hecha && t.fecha < hoy;
-    const esHoy = !t.hecha && t.fecha === hoy;
-    const o = t.pedidoId != null ? allOrders.find(p => String(p.id) === String(t.pedidoId)) : null;
-    const etiqueta = atrasada ? '<br><span class="badge" style="background:#dc2626;color:#fff">Atrasada</span>' : esHoy ? '<br><span class="badge" style="background:#f59e0b;color:#fff">Hoy</span>' : "";
-    return '<tr' + (atrasada ? ' style="background:rgba(254,226,226,.6)"' : esHoy ? ' style="background:rgba(254,243,199,.6)"' : "") + '>' +
-      '<td><input type="checkbox" class="tarea-hecha-check" data-id="' + escapeAttr(t.id) + '"' + (t.hecha ? " checked" : "") + ' title="Marcar como hecha" /></td>' +
-      '<td style="white-space:nowrap"><strong>' + escapeAttr(fechaTarea(t.fecha)) + '</strong>' + etiqueta + '</td>' +
-      '<td>' + escapeAttr(t.texto || "") + (t.hecha ? '<div style="font-size:11.5px;color:var(--muted)">Hecha por ' + escapeAttr(t.hechaPor || "") + " el " + escapeAttr(fechaHoraCaso(t.fechaHecha)) + '</div>' : "") + '</td>' +
-      '<td><strong>' + escapeAttr(t.pedidoRef || "") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:300px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
-      '<td>' + escapeAttr(RESPONSABLE_LABELS[t.para] || "Los dos") + '</td>' +
-      '<td><button type="button" class="secondary" data-tarea-abrir="' + escapeAttr(t.id) + '">Editar</button></td>' +
-      '</tr>';
-  }).join("") : '<tr><td colspan="6" style="color:var(--muted)">' + (verHechas ? "No hay tareas hechas." : "No hay tareas pendientes.") + '</td></tr>';
-  tbody.querySelectorAll(".tarea-hecha-check").forEach(chk => chk.addEventListener("change", async () => {
+  // Grupos: "atrasadas" (pendientes de días pasados) y luego un grupo por día.
+  const grupos = new Map();
+  if (!verHechas) {
+    const atrasadas = filas.filter(t => t.fecha < hoy).sort((a, b) => a.fecha.localeCompare(b.fecha));
+    if (atrasadas.length) grupos.set("atrasadas", atrasadas);
+  }
+  const porDia = filas.filter(t => verHechas || t.fecha >= hoy).sort((a, b) => verHechas ? b.fecha.localeCompare(a.fecha) : a.fecha.localeCompare(b.fecha));
+  for (const t of porDia) {
+    if (!grupos.has(t.fecha)) grupos.set(t.fecha, []);
+    grupos.get(t.fecha).push(t);
+  }
+  const cont = document.getElementById("tareas-dias");
+  if (!grupos.size) {
+    cont.innerHTML = '<p style="color:var(--muted)">' + (verHechas ? "No hay tareas hechas." : "No hay tareas pendientes.") + '</p>';
+    return;
+  }
+  cont.innerHTML = [...grupos.entries()].map(([clave, lista]) => {
+    const esAtrasadas = clave === "atrasadas";
+    const abiertoPorDefecto = !verHechas && (esAtrasadas || clave === hoy);
+    const abierto = tareasDiasAbiertos.has(clave) || (abiertoPorDefecto && !tareasDiasCerrados.has(clave));
+    const titulo = esAtrasadas ? "⚠ Atrasadas" : tituloDia(clave, hoy);
+    const color = esAtrasadas ? "#dc2626" : clave === hoy && !verHechas ? "#f59e0b" : "var(--muted)";
+    return '<details class="tareas-dia" data-dia="' + escapeAttr(clave) + '"' + (abierto ? " open" : "") + ' style="border-left:4px solid ' + color + '">' +
+      '<summary><strong>' + escapeAttr(titulo) + '</strong> <span class="badge" style="background:' + color + ';color:#fff">' + lista.length + (lista.length === 1 ? " tarea" : " tareas") + '</span></summary>' +
+      '<div class="table-wrap"><table class="tareas-dia-table"><thead><tr><th>Hecha</th><th>Qué hay que hacer</th><th>Pedido</th><th>Para</th><th></th></tr></thead><tbody>' +
+      lista.map(t => filaTarea(t, hoy)).join("") + '</tbody></table></div></details>';
+  }).join("");
+  cont.querySelectorAll("details.tareas-dia").forEach(d => d.addEventListener("toggle", () => {
+    if (d.open) { tareasDiasAbiertos.add(d.dataset.dia); tareasDiasCerrados.delete(d.dataset.dia); }
+    else { tareasDiasAbiertos.delete(d.dataset.dia); tareasDiasCerrados.add(d.dataset.dia); }
+  }));
+  cont.querySelectorAll(".tarea-hecha-check").forEach(chk => chk.addEventListener("change", async () => {
     await fetch("/api/tareas/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: chk.dataset.id, hecha: chk.checked, usuario: currentUser }) });
     await loadTareas();
     renderTareas();
