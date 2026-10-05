@@ -5361,6 +5361,10 @@ async function resolverPendiente(id) {
 // botón "Marcar recibido" de Proveedores pendientes (Jennifer, 2026-09-18:
 // "los he marcado como recibidos pero no se ponen automáticamente en
 // Furniture para las cargas" — solo estaba conectada en un sitio).
+function soloFaltanAlmohadas(items) {
+  const faltan = items.filter(i => !i.recibidoFabrica);
+  return faltan.length > 0 && faltan.every(i => i.tipo === "almohada") && items.some(i => i.tipo !== "almohada");
+}
 async function checkAutoAddCarga(orderId) {
   const order = allOrders.find(o => o.id === orderId);
   if (!order || order.cargaId || order.cancelado) return;
@@ -5375,7 +5379,17 @@ async function checkAutoAddCarga(orderId) {
   const itemsFurniture = items.filter(i => !esFpkPendiente(i));
   const todosRecibidos = itemsFurniture.length > 0 && itemsFurniture.every(i => i.recibidoFabrica);
   const colchonFpkPendiente = items.some(i => esFpkPendiente(i) && i.estado === "pendiente");
-  if (!todosRecibidos) return;
+  if (!todosRecibidos) {
+    // Solo faltan almohadas (Jennifer, 2026-10-05, BEZEN12276: Spring Zen
+    // recibido y "no me había dado cuenta" de las almohadas) — se pueden
+    // pedir urgentes, así que a "tener en cuenta" para gestionarlas rápido.
+    if (soloFaltanAlmohadas(itemsFurniture) && !order.paraTenerEnCuenta) {
+      await saveMeta(order.id, { paraTenerEnCuenta: true });
+      order.paraTenerEnCuenta = true;
+      mostrarAvisoBreve(refLabel(order) + ": todo recibido salvo las almohadas — pasa a «Pedidos para tener en cuenta».");
+    }
+    return;
+  }
   // Retenido por el cliente (Jennifer, 2026-09-30): no sube solo salvo que
   // ya le toque por fecha.
   if (retencionDe(order) && !retencionCumplida(order)) return;
@@ -5817,7 +5831,7 @@ function furnitureRowCells(o) {
       }).join("")
     : "<em>Todo en stock</em>";
   return \`
-    <td>\${refLabel(o)}\${grupoEnvioTag(o)}\${valdemoroTag(o)}</td>
+    <td>\${refLabel(o)}\${grupoEnvioTag(o)}\${valdemoroTag(o)}\${soloFaltanAlmohadas(items.filter(b => !(b.tipo === "colchon" && b.tipoEnvio === "FPK"))) ? '<div class="todo-junto-tag" style="margin-left:0">Solo faltan las almohadas</div>' : ""}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name}</td>
     <td>\${productoGrupo}</td>
