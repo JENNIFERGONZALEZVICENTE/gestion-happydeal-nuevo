@@ -2373,12 +2373,17 @@ function renderPage() {
       <option value="SERGIO">Sergio</option>
       <option value="AMBOS">Los dos</option>
     </select>
-    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="casos-ver-cerrados" /> Ver cerrados</label>
+    <select id="casos-vista">
+      <option value="revisar">Para revisar hoy</option>
+      <option value="revisados">Ya revisados hoy</option>
+      <option value="abiertos">Todos los abiertos</option>
+      <option value="cerrados">Cerrados</option>
+    </select>
   </div>
   <div id="casos-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="casos-table">
-      <thead><tr><th>Pedido</th><th>Cliente</th><th>Teléfono</th><th>Motivo</th><th style="min-width:280px">Último seguimiento</th><th>Responsable</th><th></th></tr></thead>
+      <thead><tr><th>Pedido</th><th>Cliente</th><th>Teléfono</th><th>Motivo</th><th>Responsable</th><th>Última gestión</th><th style="min-width:260px">Último seguimiento</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -2549,6 +2554,12 @@ function renderPage() {
     </label>
     <div id="caso-historial" class="caso-historial"></div>
     <label class="caso-campo">Nuevo seguimiento <textarea id="caso-nota" rows="3" placeholder="Qué se ha hecho o hablado con el cliente..."></textarea></label>
+    <div style="display:flex;gap:12px">
+      <label class="caso-campo" style="flex:1">Gestión hecha por
+        <select id="caso-gestion-autor"><option value="JENNIFER">Jennifer</option><option value="SERGIO">Sergio</option></select>
+      </label>
+      <label class="caso-campo" style="flex:1">Fecha de la gestión <input type="date" id="caso-gestion-fecha" /></label>
+    </div>
     <div class="modal-actions">
       <button type="button" class="secondary" id="caso-cerrar-btn" style="margin-right:auto">Cerrar caso</button>
       <button type="button" class="secondary" id="caso-modal-cancel">Cancelar</button>
@@ -8320,11 +8331,20 @@ let casos = [];
 let casoEditando = null;
 async function loadCasos() {
   try { casos = await (await fetch("/api/casos")).json(); } catch (e) { return; }
-  const abiertos = casos.filter(c => c.estado !== "cerrado").length;
+  const abiertos = casos.filter(casoPorRevisar).length;
   const badge = document.getElementById("casos-badge");
   badge.style.display = abiertos ? "" : "none";
   badge.textContent = abiertos;
   if (document.getElementById("view-casos").style.display !== "none") renderCasos();
+}
+// Revisado hoy (Jennifer, 2026-10-05): "si ya se ha revisado un día, que
+// ya no salga para revisar hasta el día siguiente".
+function revisadoHoy(c) {
+  const u = ultimoSeguimiento(c);
+  return !u.sistema && !!u.fecha && haceDias(u.fecha).n <= 0;
+}
+function casoPorRevisar(c) {
+  return c.estado !== "cerrado" && !revisadoHoy(c);
 }
 function casosAbiertosDePedido(o) {
   return o ? casos.filter(c => c.estado !== "cerrado" && c.pedidoId != null && String(c.pedidoId) === String(o.id)) : [];
@@ -8336,11 +8356,13 @@ function casoTag(o) {
 }
 function ultimoSeguimiento(c) {
   const notas = c.notas || [];
-  return notas.length ? notas[notas.length - 1] : { fecha: c.creado, autor: c.creadoPor, texto: "Caso creado", sistema: true };
+  const reales = notas.filter(n => !n.sistema);
+  return reales.length ? reales[reales.length - 1] : { fecha: c.creado, autor: c.creadoPor, texto: "Caso creado", sistema: true };
 }
-function fechaHoraCaso(iso) {
+function fechaHoraCaso(iso, soloDia) {
   if (!iso) return "";
   const d = new Date(iso);
+  if (soloDia) return d.toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" });
   return d.toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" }) + " " + d.toLocaleTimeString("es-ES", { timeZone: "Europe/Madrid", hour: "2-digit", minute: "2-digit" });
 }
 function haceDias(iso) {
@@ -8375,14 +8397,19 @@ function selectAgenda() {
 function renderCasos() {
   const q = document.getElementById("casos-search").value.trim().toLowerCase();
   const resp = document.getElementById("casos-responsable-filter").value;
-  const verCerrados = document.getElementById("casos-ver-cerrados").checked;
-  const filas = casos.filter(c => (verCerrados ? c.estado === "cerrado" : c.estado !== "cerrado")
+  const vista = document.getElementById("casos-vista").value;
+  const verCerrados = vista === "cerrados";
+  const enVista = c => vista === "cerrados" ? c.estado === "cerrado"
+    : vista === "revisados" ? c.estado !== "cerrado" && revisadoHoy(c)
+    : vista === "abiertos" ? c.estado !== "cerrado"
+    : casoPorRevisar(c);
+  const filas = casos.filter(c => enVista(c)
     && (!resp || (c.responsable || "AMBOS") === resp)
     && (!q || [c.pedidoRef, c.cliente, c.telefono, c.motivo].join(" ").toLowerCase().includes(q)));
   filas.sort((a, b) => verCerrados
     ? String(b.fechaCierre || "").localeCompare(String(a.fechaCierre || ""))
     : String(ultimoSeguimiento(a).fecha || "").localeCompare(String(ultimoSeguimiento(b).fecha || "")));
-  document.getElementById("casos-count").textContent = filas.length + (verCerrados ? " casos cerrados" : " casos abiertos");
+  document.getElementById("casos-count").textContent = filas.length + ({ revisar: " casos para revisar hoy", revisados: " casos ya revisados hoy", abiertos: " casos abiertos", cerrados: " casos cerrados" })[vista];
   const tbody = document.querySelector("#casos-table tbody");
   tbody.innerHTML = filas.length ? filas.map(c => {
     const o = pedidoDeCaso(c);
@@ -8393,14 +8420,14 @@ function renderCasos() {
       '<td>' + escapeAttr(c.cliente || "") + '</td>' +
       '<td style="white-space:nowrap">' + escapeAttr(c.telefono || "") + '</td>' +
       '<td style="max-width:280px">' + escapeAttr(c.motivo || "") + '</td>' +
-      '<td><span' + (c.estado !== "cerrado" && h.n >= 3 ? ' class="caso-atrasado"' : "") + '>' + escapeAttr(fechaHoraCaso(u.fecha)) + ' (' + h.texto + ')</span>' +
-        '<div style="font-size:12.5px"><strong>' + escapeAttr(u.autor || "") + (u.autor ? ": " : "") + '</strong>' + escapeAttr(u.texto || "") + '</div></td>' +
       '<td>' + escapeAttr(RESPONSABLE_LABELS[c.responsable] || "Los dos") + '</td>' +
+      '<td style="white-space:nowrap"><strong>' + escapeAttr(RESPONSABLE_LABELS[u.autor] || u.autor || "—") + '</strong><br><span' + (c.estado !== "cerrado" && h.n >= 3 ? ' class="caso-atrasado"' : "") + '>' + escapeAttr(fechaHoraCaso(u.fecha, u.soloDia)) + ' (' + h.texto + ')</span>' + (revisadoHoy(c) && c.estado !== "cerrado" ? '<br><span class="badge" style="background:#dcfce7;color:#166534">✔ Revisado hoy</span>' : "") + '</td>' +
+      '<td style="font-size:12.5px">' + escapeAttr(u.texto || "") + '</td>' +
       '<td><button type="button" class="secondary" data-caso-abrir="' + escapeAttr(c.id) + '">Abrir</button></td>' +
       '</tr>';
-  }).join("") : '<tr><td colspan="7" style="color:var(--muted)">' + (verCerrados ? "No hay casos cerrados." : "No hay casos abiertos.") + '</td></tr>';
+  }).join("") : '<tr><td colspan="8" style="color:var(--muted)">' + (verCerrados ? "No hay casos cerrados." : vista === "revisar" ? "Nada pendiente de revisar hoy." : "No hay casos.") + '</td></tr>';
 }
-["casos-search", "casos-responsable-filter", "casos-ver-cerrados"].forEach(id => {
+["casos-search", "casos-responsable-filter", "casos-vista"].forEach(id => {
   document.getElementById(id).addEventListener(id === "casos-search" ? "input" : "change", renderCasos);
 });
 
@@ -8415,12 +8442,15 @@ function abrirModalCaso(caso, pedidoInicial) {
   document.getElementById("caso-motivo").value = caso ? caso.motivo || "" : "";
   document.getElementById("caso-responsable").value = caso ? caso.responsable || "AMBOS" : "AMBOS";
   document.getElementById("caso-nota").value = "";
+  document.getElementById("caso-gestion-autor").value = USERS.includes(currentUser) ? currentUser : "JENNIFER";
+  document.getElementById("caso-gestion-fecha").value = hoyMadrid();
+  document.getElementById("caso-gestion-fecha").max = hoyMadrid();
   document.getElementById("caso-pedido-info").innerHTML = resumenPedidoCaso(o);
   const notas = caso ? caso.notas || [] : [];
   const hist = document.getElementById("caso-historial");
   hist.style.display = caso ? "" : "none";
   hist.innerHTML = '<div style="font-weight:600;margin-bottom:4px">Historial</div>' + (notas.length ? [...notas].reverse().map(n =>
-    '<div class="caso-historial-item"><div class="meta">' + escapeAttr(fechaHoraCaso(n.fecha)) + (n.autor ? " · " + escapeAttr(n.autor) : "") + '</div>' + (n.sistema ? "<em>" + escapeAttr(n.texto) + "</em>" : escapeAttr(n.texto)) + '</div>').join("") : '<div style="color:var(--muted)">Sin seguimientos todavía.</div>');
+    '<div class="caso-historial-item"><div class="meta">' + escapeAttr(fechaHoraCaso(n.fecha, n.soloDia)) + (n.autor ? " · " + escapeAttr(n.autor) : "") + (n.apuntadoPor ? " (apuntado por " + escapeAttr(n.apuntadoPor) + ")" : "") + '</div>' + (n.sistema ? "<em>" + escapeAttr(n.texto) + "</em>" : escapeAttr(n.texto)) + '</div>').join("") : '<div style="color:var(--muted)">Sin seguimientos todavía.</div>');
   const cerrarBtn = document.getElementById("caso-cerrar-btn");
   cerrarBtn.style.display = caso ? "" : "none";
   cerrarBtn.textContent = caso && caso.estado === "cerrado" ? "Reabrir caso" : "Cerrar caso";
@@ -8448,6 +8478,8 @@ async function guardarCaso(extra) {
     motivo: document.getElementById("caso-motivo").value.trim(),
     responsable: document.getElementById("caso-responsable").value,
     nota: document.getElementById("caso-nota").value,
+    notaAutor: document.getElementById("caso-gestion-autor").value,
+    notaFecha: document.getElementById("caso-gestion-fecha").value,
     usuario: currentUser,
     ...extra,
   };

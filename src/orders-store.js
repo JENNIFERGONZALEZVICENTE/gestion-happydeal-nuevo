@@ -1218,7 +1218,7 @@ export class OrdersStore {
       return Response.json((await this.state.storage.get("casos")) || []);
     }
     if (url.pathname === "/casos/guardar" && request.method === "POST") {
-      const { id, pedidoId, pedidoRef, cliente, telefono, motivo, responsable, estado, nota, usuario } = await request.json();
+      const { id, pedidoId, pedidoRef, cliente, telefono, motivo, responsable, estado, nota, notaAutor, notaFecha, usuario } = await request.json();
       const casos = (await this.state.storage.get("casos")) || [];
       const ahora = new Date().toISOString();
       let caso = id ? casos.find((c) => c.id === id) : null;
@@ -1238,7 +1238,15 @@ export class OrdersStore {
         caso.fechaCierre = caso.estado === "cerrado" ? ahora : null;
         caso.notas.push({ fecha: ahora, autor: usuario || null, texto: caso.estado === "cerrado" ? "Caso cerrado" : "Caso reabierto", sistema: true });
       }
-      if (String(nota || "").trim()) caso.notas.push({ fecha: ahora, autor: usuario || null, texto: String(nota).trim() });
+      // Quién hizo la gestión y qué día (Jennifer, 2026-10-05): por defecto
+      // quien la apunta y ahora; se puede poner otra persona u otro día
+      // (ej. Sergio llamó ayer y lo apunta Jennifer hoy).
+      if (String(nota || "").trim()) {
+        const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+        const otroDia = /^\d{4}-\d{2}-\d{2}$/.test(notaFecha || "") && notaFecha !== hoy;
+        caso.notas.push({ fecha: otroDia ? notaFecha + "T12:00:00.000Z" : ahora, soloDia: otroDia || undefined, autor: notaAutor || usuario || null, apuntadoPor: notaAutor && notaAutor !== usuario ? usuario : undefined, texto: String(nota).trim() });
+        caso.notas.sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
+      }
       caso.actualizado = ahora;
       await this.state.storage.put("casos", casos);
       this.broadcast();
