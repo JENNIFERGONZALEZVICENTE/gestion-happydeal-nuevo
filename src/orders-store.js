@@ -1218,7 +1218,7 @@ export class OrdersStore {
       return Response.json((await this.state.storage.get("casos")) || []);
     }
     if (url.pathname === "/casos/guardar" && request.method === "POST") {
-      const { id, pedidoId, pedidoRef, cliente, telefono, motivo, responsable, estado, nota, notaAutor, notaFecha, usuario } = await request.json();
+      const { id, pedidoId, pedidoRef, cliente, telefono, motivo, responsable, estado, urgente, nota, notaAutor, notaFecha, usuario } = await request.json();
       const casos = (await this.state.storage.get("casos")) || [];
       const ahora = new Date().toISOString();
       let caso = id ? casos.find((c) => c.id === id) : null;
@@ -1241,6 +1241,15 @@ export class OrdersStore {
       // Quién hizo la gestión y qué día (Jennifer, 2026-10-05): por defecto
       // quien la apunta y ahora; se puede poner otra persona u otro día
       // (ej. Sergio llamó ayer y lo apunta Jennifer hoy).
+      // URGENTE — dar respuesta hoy (Jennifer, 2026-10-05): sigue saliendo
+      // para revisar aunque ya se haya gestionado hoy, hasta quitarlo o
+      // cerrar el caso.
+      if (urgente !== undefined && !!urgente !== !!caso.urgente) {
+        caso.urgente = !!urgente;
+        caso.urgenteDesde = caso.urgente ? ahora : null;
+        caso.notas.push({ fecha: ahora, autor: usuario || null, texto: caso.urgente ? "Marcado URGENTE — dar respuesta hoy" : "Quitada la marca de urgente", sistema: true });
+      }
+      if (caso.estado === "cerrado" && caso.urgente) { caso.urgente = false; caso.urgenteDesde = null; }
       if (String(nota || "").trim()) {
         const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
         const otroDia = /^\d{4}-\d{2}-\d{2}$/.test(notaFecha || "") && notaFecha !== hoy;

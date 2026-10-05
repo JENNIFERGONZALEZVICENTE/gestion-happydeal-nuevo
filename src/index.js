@@ -2549,6 +2549,7 @@ function renderPage() {
     <label class="caso-campo">Cliente <input type="text" id="caso-cliente" /></label>
     <label class="caso-campo">Teléfono <input type="text" id="caso-telefono" /></label>
     <label class="caso-campo">Motivo <textarea id="caso-motivo" rows="2"></textarea></label>
+    <label class="caso-campo" style="color:#b91c1c;font-weight:700"><input type="checkbox" id="caso-urgente" style="display:inline-block;width:auto;margin-right:6px" />🔴 URGENTE — dar respuesta hoy</label>
     <label class="caso-campo">Responsable
       <select id="caso-responsable"><option value="AMBOS">Los dos</option><option value="JENNIFER">Jennifer</option><option value="SERGIO">Sergio</option></select>
     </label>
@@ -8335,6 +8336,7 @@ async function loadCasos() {
   const badge = document.getElementById("casos-badge");
   badge.style.display = abiertos ? "" : "none";
   badge.textContent = abiertos;
+  badge.style.background = casos.some(c => c.urgente && c.estado !== "cerrado") ? "#dc2626" : "#0d9488";
   if (document.getElementById("view-casos").style.display !== "none") renderCasos();
 }
 // Revisado hoy (Jennifer, 2026-10-05): "si ya se ha revisado un día, que
@@ -8344,7 +8346,7 @@ function revisadoHoy(c) {
   return !u.sistema && !!u.fecha && haceDias(u.fecha).n <= 0;
 }
 function casoPorRevisar(c) {
-  return c.estado !== "cerrado" && !revisadoHoy(c);
+  return c.estado !== "cerrado" && (c.urgente || !revisadoHoy(c));
 }
 function casosAbiertosDePedido(o) {
   return o ? casos.filter(c => c.estado !== "cerrado" && c.pedidoId != null && String(c.pedidoId) === String(o.id)) : [];
@@ -8352,7 +8354,8 @@ function casosAbiertosDePedido(o) {
 function casoTag(o) {
   const lista = casosAbiertosDePedido(o);
   if (!lista.length) return "";
-  return '<span class="caso-tag" data-caso-abrir="' + escapeAttr(lista[0].id) + '" title="' + escapeAttr(lista.map(c => c.motivo || "").join(" / ")) + '">📒 Agenda</span>';
+  const urg = lista.some(c => c.urgente);
+  return '<span class="caso-tag" data-caso-abrir="' + escapeAttr(lista[0].id) + '" title="' + escapeAttr(lista.map(c => c.motivo || "").join(" / ")) + '"' + (urg ? ' style="background:#dc2626;color:#fff"' : "") + '>📒 Agenda' + (urg ? " URGENTE" : "") + '</span>';
 }
 function ultimoSeguimiento(c) {
   const notas = c.notas || [];
@@ -8408,15 +8411,15 @@ function renderCasos() {
     && (!q || [c.pedidoRef, c.cliente, c.telefono, c.motivo].join(" ").toLowerCase().includes(q)));
   filas.sort((a, b) => verCerrados
     ? String(b.fechaCierre || "").localeCompare(String(a.fechaCierre || ""))
-    : String(ultimoSeguimiento(a).fecha || "").localeCompare(String(ultimoSeguimiento(b).fecha || "")));
+    : (!!b.urgente - !!a.urgente) || String(ultimoSeguimiento(a).fecha || "").localeCompare(String(ultimoSeguimiento(b).fecha || "")));
   document.getElementById("casos-count").textContent = filas.length + ({ revisar: " casos para revisar hoy", revisados: " casos ya revisados hoy", abiertos: " casos abiertos", cerrados: " casos cerrados" })[vista];
   const tbody = document.querySelector("#casos-table tbody");
   tbody.innerHTML = filas.length ? filas.map(c => {
     const o = pedidoDeCaso(c);
     const u = ultimoSeguimiento(c);
     const h = haceDias(u.fecha);
-    return '<tr>' +
-      '<td><strong>' + escapeAttr(c.pedidoRef || "—") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:320px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
+    return '<tr' + (c.urgente ? ' style="background:rgba(254,226,226,.6)"' : "") + '>' +
+      '<td>' + (c.urgente ? '<span class="badge" style="background:#dc2626;color:#fff">🔴 URGENTE — responder hoy</span><br>' : "") + '<strong>' + escapeAttr(c.pedidoRef || "—") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:320px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
       '<td>' + escapeAttr(c.cliente || "") + '</td>' +
       '<td style="white-space:nowrap">' + escapeAttr(c.telefono || "") + '</td>' +
       '<td style="max-width:280px">' + escapeAttr(c.motivo || "") + '</td>' +
@@ -8454,6 +8457,7 @@ function abrirModalCaso(caso, pedidoInicial) {
   const cerrarBtn = document.getElementById("caso-cerrar-btn");
   cerrarBtn.style.display = caso ? "" : "none";
   cerrarBtn.textContent = caso && caso.estado === "cerrado" ? "Reabrir caso" : "Cerrar caso";
+  document.getElementById("caso-urgente").checked = !!(caso && caso.urgente);
   document.getElementById("caso-modal-overlay").classList.add("open");
 }
 document.getElementById("caso-pedido").addEventListener("change", () => {
@@ -8477,6 +8481,7 @@ async function guardarCaso(extra) {
     telefono: document.getElementById("caso-telefono").value.trim(),
     motivo: document.getElementById("caso-motivo").value.trim(),
     responsable: document.getElementById("caso-responsable").value,
+    urgente: document.getElementById("caso-urgente").checked,
     nota: document.getElementById("caso-nota").value,
     notaAutor: document.getElementById("caso-gestion-autor").value,
     notaFecha: document.getElementById("caso-gestion-fecha").value,
