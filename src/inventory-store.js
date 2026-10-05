@@ -2222,6 +2222,35 @@ export class InventoryStore {
       return this.crearPendienteManual(await request.json());
     }
 
+    // Corregir modelo/medida de un pendiente mal emparejado (Jennifer,
+    // 2026-10-05: Bambú Deluxe entraba como "LIQUIDACIÓN" y 140X190 como
+    // 40X190, por el código COLBAMDL1 de la ficha de liquidación). Conserva
+    // el resto del pendiente (pedido a fábrica, recibido...) y pasa su
+    // "vendido pendiente" de la fila de stock vieja a la nueva.
+    if (url.pathname === "/admin/corregir-modelo-pendiente" && method === "POST") {
+      const { id, stockModel, talla } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const b = backorders.find((x) => x.id === id);
+      if (!b || !stockModel || !talla) return Response.json({ ok: false, error: "Pendiente no encontrado o faltan stockModel/talla." }, { status: 400 });
+      const oldKey = stockKey(b.stockModel, b.talla);
+      const newKey = stockKey(stockModel, talla);
+      const nuevoId = b.id.split(b.stockModel + "|" + b.talla).join(newKey);
+      if (nuevoId !== b.id && backorders.some((x) => x.id === nuevoId)) return Response.json({ ok: false, error: "Ya existe un pendiente " + nuevoId }, { status: 409 });
+      const stock = await this.load("stock", {});
+      if (b.estado === "pendiente" && !b.paraStock && oldKey !== newKey) {
+        if (stock[oldKey]) stock[oldKey].vendidoPendiente = Math.max(0, (stock[oldKey].vendidoPendiente || 0) - b.cantidad);
+        const row = stock[newKey] || { stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
+        row.vendidoPendiente = (row.vendidoPendiente || 0) + b.cantidad;
+        stock[newKey] = row;
+        await this.state.storage.put("stock", stock);
+      }
+      b.id = nuevoId;
+      b.stockModel = stockModel;
+      b.talla = talla;
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, entry: b });
+    }
+
     // Congelado de stock (Jennifer, 2026-09-23) — ver comentario en
     // applyStockUsage. No expuesto en UI a propósito, solo por API,
     // Jennifer avisa cuándo activar/desactivar.

@@ -9624,6 +9624,9 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/inventario/admin/crear-pendiente-manual" && request.method === "POST") {
       return proxyInventory(env, "/admin/crear-pendiente-manual", request);
     }
+    if (url.pathname === "/api/inventario/admin/corregir-modelo-pendiente" && request.method === "POST") {
+      return proxyInventory(env, "/admin/corregir-modelo-pendiente", request);
+    }
 
     if (url.pathname === "/api/inventario/admin/renombrar-stockmodel-tarifa" && request.method === "POST") {
       return proxyInventory(env, "/admin/renombrar-stockmodel-tarifa", request);
