@@ -1495,6 +1495,7 @@ function renderPage() {
   .tareas-dia summary { cursor: pointer; padding: 10px 0; font-size: 14px; }
   .tareas-dia[open] summary { border-bottom: 1px solid var(--border, #e5e7eb); margin-bottom: 6px; }
   .tareas-dia .table-wrap { margin-bottom: 10px; }
+  .dir-edit-btn { padding: 0 4px; font-size: 12px; background: transparent; border: 1px solid var(--border, #e5e7eb); border-radius: 4px; cursor: pointer; }
   .caso-atrasado { color: #b91c1c; font-weight: 600; }
   .modal-box {
     background: var(--panel, #fff);
@@ -2616,6 +2617,29 @@ function renderPage() {
   </div>
 </div>
 
+<div class="modal-overlay" id="dir-modal-overlay">
+  <div class="modal-box" style="width:min(560px,94vw)">
+    <h3 id="dir-modal-titulo">Cambiar dirección de entrega</h3>
+    <div id="dir-modal-aviso" style="display:none;background:#fef3c7;border:1px solid #fcd34d;color:#92400e;border-radius:8px;padding:8px 10px;font-size:12.5px;margin-bottom:8px"></div>
+    <label class="caso-campo">Dirección (calle, número, piso, puerta, código de portal...) <textarea id="dir-calle" rows="2"></textarea></label>
+    <div style="display:flex;gap:12px">
+      <label class="caso-campo" style="flex:1">Código postal <input type="text" id="dir-cp" /></label>
+      <label class="caso-campo" style="flex:2">Población <input type="text" id="dir-ciudad" /></label>
+    </div>
+    <div style="display:flex;gap:12px">
+      <label class="caso-campo" style="flex:1">Provincia <input type="text" id="dir-provincia" /></label>
+      <label class="caso-campo" style="flex:1">Teléfono <input type="text" id="dir-telefono" /></label>
+    </div>
+    <label class="caso-campo">Motivo del cambio (opcional) <input type="text" id="dir-motivo" placeholder="Ej.: faltaba el piso / el cliente cambia la dirección" /></label>
+    <div id="dir-original" class="caso-pedido-info" style="margin-top:8px"></div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="dir-restaurar-btn" style="margin-right:auto">Volver a la dirección original</button>
+      <button type="button" class="secondary" id="dir-modal-cancel">Cancelar</button>
+      <button type="button" id="dir-modal-ok">Guardar dirección</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="retener-modal-overlay">
   <div class="modal-box">
     <h3>Retener hasta que el cliente lo pida</h3>
@@ -3205,7 +3229,7 @@ function render(orders) {
       <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}\${casoTag(o)}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
-      <td>\${o.address}</td>
+      <td>\${o.address}\${direccionButton(o)}</td>
       <td>\${o.phone}</td>
       <td>\${o.product}\${lineasCanceladasHtml(o)}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
       <td class="services">\${o.services}</td>
@@ -5954,7 +5978,7 @@ function furnitureRowCells(o) {
       }).join("")
     : "<em>Todo en stock</em>";
   return \`
-    <td>\${refLabel(o)}\${grupoEnvioTag(o)}\${valdemoroTag(o)}\${casoTag(o)}\${soloFaltanAlmohadas(items.filter(b => !(b.tipo === "colchon" && b.tipoEnvio === "FPK"))) ? '<div class="todo-junto-tag" style="margin-left:0">Solo faltan las almohadas</div>' : ""}</td>
+    <td>\${refLabel(o)}\${grupoEnvioTag(o)}\${valdemoroTag(o)}\${casoTag(o)}\${direccionButton(o)}\${soloFaltanAlmohadas(items.filter(b => !(b.tipo === "colchon" && b.tipoEnvio === "FPK"))) ? '<div class="todo-junto-tag" style="margin-left:0">Solo faltan las almohadas</div>' : ""}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name}</td>
     <td>\${productoGrupo}</td>
@@ -7100,7 +7124,7 @@ function renderMarketplace(platformId) {
       <td>\${o.orderDate || ""}</td>
       <td>\${plazoEnvioCell(o)}</td>
       <td>\${o.name || ""}</td>
-      <td>\${o.address || ""}</td>
+      <td>\${o.address || ""}\${direccionButton(o)}</td>
       <td>\${o.postalCode || ""}</td>
       <td>\${o.city || ""}</td>
       <td>\${o.province || ""}</td>
@@ -7540,7 +7564,7 @@ function seurOrderRowCells(o, refSuffix) {
   return \`
     <td>\${refLabel(o)}\${refSuffix || ""}\${valdemoroTag(o)}</td>
     <td>\${o.name}</td>
-    <td>\${o.furnitureAddress || o.address || ""}</td>
+    <td>\${o.furnitureAddress || o.address || ""}\${direccionButton(o)}</td>
     <td>\${o.phone}</td>
     <td>\${o.product}</td>
   \`;
@@ -7852,7 +7876,7 @@ function seurBackorderRowCells(b) {
   return \`
     <td>\${refLabel(b)}\${valdemoroTag(o)}</td>
     <td>\${o.name || ""}</td>
-    <td>\${o.furnitureAddress || o.address || ""}</td>
+    <td>\${o.furnitureAddress || o.address || ""}\${direccionButton(o)}</td>
     <td>\${o.phone || ""}</td>
     <td>\${b.cantidad}x \${b.stockModel} (\${b.talla})\${b.piezaTexto ? " — " + escapeAttr(b.piezaTexto) : ""}</td>
   \`;
@@ -8777,6 +8801,77 @@ document.addEventListener("click", (e) => {
   if (t) abrirModalTarea(t);
 }, true);
 loadTareas().then(() => { if (tareas.length && document.getElementById("view-shopify").style.display !== "none" && allOrders.length) applyFilter(); });
+
+// Cambiar la dirección de entrega (Jennifer, 2026-10-05): al cliente se le
+// olvidó un dato (piso, puerta...) o cambia de dirección. Se guarda en la
+// app (no en Shopify ni en el marketplace) y se mantiene aunque el pedido se
+// vuelva a sincronizar; los ficheros de Furniture/SEUR usan ya la nueva.
+let dirEditando = null;
+function direccionButton(o) {
+  if (!o || o.id == null) return "";
+  const m = o.direccionManual;
+  return ' <button type="button" class="dir-edit-btn" data-dir-editar="' + escapeAttr(o.id) + '" title="Cambiar dirección de entrega">✏️</button>' +
+    (m ? '<br><span class="caso-tag" style="background:#dbeafe;color:#1e40af;margin-left:0" title="Cambiada por ' + escapeAttr(m.usuario || "") + " el " + escapeAttr(fechaHoraCaso(m.fecha)) + (m.motivo ? " — " + escapeAttr(m.motivo) : "") + '">📍 Dirección cambiada</span>' : "");
+}
+function textoDireccion(d) {
+  return d ? [d.streetAddress, [d.postalCode, d.city].filter(Boolean).join(" "), d.province, d.phone ? "Tel. " + d.phone : ""].filter(Boolean).join(", ") : "";
+}
+function abrirModalDireccion(o) {
+  dirEditando = o;
+  document.getElementById("dir-modal-titulo").textContent = "Cambiar dirección de entrega · " + refLabel(o) + (o.name ? " (" + o.name + ")" : "");
+  document.getElementById("dir-calle").value = o.streetAddress || o.furnitureAddress || o.address || "";
+  document.getElementById("dir-cp").value = o.postalCode || "";
+  document.getElementById("dir-ciudad").value = o.city || "";
+  document.getElementById("dir-provincia").value = o.province || "";
+  document.getElementById("dir-telefono").value = o.phone || "";
+  document.getElementById("dir-motivo").value = o.direccionManual ? o.direccionManual.motivo || "" : "";
+  const m = o.direccionManual;
+  document.getElementById("dir-original").innerHTML = m
+    ? "Dirección original del pedido: " + escapeAttr(textoDireccion(o.direccionOriginal)) + "<br>Cambiada por " + escapeAttr(m.usuario || "") + " el " + escapeAttr(fechaHoraCaso(m.fecha))
+    : "";
+  document.getElementById("dir-restaurar-btn").style.display = m ? "" : "none";
+  const aviso = document.getElementById("dir-modal-aviso");
+  const enCarga = o.cargaId || backorders.some(b => b.orderId === o.id && b.cargaId);
+  aviso.style.display = enCarga || o.shippingStatus === "fulfilled" ? "" : "none";
+  aviso.textContent = o.shippingStatus === "fulfilled"
+    ? "Este pedido ya figura como enviado: el cambio no llega a la agencia por sí solo, avísales."
+    : "Este pedido ya está en una carga: si el fichero ya se mandó a la agencia, hay que avisarles del cambio o volver a descargarlo.";
+  document.getElementById("dir-modal-overlay").classList.add("open");
+}
+async function guardarDireccion(direccion) {
+  const res = await fetch("/api/pedidos/direccion", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: dirEditando.id, direccion, usuario: currentUser }) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido guardar la dirección."); return; }
+  Object.assign(dirEditando, r.order);
+  if (!r.order.direccionManual) { delete dirEditando.direccionManual; delete dirEditando.direccionOriginal; }
+  document.getElementById("dir-modal-overlay").classList.remove("open");
+  mostrarAvisoBreve(direccion ? "Dirección de " + refLabel(dirEditando) + " cambiada." : "Dirección original de " + refLabel(dirEditando) + " recuperada.");
+  loadOrders();
+}
+document.getElementById("dir-modal-ok").addEventListener("click", () => {
+  const d = {
+    streetAddress: document.getElementById("dir-calle").value.trim(),
+    postalCode: document.getElementById("dir-cp").value.trim(),
+    city: document.getElementById("dir-ciudad").value.trim(),
+    province: document.getElementById("dir-provincia").value.trim(),
+    phone: document.getElementById("dir-telefono").value.trim(),
+    motivo: document.getElementById("dir-motivo").value.trim(),
+  };
+  if (!d.streetAddress || !d.postalCode || !d.city) { alert("Pon al menos la dirección, el código postal y la población."); return; }
+  guardarDireccion(d);
+});
+document.getElementById("dir-restaurar-btn").addEventListener("click", () => {
+  if (confirm("¿Volver a la dirección original del pedido?")) guardarDireccion(null);
+});
+document.getElementById("dir-modal-cancel").addEventListener("click", () => document.getElementById("dir-modal-overlay").classList.remove("open"));
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-dir-editar]");
+  if (!el) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const o = allOrders.find(x => String(x.id) === el.dataset.dirEditar);
+  if (o) abrirModalDireccion(o);
+}, true);
 
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -10761,6 +10856,11 @@ async function handleFetch(request, env) {
     }
 
     // Agenda de casos (Jennifer, 2026-10-05).
+    if (url.pathname === "/api/pedidos/direccion" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/direccion", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/tareas/recordatorio" && request.method === "POST") {
       return Response.json(await enviarRecordatorioTareas(env, { forzar: true }));
     }

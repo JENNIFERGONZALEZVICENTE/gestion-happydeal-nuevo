@@ -35,7 +35,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -197,6 +197,18 @@ async function getOrCreateCargaByFecha(storage, tipo, dateObj) {
   return carga;
 }
 
+// Dirección cambiada a mano (Jennifer, 2026-10-05): manda sobre la que
+// traiga Shopify/el marketplace en cada sincronización.
+const CAMPOS_DIRECCION = ["streetAddress", "postalCode", "city", "province", "phone"];
+function aplicarDireccionManual(o) {
+  const d = o.direccionManual;
+  if (!d) return o;
+  for (const c of CAMPOS_DIRECCION) if (d[c] !== undefined) o[c] = d[c];
+  o.furnitureAddress = d.streetAddress;
+  o.address = [d.streetAddress, d.postalCode, d.city, d.province].filter(Boolean).join(", ");
+  return o;
+}
+
 function mergeCustomFields(existing, incoming) {
   const merged = existing ? { ...incoming } : incoming;
   if (existing) {
@@ -215,6 +227,11 @@ function mergeCustomFields(existing, incoming) {
   // preservado — no es una decisión editable a mano, es un hecho real de
   // Shopify (Jennifer, 2026-09-16, caso BEZEN12204).
   if (incoming.shopifyCancelado) merged.cancelado = true;
+  if (existing && existing.direccionManual) {
+    // La original pasa a ser la que trae ahora la plataforma.
+    merged.direccionOriginal = { streetAddress: incoming.streetAddress, postalCode: incoming.postalCode, city: incoming.city, province: incoming.province, phone: incoming.phone, furnitureAddress: incoming.furnitureAddress, address: incoming.address };
+    aplicarDireccionManual(merged);
+  }
   return merged;
 }
 
@@ -705,6 +722,32 @@ export class OrdersStore {
       await this.state.storage.put("orders", orders);
       this.broadcast();
       return Response.json({ ok: true, hechos });
+    }
+
+    // { id, direccion: {streetAddress, postalCode, city, province, phone, motivo} | null, usuario }
+    // null vuelve a la dirección original.
+    if (url.pathname === "/orders/direccion" && request.method === "POST") {
+      const { id, direccion, usuario } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const o = orders[id];
+      if (!o) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      if (!o.direccionOriginal) {
+        o.direccionOriginal = { streetAddress: o.streetAddress, postalCode: o.postalCode, city: o.city, province: o.province, phone: o.phone, furnitureAddress: o.furnitureAddress, address: o.address };
+      }
+      if (direccion) {
+        const d = {};
+        for (const c of CAMPOS_DIRECCION) d[c] = String(direccion[c] || "").trim();
+        o.direccionManual = { ...d, motivo: String(direccion.motivo || "").trim(), usuario: usuario || null, fecha: new Date().toISOString() };
+        aplicarDireccionManual(o);
+      } else {
+        Object.assign(o, o.direccionOriginal);
+        delete o.direccionManual;
+        delete o.direccionOriginal;
+      }
+      orders[id] = o;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, order: o });
     }
 
     if (url.pathname === "/orders/meta" && request.method === "POST") {
