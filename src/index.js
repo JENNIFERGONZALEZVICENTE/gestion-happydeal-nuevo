@@ -1815,11 +1815,6 @@ function renderPage() {
 </div>
 <nav class="sidebar">
   <div class="brand">Gestión HappyDeal</div>
-  <button class="section-title" id="pedidos-toggle">
-    <span>Pedidos</span>
-    <span class="chevron">▶</span>
-  </button>
-  <ul id="pedidos-list">${navItems}</ul>
   <button class="section-title" id="agenda-toggle">
     <span>Agenda de casos</span>
     <span class="chevron">▶</span>
@@ -1827,6 +1822,11 @@ function renderPage() {
   <ul id="agenda-list">
     <li><a href="#" class="nav-link" data-agenda="casos">Casos abiertos <span id="casos-badge" class="abiertos-badge" style="display:none;background:#0d9488"></span></a></li>
   </ul>
+  <button class="section-title" id="pedidos-toggle">
+    <span>Pedidos</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="pedidos-list">${navItems}</ul>
   <button class="section-title" id="inventario-toggle">
     <span>Inventario</span>
     <span class="chevron">▶</span>
