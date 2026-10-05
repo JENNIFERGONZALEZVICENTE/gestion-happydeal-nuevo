@@ -1321,7 +1321,7 @@ export class OrdersStore {
     // Notas y "Reclamado a SEUR" por línea enviada (Jennifer, 2026-10-01),
     // guardado en el pedido por referencia de SEUR.
     if (url.pathname === "/orders/envio-seur-info" && request.method === "POST") {
-      const { orderId, ref, nota, reclamado, archivado, correo } = await request.json();
+      const { orderId, ref, nota, reclamado, archivado, correo, manual } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const order = orders[orderId];
       if (!order || !ref) return new Response("not found", { status: 404 });
@@ -1341,6 +1341,12 @@ export class OrdersStore {
       // Conversación por email con SEUR (Jennifer, 2026-10-02): se mezcla
       // con lo que ya hubiera (threadIds, destino, asunto, mensajes, vistoHasta).
       if (correo !== undefined) e.correo = correo ? { ...(e.correo || {}), ...correo } : null;
+      // Añadido a mano a Envíos SEUR (Jennifer, 2026-10-05, 002-26208L28658-A:
+      // envío anterior a las cargas del sistema que hay que reclamar).
+      if (manual !== undefined) {
+        e.manual = !!manual;
+        e.fechaManual = manual ? new Date().toISOString() : null;
+      }
       await this.state.storage.put("orders", orders);
       this.broadcast();
       return Response.json({ ok: true, info: e });

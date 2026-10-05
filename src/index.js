@@ -2300,6 +2300,7 @@ function renderPage() {
     <span id="tracking-seur-upload-status" class="inventario-count" style="padding:0"></span>
   </div>
   <div class="toolbar">
+    <button type="button" id="envios-seur-anadir-btn" title="Meter en esta lista un envío por SEUR que no salió en ninguna carga del sistema (ej. para reclamarlo)">+ Añadir pedido</button>
     <input id="envios-seur-search" type="text" placeholder="Buscar por referencia, nombre u observaciones..." style="min-width:280px" />
     <select id="envios-seur-estado"><option value="">Todos los estados de SEUR</option></select>
     <select id="envios-seur-reclamado">
@@ -7407,6 +7408,21 @@ try {
 document.getElementById("envios-seur-ocultar-archivados").addEventListener("change", renderEnviosSeur);
 document.getElementById("envios-seur-solo-avisos").addEventListener("change", renderEnviosSeur);
 document.getElementById("envios-seur-solo-punto").addEventListener("change", renderEnviosSeur);
+document.getElementById("envios-seur-anadir-btn").addEventListener("click", async () => {
+  const txt = prompt("Referencia del pedido que quieres añadir a Envíos SEUR (ej. 002-26208L28658-A o BEZEN12276):");
+  if (!txt) return;
+  const o = buscarPedidoCaso(txt);
+  if (!o) { alert("No encuentro el pedido " + txt.trim() + "."); return; }
+  const ref = refLabel(o);
+  if (enviosSeur.some(e => String(e.orderId) === String(o.id) && e.ref === ref)) { alert(ref + " ya está en la lista."); return; }
+  const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: o.id, ref, manual: true }) });
+  if (!res.ok) { alert("No se ha podido añadir."); return; }
+  document.getElementById("envios-seur-ocultar-archivados").checked = true;
+  await loadCasosRevisarSeur(true);
+  document.getElementById("envios-seur-search").value = ref;
+  renderEnviosSeur();
+  mostrarAvisoBreve(ref + " añadido a Envíos SEUR.");
+});
 // Aviso en el menú "Envíos SEUR" con los envíos por reclamar, visible
 // desde cualquier pantalla (se calcula al abrir la app y cada hora).
 function actualizarAvisoMenuSeur(n, respuestas, enPunto) {
@@ -10595,7 +10611,7 @@ async function handleFetch(request, env) {
       const yaEnLista = new Set(lista.map((e) => String(e.orderId) + "|" + e.ref));
       for (const o of datos.orders) {
         for (const [ref, info] of Object.entries(o.enviosSeurInfo || {})) {
-          if (!info.correo || !(info.correo.mensajes || []).length || yaEnLista.has(String(o.id) + "|" + ref)) continue;
+          if ((!info.manual && (!info.correo || !(info.correo.mensajes || []).length)) || yaEnLista.has(String(o.id) + "|" + ref)) continue;
           const t = estadoSeurDeLinea(o, ref, 1);
           const m = t ? /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(t.fechaCreacion || "").trim()) : null;
           lista.push({
