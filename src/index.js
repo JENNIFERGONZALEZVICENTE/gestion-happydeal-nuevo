@@ -1821,6 +1821,7 @@ function renderPage() {
   </button>
   <ul id="agenda-list">
     <li><a href="#" class="nav-link" data-agenda="casos">Casos abiertos <span id="casos-badge" class="abiertos-badge" style="display:none;background:#0d9488"></span></a></li>
+    <li><a href="#" class="nav-link" data-agenda="tareas">Tareas <span id="tareas-badge" class="abiertos-badge" style="display:none;background:#0d9488"></span></a></li>
   </ul>
   <button class="section-title" id="pedidos-toggle">
     <span>Pedidos</span>
@@ -2389,6 +2390,30 @@ function renderPage() {
   </div>
 </div>
 
+<div id="view-tareas" style="display:none">
+  <div class="toolbar">
+    <button type="button" id="tarea-nueva-btn">+ Nueva tarea</button>
+    <input id="tareas-search" type="text" placeholder="Buscar por tarea o pedido..." style="min-width:240px" />
+    <select id="tareas-para-filter">
+      <option value="">Para todos</option>
+      <option value="JENNIFER">Jennifer</option>
+      <option value="SERGIO">Sergio</option>
+    </select>
+    <select id="tareas-vista">
+      <option value="pendientes">Pendientes</option>
+      <option value="hechas">Hechas</option>
+    </select>
+    <button type="button" class="secondary" id="tareas-email-prueba-btn" title="Manda ahora el email de recordatorio con las tareas de hoy">✉ Enviarme el recordatorio ahora</button>
+  </div>
+  <div id="tareas-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="tareas-table">
+      <thead><tr><th style="width:40px">Hecha</th><th>Fecha</th><th>Qué hay que hacer</th><th>Pedido</th><th>Para</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
 <div id="view-plazos-marketplace" style="display:none">
   <div id="plazos-marketplace-lista" class="inventario-count">Cargando...</div>
 </div>
@@ -2565,6 +2590,28 @@ function renderPage() {
       <button type="button" class="secondary" id="caso-cerrar-btn" style="margin-right:auto">Cerrar caso</button>
       <button type="button" class="secondary" id="caso-modal-cancel">Cancelar</button>
       <button type="button" id="caso-modal-ok">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="tarea-modal-overlay">
+  <div class="modal-box" style="width:min(560px,94vw)">
+    <h3 id="tarea-modal-titulo">Nueva tarea</h3>
+    <label class="caso-campo">Qué hay que hacer <textarea id="tarea-texto" rows="3" placeholder="Ej.: darle al cliente el número de seguimiento"></textarea></label>
+    <div style="display:flex;gap:12px">
+      <label class="caso-campo" style="flex:1">Fecha <input type="date" id="tarea-fecha" /></label>
+      <label class="caso-campo" style="flex:1">Para
+        <select id="tarea-para"><option value="AMBOS">Los dos</option><option value="JENNIFER">Jennifer</option><option value="SERGIO">Sergio</option></select>
+      </label>
+    </div>
+    <label class="caso-campo">Pedido (opcional)
+      <input type="text" id="tarea-pedido" list="caso-pedidos-datalist" placeholder="BEZEN12276 o referencia de marketplace" autocomplete="off" />
+    </label>
+    <div id="tarea-pedido-info" class="caso-pedido-info"></div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="tarea-borrar-btn" style="margin-right:auto;color:#b91c1c">Borrar</button>
+      <button type="button" class="secondary" id="tarea-modal-cancel">Cancelar</button>
+      <button type="button" id="tarea-modal-ok">Guardar</button>
     </div>
   </div>
 </div>
@@ -3640,7 +3687,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace", "view-casos"];
+const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace", "view-casos", "view-tareas"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -3793,6 +3840,7 @@ document.querySelectorAll(".nav-link").forEach(a => {
     else if (a.dataset.historico) selectHistorico(a.dataset.historico);
     else if (a.dataset.tarifas) selectTarifas(a.dataset.tarifas);
     else if (a.dataset.plazos) selectPlazos(a.dataset.plazos);
+    else if (a.dataset.agenda === "tareas") selectTareas();
     else if (a.dataset.agenda) selectAgenda();
   });
 });
@@ -8352,6 +8400,9 @@ function casosAbiertosDePedido(o) {
   return o ? casos.filter(c => c.estado !== "cerrado" && c.pedidoId != null && String(c.pedidoId) === String(o.id)) : [];
 }
 function casoTag(o) {
+  return casoTagSolo(o) + tareaTag(o);
+}
+function casoTagSolo(o) {
   const lista = casosAbiertosDePedido(o);
   if (!lista.length) return "";
   const urg = lista.some(c => c.urgente);
@@ -8520,6 +8571,150 @@ agendaToggle.addEventListener("click", () => {
 });
 loadCasos().then(() => { if (casos.length && document.getElementById("view-shopify").style.display !== "none" && allOrders.length) applyFilter(); });
 
+// Tareas con fecha (Jennifer, 2026-10-05): "cosas para hacer en fechas
+// determinadas" (ej. 002-26259L13344-A: el 09/10 darle el número de
+// seguimiento). Hoy y atrasadas arriba, globo en el menú, aviso al abrir la
+// app y email de recordatorio por la mañana (ver enviarRecordatorioTareas).
+let tareas = [];
+let tareaEditando = null;
+let tareasAvisoMostrado = false;
+function tareaParaMi(t) {
+  return !t.para || t.para === "AMBOS" || t.para === currentUser;
+}
+function tareasDeHoy() {
+  const hoy = hoyMadrid();
+  return tareas.filter(t => !t.hecha && t.fecha <= hoy);
+}
+async function loadTareas() {
+  try { tareas = await (await fetch("/api/tareas")).json(); } catch (e) { return; }
+  const deHoy = tareasDeHoy();
+  const atrasadas = deHoy.filter(t => t.fecha < hoyMadrid()).length;
+  const badge = document.getElementById("tareas-badge");
+  badge.style.display = deHoy.length ? "" : "none";
+  badge.textContent = deHoy.length;
+  badge.style.background = atrasadas ? "#dc2626" : "#0d9488";
+  if (!tareasAvisoMostrado && currentUser) {
+    tareasAvisoMostrado = true;
+    const mias = deHoy.filter(tareaParaMi);
+    if (mias.length) mostrarAvisoBreve("📌 Hoy tienes " + mias.length + (mias.length === 1 ? " tarea" : " tareas") + (atrasadas ? " (alguna atrasada)" : "") + " — Agenda de casos > Tareas");
+  }
+  if (document.getElementById("view-tareas").style.display !== "none") renderTareas();
+}
+function fechaTarea(iso) {
+  return iso ? iso.slice(8, 10) + "/" + iso.slice(5, 7) + "/" + iso.slice(0, 4) : "";
+}
+function tareaTag(o) {
+  if (!o) return "";
+  const lista = tareas.filter(t => !t.hecha && t.pedidoId != null && String(t.pedidoId) === String(o.id)).sort((a, b) => a.fecha.localeCompare(b.fecha));
+  if (!lista.length) return "";
+  return '<span class="caso-tag" data-tarea-abrir="' + escapeAttr(lista[0].id) + '" title="' + escapeAttr(lista.map(t => fechaTarea(t.fecha) + ": " + t.texto).join(" / ")) + '" style="background:#fef3c7;color:#92400e">📌 Tarea ' + escapeAttr(fechaTarea(lista[0].fecha).slice(0, 5)) + '</span>';
+}
+
+function selectTareas() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.agenda === "tareas"));
+  document.getElementById("view-title").textContent = "Agenda · Tareas";
+  hideAllViews();
+  document.getElementById("view-tareas").style.display = "block";
+  loadTareas().then(renderTareas);
+}
+
+function renderTareas() {
+  const hoy = hoyMadrid();
+  const q = document.getElementById("tareas-search").value.trim().toLowerCase();
+  const para = document.getElementById("tareas-para-filter").value;
+  const verHechas = document.getElementById("tareas-vista").value === "hechas";
+  const filas = tareas.filter(t => !!t.hecha === verHechas
+    && (!para || !t.para || t.para === "AMBOS" || t.para === para)
+    && (!q || [t.texto, t.pedidoRef].join(" ").toLowerCase().includes(q)));
+  filas.sort((a, b) => verHechas ? String(b.fechaHecha || "").localeCompare(String(a.fechaHecha || "")) : a.fecha.localeCompare(b.fecha));
+  const nHoy = filas.filter(t => !t.hecha && t.fecha <= hoy).length;
+  document.getElementById("tareas-count").textContent = verHechas ? filas.length + " tareas hechas" : filas.length + " tareas pendientes" + (nHoy ? " · " + nHoy + " para hoy o atrasadas" : "");
+  const tbody = document.querySelector("#tareas-table tbody");
+  tbody.innerHTML = filas.length ? filas.map(t => {
+    const atrasada = !t.hecha && t.fecha < hoy;
+    const esHoy = !t.hecha && t.fecha === hoy;
+    const o = t.pedidoId != null ? allOrders.find(p => String(p.id) === String(t.pedidoId)) : null;
+    const etiqueta = atrasada ? '<br><span class="badge" style="background:#dc2626;color:#fff">Atrasada</span>' : esHoy ? '<br><span class="badge" style="background:#f59e0b;color:#fff">Hoy</span>' : "";
+    return '<tr' + (atrasada ? ' style="background:rgba(254,226,226,.6)"' : esHoy ? ' style="background:rgba(254,243,199,.6)"' : "") + '>' +
+      '<td><input type="checkbox" class="tarea-hecha-check" data-id="' + escapeAttr(t.id) + '"' + (t.hecha ? " checked" : "") + ' title="Marcar como hecha" /></td>' +
+      '<td style="white-space:nowrap"><strong>' + escapeAttr(fechaTarea(t.fecha)) + '</strong>' + etiqueta + '</td>' +
+      '<td>' + escapeAttr(t.texto || "") + (t.hecha ? '<div style="font-size:11.5px;color:var(--muted)">Hecha por ' + escapeAttr(t.hechaPor || "") + " el " + escapeAttr(fechaHoraCaso(t.fechaHecha)) + '</div>' : "") + '</td>' +
+      '<td><strong>' + escapeAttr(t.pedidoRef || "") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:300px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
+      '<td>' + escapeAttr(RESPONSABLE_LABELS[t.para] || "Los dos") + '</td>' +
+      '<td><button type="button" class="secondary" data-tarea-abrir="' + escapeAttr(t.id) + '">Editar</button></td>' +
+      '</tr>';
+  }).join("") : '<tr><td colspan="6" style="color:var(--muted)">' + (verHechas ? "No hay tareas hechas." : "No hay tareas pendientes.") + '</td></tr>';
+  tbody.querySelectorAll(".tarea-hecha-check").forEach(chk => chk.addEventListener("change", async () => {
+    await fetch("/api/tareas/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: chk.dataset.id, hecha: chk.checked, usuario: currentUser }) });
+    await loadTareas();
+    renderTareas();
+  }));
+}
+["tareas-search", "tareas-para-filter", "tareas-vista"].forEach(id => {
+  document.getElementById(id).addEventListener(id === "tareas-search" ? "input" : "change", renderTareas);
+});
+
+function abrirModalTarea(t) {
+  tareaEditando = t || null;
+  document.getElementById("tarea-modal-titulo").textContent = t ? "Editar tarea" : "Nueva tarea";
+  document.getElementById("caso-pedidos-datalist").innerHTML = allOrders.slice(-1500).map(p => '<option value="' + escapeAttr(refLabel(p)) + '">' + escapeAttr(p.name || "") + '</option>').join("");
+  document.getElementById("tarea-texto").value = t ? t.texto || "" : "";
+  document.getElementById("tarea-fecha").value = t ? t.fecha : hoyMadrid();
+  document.getElementById("tarea-para").value = t ? t.para || "AMBOS" : "AMBOS";
+  document.getElementById("tarea-pedido").value = t ? t.pedidoRef || "" : "";
+  const o = t && t.pedidoId != null ? allOrders.find(p => String(p.id) === String(t.pedidoId)) : null;
+  document.getElementById("tarea-pedido-info").innerHTML = resumenPedidoCaso(o);
+  document.getElementById("tarea-borrar-btn").style.display = t ? "" : "none";
+  document.getElementById("tarea-modal-overlay").classList.add("open");
+}
+document.getElementById("tarea-pedido").addEventListener("change", () => {
+  document.getElementById("tarea-pedido-info").innerHTML = resumenPedidoCaso(buscarPedidoCaso(document.getElementById("tarea-pedido").value));
+});
+document.getElementById("tarea-modal-ok").addEventListener("click", async () => {
+  const pedidoTxt = document.getElementById("tarea-pedido").value.trim();
+  const o = buscarPedidoCaso(pedidoTxt);
+  const body = {
+    id: tareaEditando ? tareaEditando.id : undefined,
+    texto: document.getElementById("tarea-texto").value.trim(),
+    fecha: document.getElementById("tarea-fecha").value,
+    para: document.getElementById("tarea-para").value,
+    pedidoId: o ? o.id : null,
+    pedidoRef: o ? refLabel(o) : pedidoTxt,
+    usuario: currentUser,
+  };
+  if (!body.texto || !body.fecha) { alert("Pon qué hay que hacer y la fecha."); return; }
+  const res = await fetch("/api/tareas/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido guardar la tarea."); return; }
+  document.getElementById("tarea-modal-overlay").classList.remove("open");
+  await loadTareas();
+  renderTareas();
+});
+document.getElementById("tarea-borrar-btn").addEventListener("click", async () => {
+  if (!tareaEditando || !confirm("¿Borrar esta tarea?")) return;
+  await fetch("/api/tareas/borrar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: tareaEditando.id }) });
+  document.getElementById("tarea-modal-overlay").classList.remove("open");
+  await loadTareas();
+  renderTareas();
+});
+document.getElementById("tarea-modal-cancel").addEventListener("click", () => document.getElementById("tarea-modal-overlay").classList.remove("open"));
+document.getElementById("tarea-nueva-btn").addEventListener("click", () => abrirModalTarea(null));
+document.getElementById("tareas-email-prueba-btn").addEventListener("click", async () => {
+  const r = await (await fetch("/api/tareas/recordatorio", { method: "POST" })).json().catch(() => ({}));
+  const errores = Object.entries(r.resultados || {}).filter(([, x]) => !x.ok).map(([p, x]) => p + ": " + (x.error === "script_sin_actualizar" ? "hay que actualizar el script de Google (versión 3)" : x.error || "error"));
+  if (r.ok) mostrarAvisoBreve("Email de recordatorio enviado.");
+  else alert("No se ha podido mandar el email. " + errores.join(" · "));
+});
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-tarea-abrir]");
+  if (!el) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const t = tareas.find(x => x.id === el.dataset.tareaAbrir);
+  if (t) abrirModalTarea(t);
+}, true);
+loadTareas().then(() => { if (tareas.length && document.getElementById("view-shopify").style.display !== "none" && allOrders.length) applyFilter(); });
+
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(proto + "//" + location.host + "/pedidos/shopify/ws");
@@ -8527,6 +8722,7 @@ function connectWS() {
     if (editing) { pendingRefresh = true; } else { loadOrders(); }
     loadAvisosCanceladosCount();
     loadCasos();
+    loadTareas();
   };
   ws.onclose = () => setTimeout(connectWS, 2000);
 }
@@ -10502,7 +10698,11 @@ async function handleFetch(request, env) {
     }
 
     // Agenda de casos (Jennifer, 2026-10-05).
-    if (url.pathname === "/api/casos" || url.pathname === "/api/casos/guardar" || url.pathname === "/api/casos/borrar") {
+    if (url.pathname === "/api/tareas/recordatorio" && request.method === "POST") {
+      return Response.json(await enviarRecordatorioTareas(env, { forzar: true }));
+    }
+    if (url.pathname === "/api/casos" || url.pathname === "/api/casos/guardar" || url.pathname === "/api/casos/borrar"
+      || url.pathname === "/api/tareas" || url.pathname === "/api/tareas/guardar" || url.pathname === "/api/tareas/borrar") {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do" + url.pathname.slice(4), request.method === "POST" ? { method: "POST", body: await request.text() } : {});
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
@@ -10668,5 +10868,44 @@ export default {
     ctx.waitUntil(handleSync(env));
     // Respuestas de SEUR por email (Jennifer, 2026-10-02): cada hora.
     ctx.waitUntil(actualizarCorreosSeur(env).catch(() => null));
+    // Recordatorio de tareas por email (Jennifer, 2026-10-05): una vez al
+    // día, en la primera pasada desde las 8:00 de Madrid.
+    ctx.waitUntil(enviarRecordatorioTareas(env).catch(() => null));
   },
 };
+
+// Email con las tareas de hoy y atrasadas sin hacer, a cada persona las
+// suyas (y las de "los dos"). Lo manda el Apps Script (accion
+// "recordatorio", destinatarios fijos en el script). forzar: manda ya,
+// aunque no haya tareas, y no cuenta como el envío del día.
+async function enviarRecordatorioTareas(env, { forzar } = {}) {
+  const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  const ahora = new Date();
+  const hoy = ahora.toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  const hora = Number(ahora.toLocaleString("en-GB", { timeZone: "Europe/Madrid", hour: "2-digit", hour12: false }));
+  if (!forzar) {
+    if (hora < 8) return { ok: true, enviado: false, motivo: "antes_de_las_8" };
+    const { dia } = await (await stub.fetch("https://do/tareas/email-dia")).json();
+    if (dia === hoy) return { ok: true, enviado: false, motivo: "ya_enviado_hoy" };
+  }
+  const tareas = await (await stub.fetch("https://do/tareas")).json();
+  const pendientes = tareas.filter((t) => !t.hecha && t.fecha <= hoy).sort((a, b) => a.fecha.localeCompare(b.fecha));
+  const fechaEs = (iso) => iso.slice(8, 10) + "/" + iso.slice(5, 7) + "/" + iso.slice(0, 4);
+  const resultados = {};
+  for (const persona of ["JENNIFER", "SERGIO"]) {
+    const lista = pendientes.filter((t) => t.para === persona || !t.para || t.para === "AMBOS");
+    if (!lista.length && !(forzar && persona === "JENNIFER")) continue;
+    const lineas = lista.map((t) => "- " + (t.fecha < hoy ? "[ATRASADA, era el " + fechaEs(t.fecha) + "] " : "") + (t.pedidoRef ? t.pedidoRef + ": " : "") + t.texto);
+    const texto = (lista.length ? "Tareas para hoy (" + fechaEs(hoy) + "):\n\n" + lineas.join("\n") : "No tienes tareas pendientes para hoy.")
+      + "\n\nMárcalas como hechas en la app: Agenda de casos > Tareas.";
+    resultados[persona] = await llamarScriptSeur(env, "recordatorio", {
+      para: persona,
+      asunto: (forzar ? "PRUEBA — " : "") + "Tareas de hoy " + fechaEs(hoy) + (lista.length ? " (" + lista.length + ")" : ""),
+      texto,
+    });
+  }
+  if (!forzar && Object.values(resultados).every((r) => r.ok)) {
+    await stub.fetch("https://do/tareas/email-dia", { method: "POST", body: JSON.stringify({ dia: hoy }) });
+  }
+  return { ok: Object.values(resultados).every((r) => r.ok), resultados };
+}

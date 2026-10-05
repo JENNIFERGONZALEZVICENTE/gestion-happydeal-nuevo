@@ -1269,6 +1269,55 @@ export class OrdersStore {
       return Response.json({ ok: true });
     }
 
+    // Tareas con fecha (Jennifer, 2026-10-05): "cosas para hacer en fechas
+    // determinadas", distintas de los casos. { texto, fecha AAAA-MM-DD,
+    // pedidoId/pedidoRef opcionales, para AMBOS|JENNIFER|SERGIO, hecha }.
+    if (url.pathname === "/tareas" && request.method === "GET") {
+      return Response.json((await this.state.storage.get("tareas")) || []);
+    }
+    if (url.pathname === "/tareas/guardar" && request.method === "POST") {
+      const { id, texto, fecha, pedidoId, pedidoRef, para, hecha, usuario } = await request.json();
+      const tareas = (await this.state.storage.get("tareas")) || [];
+      const ahora = new Date().toISOString();
+      let t = id ? tareas.find((x) => x.id === id) : null;
+      if (id && !t) return Response.json({ ok: false, error: "Tarea no encontrada." }, { status: 404 });
+      if (!t) {
+        if (!String(texto || "").trim() || !/^\d{4}-\d{2}-\d{2}$/.test(fecha || "")) return Response.json({ ok: false, error: "Falta qué hay que hacer o la fecha." }, { status: 400 });
+        t = { id: crypto.randomUUID(), creado: ahora, creadoPor: usuario || null, hecha: false };
+        tareas.push(t);
+      }
+      if (texto !== undefined) t.texto = String(texto || "").trim();
+      if (fecha !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(fecha)) t.fecha = fecha;
+      if (pedidoId !== undefined) t.pedidoId = pedidoId || null;
+      if (pedidoRef !== undefined) t.pedidoRef = pedidoRef || "";
+      if (para !== undefined) t.para = ["JENNIFER", "SERGIO"].includes(para) ? para : "AMBOS";
+      if (hecha !== undefined && !!hecha !== !!t.hecha) {
+        t.hecha = !!hecha;
+        t.hechaPor = t.hecha ? usuario || null : null;
+        t.fechaHecha = t.hecha ? ahora : null;
+      }
+      t.actualizado = ahora;
+      await this.state.storage.put("tareas", tareas);
+      this.broadcast();
+      return Response.json({ ok: true, tarea: t });
+    }
+    if (url.pathname === "/tareas/borrar" && request.method === "POST") {
+      const { id } = await request.json();
+      const tareas = (await this.state.storage.get("tareas")) || [];
+      await this.state.storage.put("tareas", tareas.filter((x) => x.id !== id));
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+    // Día en que ya se mandó el email de recordatorio (uno por día).
+    if (url.pathname === "/tareas/email-dia" && request.method === "GET") {
+      return Response.json({ dia: (await this.state.storage.get("tareasEmailDia")) || null });
+    }
+    if (url.pathname === "/tareas/email-dia" && request.method === "POST") {
+      const { dia } = await request.json();
+      await this.state.storage.put("tareasEmailDia", dia);
+      return Response.json({ ok: true });
+    }
+
     // Notas y "Reclamado a SEUR" por línea enviada (Jennifer, 2026-10-01),
     // guardado en el pedido por referencia de SEUR.
     if (url.pathname === "/orders/envio-seur-info" && request.method === "POST") {

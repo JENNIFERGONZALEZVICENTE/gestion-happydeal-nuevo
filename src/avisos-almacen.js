@@ -31,6 +31,7 @@ export async function llamarScriptSeur(env, accion, datos) {
     // almacén: se detecta porque no devuelve nada propio de SEUR.
     if (r.ok && accion === "seur-enviar" && !r.threadId) return { ok: false, error: "script_sin_actualizar" };
     if (r.ok && accion === "seur-leer" && !r.hilos) return { ok: false, error: "script_sin_actualizar" };
+    if (r.ok && accion === "recordatorio" && !r.recordatorio) return { ok: false, error: "script_sin_actualizar" };
     return r;
   } catch (e) {
     return { ok: false, error: "error_red" };
