@@ -1740,6 +1740,7 @@ function renderPage() {
   .furniture-item-check:last-child { margin-bottom: 0; }
   .furniture-item-check input { margin-top: 2px; }
   .furniture-item-fpk { color: #92400e; }
+  .todo-junto-tag { margin: 2px 0 4px 22px; font-size: 11.5px; font-weight: 700; color: #b91c1c; }
   .fpk-tag { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #fef3c7; color: #92400e; }
   .furniture-ya-salio-tag { display: block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #dbeafe; color: #1e40af; }
   .furniture-pendiente-tag { display: block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #fef3c7; color: #92400e; }
@@ -3354,6 +3355,42 @@ async function saveMeta(id, patch) {
   } catch (e) {
     console.error("No se pudo guardar", e);
   }
+  if (patch.notas !== undefined && notaTodoJunto(patch.notas)) await aplicarTodoJunto(id);
+}
+
+// "LO QUIERE TODO JUNTO" en las notas (Jennifer, 2026-10-05): el colchón
+// pasa solo de FPK a FUR y en Furniture se avisa de no sacarlo por separado.
+function notaTodoJunto(texto) {
+  return /TODO\\s+JUNTO/.test(String(texto || "").normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toUpperCase());
+}
+function pedidoQuiereTodoJunto(order) {
+  return !!order && pedidosDelGrupo(order).some(p => notaTodoJunto(p.notas));
+}
+// Solo colchones que pueden ir con Furniture (de pack, con tapicería en el
+// pedido o pedido ya de Furniture) — un colchón que va solo por SEUR también
+// lleva FPK por defecto y ese no se toca.
+async function aplicarTodoJunto(orderId) {
+  const order = allOrders.find(o => String(o.id) === String(orderId));
+  if (!order) return;
+  if (!backorders.length) backorders = await (await fetch("/api/inventario/pendientes")).json();
+  const grupo = pedidosDelGrupo(order);
+  const vaConFurniture = grupo.some(p => p.agencia === "FURNITURE") || ordenTieneTapiceria(order.orderNumber);
+  const colchones = backorders.filter(b => grupo.some(p => p.id === b.orderId)
+    && b.tipo === "colchon" && b.tipoEnvio === "FPK"
+    && (b.estado === "pendiente" || b.estado === "cubierto")
+    && !b.reposicion && !b.gestoComercial
+    && (b.esPack || vaConFurniture));
+  if (!colchones.length) return;
+  for (const b of colchones) {
+    await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/plan", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tipoEnvio: "FUR" }),
+    });
+    b.tipoEnvio = "FUR";
+  }
+  mostrarAvisoBreve("Todo junto: " + colchones.map(b => b.stockModel + (b.talla ? " (" + b.talla + ")" : "")).join(", ") + " de " + refLabel(order) + " pasa de FPK a FUR.");
+  loadPendientes();
 }
 
 async function loadOrders() {
@@ -5761,6 +5798,7 @@ function furnitureRowCells(o) {
     ? grupo.map(p => (p.id !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(p) + '</span> ' : "") + p.product).join("<br>")
     : o.product;
   const serviciosGrupo = grupo.map(p => p.services).filter(Boolean).join(" · ");
+  const todoJunto = pedidoQuiereTodoJunto(o);
   const itemsHtml = items.length
     ? items.map(b => {
         // Colchón marcado FPK (Jennifer, 2026-08-27, ampliado 2026-09-25 a
@@ -5774,7 +5812,7 @@ function furnitureRowCells(o) {
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
           \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + avisoRefDuplicada(b) + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}\${b.desdeAbierto ? ' <span class="abierto-tag">🟣 Sale de un colchón ABIERTO</span>' : ""}
-        </label>\${reservaAlmacenHtml(b)}\${items.length > 1 ? \`<button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="1" title="Sacar este artículo del envío: se queda pendiente como línea propia con la referencia terminada en 2">Enviar aparte</button>\` : ""}\${abiertoTagHtml(b)}
+        </label>\${todoJunto && b.tipo === "colchon" ? '<div class="todo-junto-tag">Ha solicitado enviarlo todo junto — NO SACAR POR SEPARADO</div>' : ""}\${reservaAlmacenHtml(b)}\${items.length > 1 ? \`<button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="1" title="Sacar este artículo del envío: se queda pendiente como línea propia con la referencia terminada en 2">Enviar aparte</button>\` : ""}\${abiertoTagHtml(b)}
       \`;
       }).join("")
     : "<em>Todo en stock</em>";
@@ -6945,11 +6983,7 @@ function renderMarketplace(platformId) {
       editing = false;
       const order = orders.find(o => String(o.id) === inp.dataset.id);
       if (order) order.notas = inp.value;
-      fetch("/api/pedidos/shopify/meta", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: inp.dataset.id, notas: inp.value }),
-      });
+      saveMeta(inp.dataset.id, { notas: inp.value });
     });
   });
   document.querySelectorAll("#" + platformId + "-table [data-cancel-id]").forEach(btn => {
