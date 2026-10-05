@@ -1210,6 +1210,48 @@ export class OrdersStore {
     // propia entrada de tracking (furnitureTracking/seurTracking), no en una
     // colección aparte, para que sobreviva igual que el resto del
     // seguimiento (ACUMULA, ver /orders/tracking-import[-seur]).
+    // Agenda de casos (Jennifer, 2026-10-05): casos de clientes que Jennifer
+    // y Sergio siguen a diario. Cada caso: pedido, cliente, teléfono,
+    // motivo, responsable, estado y un historial de notas (cada nota es un
+    // seguimiento, con fecha y autor).
+    if (url.pathname === "/casos" && request.method === "GET") {
+      return Response.json((await this.state.storage.get("casos")) || []);
+    }
+    if (url.pathname === "/casos/guardar" && request.method === "POST") {
+      const { id, pedidoId, pedidoRef, cliente, telefono, motivo, responsable, estado, nota, usuario } = await request.json();
+      const casos = (await this.state.storage.get("casos")) || [];
+      const ahora = new Date().toISOString();
+      let caso = id ? casos.find((c) => c.id === id) : null;
+      if (id && !caso) return Response.json({ ok: false, error: "Caso no encontrado." }, { status: 404 });
+      if (!caso) {
+        caso = { id: crypto.randomUUID(), creado: ahora, creadoPor: usuario || null, estado: "abierto", notas: [] };
+        casos.push(caso);
+      }
+      if (pedidoId !== undefined) caso.pedidoId = pedidoId || null;
+      if (pedidoRef !== undefined) caso.pedidoRef = pedidoRef || "";
+      if (cliente !== undefined) caso.cliente = cliente || "";
+      if (telefono !== undefined) caso.telefono = telefono || "";
+      if (motivo !== undefined) caso.motivo = motivo || "";
+      if (responsable !== undefined) caso.responsable = responsable || "AMBOS";
+      if (estado !== undefined && estado !== caso.estado) {
+        caso.estado = estado === "cerrado" ? "cerrado" : "abierto";
+        caso.fechaCierre = caso.estado === "cerrado" ? ahora : null;
+        caso.notas.push({ fecha: ahora, autor: usuario || null, texto: caso.estado === "cerrado" ? "Caso cerrado" : "Caso reabierto", sistema: true });
+      }
+      if (String(nota || "").trim()) caso.notas.push({ fecha: ahora, autor: usuario || null, texto: String(nota).trim() });
+      caso.actualizado = ahora;
+      await this.state.storage.put("casos", casos);
+      this.broadcast();
+      return Response.json({ ok: true, caso });
+    }
+    if (url.pathname === "/casos/borrar" && request.method === "POST") {
+      const { id } = await request.json();
+      const casos = (await this.state.storage.get("casos")) || [];
+      await this.state.storage.put("casos", casos.filter((c) => c.id !== id));
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+
     // Notas y "Reclamado a SEUR" por línea enviada (Jennifer, 2026-10-01),
     // guardado en el pedido por referencia de SEUR.
     if (url.pathname === "/orders/envio-seur-info" && request.method === "POST") {

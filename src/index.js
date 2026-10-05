@@ -1483,6 +1483,15 @@ function renderPage() {
     z-index: 1000;
   }
   .modal-overlay.open { display: flex; }
+  .caso-campo { display: block; font-size: 13px; margin: 8px 0; }
+  .caso-campo input, .caso-campo textarea, .caso-campo select { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; }
+  .caso-pedido-info { font-size: 12px; color: var(--muted); margin: -2px 0 6px; }
+  .caso-historial { margin: 10px 0; padding: 8px 10px; border: 1px solid var(--border, #e5e7eb); border-radius: 8px; max-height: 220px; overflow-y: auto; font-size: 12.5px; }
+  .caso-historial-item { padding: 4px 0; border-bottom: 1px dashed var(--border, #e5e7eb); }
+  .caso-historial-item:last-child { border-bottom: 0; }
+  .caso-historial-item .meta { color: var(--muted); font-size: 11px; }
+  .caso-tag { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #ccfbf1; color: #115e59; cursor: pointer; }
+  .caso-atrasado { color: #b91c1c; font-weight: 600; }
   .modal-box {
     background: var(--panel, #fff);
     border-radius: 12px;
@@ -1811,6 +1820,13 @@ function renderPage() {
     <span class="chevron">▶</span>
   </button>
   <ul id="pedidos-list">${navItems}</ul>
+  <button class="section-title" id="agenda-toggle">
+    <span>Agenda de casos</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="agenda-list">
+    <li><a href="#" class="nav-link" data-agenda="casos">Casos abiertos <span id="casos-badge" class="abiertos-badge" style="display:none;background:#0d9488"></span></a></li>
+  </ul>
   <button class="section-title" id="inventario-toggle">
     <span>Inventario</span>
     <span class="chevron">▶</span>
@@ -2347,6 +2363,27 @@ function renderPage() {
   <div id="tarifas-plataformas-lista" class="inventario-count">Cargando...</div>
 </div>
 
+<div id="view-casos" style="display:none">
+  <div class="toolbar">
+    <button type="button" id="caso-nuevo-btn">+ Nuevo caso</button>
+    <input id="casos-search" type="text" placeholder="Buscar por pedido, cliente, teléfono o motivo..." style="min-width:280px" />
+    <select id="casos-responsable-filter">
+      <option value="">Todos los responsables</option>
+      <option value="JENNIFER">Jennifer</option>
+      <option value="SERGIO">Sergio</option>
+      <option value="AMBOS">Los dos</option>
+    </select>
+    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="casos-ver-cerrados" /> Ver cerrados</label>
+  </div>
+  <div id="casos-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="casos-table">
+      <thead><tr><th>Pedido</th><th>Cliente</th><th>Teléfono</th><th>Motivo</th><th style="min-width:280px">Último seguimiento</th><th>Responsable</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
 <div id="view-plazos-marketplace" style="display:none">
   <div id="plazos-marketplace-lista" class="inventario-count">Cargando...</div>
 </div>
@@ -2492,6 +2529,30 @@ function renderPage() {
       <button type="button" id="sustituir-directo-btn" disabled style="display:none">Sustituir</button>
       <button type="button" class="secondary" id="sustituir-hoy-btn" disabled style="display:none">Sustituir — carga de hoy</button>
       <button type="button" id="sustituir-manana-btn" disabled style="display:none">Sustituir — carga de mañana</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="caso-modal-overlay">
+  <div class="modal-box" style="width:min(680px,94vw)">
+    <h3 id="caso-modal-titulo">Nuevo caso</h3>
+    <label class="caso-campo">Pedido
+      <input type="text" id="caso-pedido" list="caso-pedidos-datalist" placeholder="BEZEN12276 o referencia de marketplace" autocomplete="off" />
+    </label>
+    <datalist id="caso-pedidos-datalist"></datalist>
+    <div id="caso-pedido-info" class="caso-pedido-info"></div>
+    <label class="caso-campo">Cliente <input type="text" id="caso-cliente" /></label>
+    <label class="caso-campo">Teléfono <input type="text" id="caso-telefono" /></label>
+    <label class="caso-campo">Motivo <textarea id="caso-motivo" rows="2"></textarea></label>
+    <label class="caso-campo">Responsable
+      <select id="caso-responsable"><option value="AMBOS">Los dos</option><option value="JENNIFER">Jennifer</option><option value="SERGIO">Sergio</option></select>
+    </label>
+    <div id="caso-historial" class="caso-historial"></div>
+    <label class="caso-campo">Nuevo seguimiento <textarea id="caso-nota" rows="3" placeholder="Qué se ha hecho o hablado con el cliente..."></textarea></label>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="caso-cerrar-btn" style="margin-right:auto">Cerrar caso</button>
+      <button type="button" class="secondary" id="caso-modal-cancel">Cancelar</button>
+      <button type="button" id="caso-modal-ok">Guardar</button>
     </div>
   </div>
 </div>
@@ -3082,7 +3143,7 @@ function render(orders) {
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
       <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}</div></td>
-      <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}</td>
+      <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}\${casoTag(o)}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
       <td>\${o.address}</td>
@@ -3567,7 +3628,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace"];
+const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace", "view-casos"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -3720,6 +3781,7 @@ document.querySelectorAll(".nav-link").forEach(a => {
     else if (a.dataset.historico) selectHistorico(a.dataset.historico);
     else if (a.dataset.tarifas) selectTarifas(a.dataset.tarifas);
     else if (a.dataset.plazos) selectPlazos(a.dataset.plazos);
+    else if (a.dataset.agenda) selectAgenda();
   });
 });
 
@@ -5832,7 +5894,7 @@ function furnitureRowCells(o) {
       }).join("")
     : "<em>Todo en stock</em>";
   return \`
-    <td>\${refLabel(o)}\${grupoEnvioTag(o)}\${valdemoroTag(o)}\${soloFaltanAlmohadas(items.filter(b => !(b.tipo === "colchon" && b.tipoEnvio === "FPK"))) ? '<div class="todo-junto-tag" style="margin-left:0">Solo faltan las almohadas</div>' : ""}</td>
+    <td>\${refLabel(o)}\${grupoEnvioTag(o)}\${valdemoroTag(o)}\${casoTag(o)}\${soloFaltanAlmohadas(items.filter(b => !(b.tipo === "colchon" && b.tipoEnvio === "FPK"))) ? '<div class="todo-junto-tag" style="margin-left:0">Solo faltan las almohadas</div>' : ""}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name}</td>
     <td>\${productoGrupo}</td>
@@ -6974,7 +7036,7 @@ function renderMarketplace(platformId) {
   document.querySelector("#" + platformId + "-table tbody").innerHTML = filtered.map(o => \`
     <tr\${(o.cancelado || estadoSeguimientoEspecial(o.estado) === "CANCELADO") ? ' class="fila-cancelada"' : ""}>
       <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}</div></td>
-      <td>\${o.orderRef}</td>
+      <td>\${o.orderRef}\${casoTag(o)}</td>
       <td>\${o.orderDate || ""}</td>
       <td>\${plazoEnvioCell(o)}</td>
       <td>\${o.name || ""}</td>
@@ -8249,12 +8311,185 @@ document.getElementById("avisos-cancelados-modal-overlay").addEventListener("cli
   if (e.target.id === "avisos-cancelados-modal-overlay") e.currentTarget.classList.remove("open");
 });
 
+// Agenda de casos (Jennifer, 2026-10-05): "casos que nos llaman clientes y
+// Sergio y yo tenemos que estar pendientes" — agenda común. Siempre a la
+// vista el pedido (con lo que lleva y en qué está), cliente, teléfono,
+// motivo y el último seguimiento (fecha, quién y qué). Los que más tiempo
+// llevan sin seguimiento, arriba.
+let casos = [];
+let casoEditando = null;
+async function loadCasos() {
+  try { casos = await (await fetch("/api/casos")).json(); } catch (e) { return; }
+  const abiertos = casos.filter(c => c.estado !== "cerrado").length;
+  const badge = document.getElementById("casos-badge");
+  badge.style.display = abiertos ? "" : "none";
+  badge.textContent = abiertos;
+  if (document.getElementById("view-casos").style.display !== "none") renderCasos();
+}
+function casosAbiertosDePedido(o) {
+  return o ? casos.filter(c => c.estado !== "cerrado" && c.pedidoId != null && String(c.pedidoId) === String(o.id)) : [];
+}
+function casoTag(o) {
+  const lista = casosAbiertosDePedido(o);
+  if (!lista.length) return "";
+  return '<span class="caso-tag" data-caso-abrir="' + escapeAttr(lista[0].id) + '" title="' + escapeAttr(lista.map(c => c.motivo || "").join(" / ")) + '">📒 Agenda</span>';
+}
+function ultimoSeguimiento(c) {
+  const notas = c.notas || [];
+  return notas.length ? notas[notas.length - 1] : { fecha: c.creado, autor: c.creadoPor, texto: "Caso creado", sistema: true };
+}
+function fechaHoraCaso(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" }) + " " + d.toLocaleTimeString("es-ES", { timeZone: "Europe/Madrid", hour: "2-digit", minute: "2-digit" });
+}
+function haceDias(iso) {
+  const dia = s => new Date(s).toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  const n = Math.round((Date.parse(hoyMadrid()) - Date.parse(dia(iso))) / 86400000);
+  return { n, texto: n <= 0 ? "hoy" : n === 1 ? "ayer" : "hace " + n + " días" };
+}
+function pedidoDeCaso(c) {
+  return c.pedidoId != null ? allOrders.find(o => String(o.id) === String(c.pedidoId)) : null;
+}
+function resumenPedidoCaso(o) {
+  if (!o) return "";
+  const estado = o.cancelado ? "Cancelado" : o.shippingStatus === "fulfilled" ? "Enviado" : o.cargaId ? "En carga" : "Pendiente de envío";
+  const producto = String(o.product || "");
+  return [o.platform || "Shopify", producto.length > 140 ? producto.slice(0, 140) + "…" : producto, o.agencia || "", estado].filter(Boolean).map(escapeAttr).join(" · ");
+}
+function buscarPedidoCaso(texto) {
+  const t = String(texto || "").trim().toUpperCase();
+  if (!t) return null;
+  return allOrders.find(o => refLabel(o).toUpperCase() === t || String(o.orderNumber) === t || String(o.orderRef || "").toUpperCase() === t) || null;
+}
+const RESPONSABLE_LABELS = { AMBOS: "Los dos", JENNIFER: "Jennifer", SERGIO: "Sergio" };
+
+function selectAgenda() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.agenda === "casos"));
+  document.getElementById("view-title").textContent = "Agenda de casos";
+  hideAllViews();
+  document.getElementById("view-casos").style.display = "block";
+  loadCasos().then(renderCasos);
+}
+
+function renderCasos() {
+  const q = document.getElementById("casos-search").value.trim().toLowerCase();
+  const resp = document.getElementById("casos-responsable-filter").value;
+  const verCerrados = document.getElementById("casos-ver-cerrados").checked;
+  const filas = casos.filter(c => (verCerrados ? c.estado === "cerrado" : c.estado !== "cerrado")
+    && (!resp || (c.responsable || "AMBOS") === resp)
+    && (!q || [c.pedidoRef, c.cliente, c.telefono, c.motivo].join(" ").toLowerCase().includes(q)));
+  filas.sort((a, b) => verCerrados
+    ? String(b.fechaCierre || "").localeCompare(String(a.fechaCierre || ""))
+    : String(ultimoSeguimiento(a).fecha || "").localeCompare(String(ultimoSeguimiento(b).fecha || "")));
+  document.getElementById("casos-count").textContent = filas.length + (verCerrados ? " casos cerrados" : " casos abiertos");
+  const tbody = document.querySelector("#casos-table tbody");
+  tbody.innerHTML = filas.length ? filas.map(c => {
+    const o = pedidoDeCaso(c);
+    const u = ultimoSeguimiento(c);
+    const h = haceDias(u.fecha);
+    return '<tr>' +
+      '<td><strong>' + escapeAttr(c.pedidoRef || "—") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:320px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
+      '<td>' + escapeAttr(c.cliente || "") + '</td>' +
+      '<td style="white-space:nowrap">' + escapeAttr(c.telefono || "") + '</td>' +
+      '<td style="max-width:280px">' + escapeAttr(c.motivo || "") + '</td>' +
+      '<td><span' + (c.estado !== "cerrado" && h.n >= 3 ? ' class="caso-atrasado"' : "") + '>' + escapeAttr(fechaHoraCaso(u.fecha)) + ' (' + h.texto + ')</span>' +
+        '<div style="font-size:12.5px"><strong>' + escapeAttr(u.autor || "") + (u.autor ? ": " : "") + '</strong>' + escapeAttr(u.texto || "") + '</div></td>' +
+      '<td>' + escapeAttr(RESPONSABLE_LABELS[c.responsable] || "Los dos") + '</td>' +
+      '<td><button type="button" class="secondary" data-caso-abrir="' + escapeAttr(c.id) + '">Abrir</button></td>' +
+      '</tr>';
+  }).join("") : '<tr><td colspan="7" style="color:var(--muted)">' + (verCerrados ? "No hay casos cerrados." : "No hay casos abiertos.") + '</td></tr>';
+}
+["casos-search", "casos-responsable-filter", "casos-ver-cerrados"].forEach(id => {
+  document.getElementById(id).addEventListener(id === "casos-search" ? "input" : "change", renderCasos);
+});
+
+function abrirModalCaso(caso, pedidoInicial) {
+  casoEditando = caso || null;
+  const o = caso ? pedidoDeCaso(caso) : pedidoInicial || null;
+  document.getElementById("caso-modal-titulo").textContent = caso ? "Caso " + (caso.pedidoRef || caso.cliente || "") : "Nuevo caso";
+  document.getElementById("caso-pedidos-datalist").innerHTML = allOrders.slice(-1500).map(p => '<option value="' + escapeAttr(refLabel(p)) + '">' + escapeAttr(p.name || "") + '</option>').join("");
+  document.getElementById("caso-pedido").value = caso ? caso.pedidoRef || "" : o ? refLabel(o) : "";
+  document.getElementById("caso-cliente").value = caso ? caso.cliente || "" : o ? o.name || "" : "";
+  document.getElementById("caso-telefono").value = caso ? caso.telefono || "" : o ? o.phone || "" : "";
+  document.getElementById("caso-motivo").value = caso ? caso.motivo || "" : "";
+  document.getElementById("caso-responsable").value = caso ? caso.responsable || "AMBOS" : "AMBOS";
+  document.getElementById("caso-nota").value = "";
+  document.getElementById("caso-pedido-info").innerHTML = resumenPedidoCaso(o);
+  const notas = caso ? caso.notas || [] : [];
+  const hist = document.getElementById("caso-historial");
+  hist.style.display = caso ? "" : "none";
+  hist.innerHTML = '<div style="font-weight:600;margin-bottom:4px">Historial</div>' + (notas.length ? [...notas].reverse().map(n =>
+    '<div class="caso-historial-item"><div class="meta">' + escapeAttr(fechaHoraCaso(n.fecha)) + (n.autor ? " · " + escapeAttr(n.autor) : "") + '</div>' + (n.sistema ? "<em>" + escapeAttr(n.texto) + "</em>" : escapeAttr(n.texto)) + '</div>').join("") : '<div style="color:var(--muted)">Sin seguimientos todavía.</div>');
+  const cerrarBtn = document.getElementById("caso-cerrar-btn");
+  cerrarBtn.style.display = caso ? "" : "none";
+  cerrarBtn.textContent = caso && caso.estado === "cerrado" ? "Reabrir caso" : "Cerrar caso";
+  document.getElementById("caso-modal-overlay").classList.add("open");
+}
+document.getElementById("caso-pedido").addEventListener("change", () => {
+  const o = buscarPedidoCaso(document.getElementById("caso-pedido").value);
+  document.getElementById("caso-pedido-info").innerHTML = o ? resumenPedidoCaso(o) : "";
+  if (o) {
+    const cli = document.getElementById("caso-cliente");
+    const tel = document.getElementById("caso-telefono");
+    if (!cli.value.trim()) cli.value = o.name || "";
+    if (!tel.value.trim()) tel.value = o.phone || "";
+  }
+});
+async function guardarCaso(extra) {
+  const pedidoTxt = document.getElementById("caso-pedido").value.trim();
+  const o = buscarPedidoCaso(pedidoTxt);
+  const body = {
+    id: casoEditando ? casoEditando.id : undefined,
+    pedidoId: o ? o.id : null,
+    pedidoRef: o ? refLabel(o) : pedidoTxt,
+    cliente: document.getElementById("caso-cliente").value.trim(),
+    telefono: document.getElementById("caso-telefono").value.trim(),
+    motivo: document.getElementById("caso-motivo").value.trim(),
+    responsable: document.getElementById("caso-responsable").value,
+    nota: document.getElementById("caso-nota").value,
+    usuario: currentUser,
+    ...extra,
+  };
+  if (!body.motivo) { alert("Escribe el motivo del caso."); return; }
+  if (!body.pedidoRef && !body.cliente) { alert("Pon al menos el pedido o el cliente."); return; }
+  const res = await fetch("/api/casos/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido guardar el caso."); return; }
+  document.getElementById("caso-modal-overlay").classList.remove("open");
+  await loadCasos();
+  renderCasos();
+}
+document.getElementById("caso-modal-ok").addEventListener("click", () => guardarCaso({}));
+document.getElementById("caso-cerrar-btn").addEventListener("click", () => {
+  if (!casoEditando) return;
+  guardarCaso({ estado: casoEditando.estado === "cerrado" ? "abierto" : "cerrado" });
+});
+document.getElementById("caso-modal-cancel").addEventListener("click", () => document.getElementById("caso-modal-overlay").classList.remove("open"));
+document.getElementById("caso-nuevo-btn").addEventListener("click", () => abrirModalCaso(null));
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-caso-abrir]");
+  if (!el) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const c = casos.find(x => x.id === el.dataset.casoAbrir);
+  if (c) abrirModalCaso(c);
+}, true);
+const agendaToggle = document.getElementById("agenda-toggle");
+const agendaListEl = document.getElementById("agenda-list");
+agendaToggle.addEventListener("click", () => {
+  agendaToggle.classList.toggle("open");
+  agendaListEl.classList.toggle("open");
+});
+loadCasos().then(() => { if (casos.length && document.getElementById("view-shopify").style.display !== "none" && allOrders.length) applyFilter(); });
+
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(proto + "//" + location.host + "/pedidos/shopify/ws");
   ws.onmessage = () => {
     if (editing) { pendingRefresh = true; } else { loadOrders(); }
     loadAvisosCanceladosCount();
+    loadCasos();
   };
   ws.onclose = () => setTimeout(connectWS, 2000);
 }
@@ -10226,6 +10461,13 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/seur/envios/visto" && request.method === "POST") {
       const { orderId, ref } = await request.json();
       const res = await ordersStubSeur(env).fetch("https://do/orders/envio-seur-info", { method: "POST", body: JSON.stringify({ orderId, ref, correo: { vistoHasta: new Date().toISOString() } }) });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
+    // Agenda de casos (Jennifer, 2026-10-05).
+    if (url.pathname === "/api/casos" || url.pathname === "/api/casos/guardar" || url.pathname === "/api/casos/borrar") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do" + url.pathname.slice(4), request.method === "POST" ? { method: "POST", body: await request.text() } : {});
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
