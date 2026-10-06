@@ -1010,7 +1010,7 @@ async function avisarAlmacenTransformacion(env, entry) {
 // canapé lleva una etiqueta por BULTO (mismo desglose que el fichero de
 // Furniture: tapas, cajones, fondo, bisagras...), para que el almacén
 // reserve todas sus partes; el resto, una por unidad.
-async function reservarStockManual(env, entry) {
+async function reservarStockManual(env, entry, { agencia, fechaSalida } = {}) {
   const o = await pedidoDeBackorder(env, entry);
   const cliente = (o && o.name) || "";
   const pedido = referenciaPedidoAlmacen(entry);
@@ -1028,7 +1028,7 @@ async function reservarStockManual(env, entry) {
   } else {
     bultos = bultosPorUnidad(entry);
   }
-  return enviarReservaAlmacen(env, { pedido, cliente, lineasTexto: [lineaTextoReserva(entry)], bultos });
+  return enviarReservaAlmacen(env, { pedido, cliente, lineasTexto: [lineaTextoReserva(entry)], bultos, agencia, fechaSalida });
 }
 
 async function proxyInventory(env, path, request) {
@@ -2702,12 +2702,13 @@ function renderPage() {
 
 <div class="modal-overlay" id="seur-fecha-modal-overlay">
   <div class="modal-box">
-    <h3>¿En qué carga de SEUR sale?</h3>
+    <h3 id="seur-fecha-modal-titulo">¿En qué carga de SEUR sale?</h3>
     <p id="seur-fecha-modal-texto" style="color:var(--muted);font-size:13px"></p>
     <label style="font-size:13px">Día de la carga (cualquier día laborable, aunque sea dentro de varias semanas):
       <input type="date" id="seur-fecha-input" style="display:block;margin-top:6px" />
     </label>
     <div class="modal-actions">
+      <button type="button" class="secondary" id="seur-fecha-quitar-btn" style="margin-right:auto;display:none">Quitar fecha</button>
       <button type="button" class="secondary" id="seur-fecha-modal-cancel">Cancelar</button>
       <button type="button" id="seur-fecha-ok-btn">Preparar para ese día</button>
     </div>
@@ -5046,7 +5047,7 @@ function renderPendientes() {
       : esCancelado
       ?\`<span class="cancelado-tag">✕ CANCELADO\${b.fechaCancelado ? " " + new Date(b.fechaCancelado).toLocaleDateString("es-ES") : ""}</span>\`
       : esColchonSeur
-      ? \`<button type="button" class="recibido-seur-btn" data-id="\${b.id}" title="Recibido: entra solo en la carga de SEUR (antes de las 15:00, la de hoy; después, la de mañana)">Marcar recibido</button> <button type="button" class="secondary resolver-seur-btn" data-id="\${b.id}" title="Recibido y programado para el día que pida el cliente">📅 Otro día</button>\${sustituirBtnHtml}\`
+      ? \`<button type="button" class="recibido-seur-btn" data-id="\${b.id}" title="Recibido: entra solo en la carga de SEUR (antes de las 15:00, la de hoy; después, la de mañana)">Marcar recibido</button> <button type="button" class="secondary resolver-seur-btn" data-id="\${b.id}" title="Recibido y programado para el día que pida el cliente">📅 Otro día</button> <button type="button" class="secondary programar-seur-btn" data-id="\${b.id}" title="Todavía no ha llegado: cuando lo marques recibido irá a la carga de SEUR de este día">⏳ Programar fecha</button>\${fechaProgramadaSeurTag(b)}\${sustituirBtnHtml}\`
       : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${reservaAlmacenHtml(b)}\${sustituirBtnHtml}\`;
     const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button> <button type="button" class="secondary revisar-pendiente-btn" data-revisar-pendiente="\${escapeAttr(b.id)}" title="Hay algo que ver antes de pedirlo: pasa al recuadro de revisión y no se puede pedir hasta marcarlo revisado">🔍 Revisar</button></div>\`;
     return \`
@@ -5121,16 +5122,33 @@ function renderPendientes() {
   tbody.querySelectorAll(".resolver-seur-btn").forEach(btn => {
     btn.addEventListener("click", () => abrirModalFechaSeur(btn.dataset.id));
   });
+  tbody.querySelectorAll(".programar-seur-btn").forEach(btn => {
+    btn.addEventListener("click", () => abrirModalFechaSeur(btn.dataset.id, "programar"));
+  });
   // Colchón que va solo: al marcarlo recibido entra en la próxima carga de
   // SEUR (Jennifer, 2026-09-30).
   tbody.querySelectorAll(".recibido-seur-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
+      const bo = backorders.find(x => x.id === btn.dataset.id);
+      const programada = bo ? fechaProgramadaSeur(bo) : null;
       const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(btn.dataset.id) + "/resolver-seur", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha: "auto" }),
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha: programada || "auto" }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) { alert(data.error || "No se pudo preparar para SEUR."); btn.disabled = false; return; }
+      if (programada && bo) {
+        await guardarRetencion([bo.orderId], null);
+        // Aviso al almacén para que lo aparte hasta esa carga (Jennifer, 2026-10-06).
+        const rr = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/reservar-almacen?forzar=1", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agencia: "SEUR", fechaSalida: programada }),
+        });
+        const dr = await rr.json().catch(() => ({}));
+        if (!dr.ok) alert("Recibido y programado para la carga del " + programada.slice(8, 10) + "/" + programada.slice(5, 7) + ", pero NO se ha podido mandar el email de reserva al almacén. Avísales tú, por favor.");
+        else mostrarAvisoBreve("Recibido: sale en la carga de SEUR del " + programada.slice(8, 10) + "/" + programada.slice(5, 7) + ". Email de reserva enviado al almacén.");
+        loadPendientes();
+        return;
+      }
       if (data.carga) mostrarAvisoBreve("Recibido. Sale en la " + formatSeurCargaTitulo(data.carga) + " (se puede mover de día en SEUR).");
       loadPendientes();
     });
@@ -8371,14 +8389,33 @@ document.getElementById("sustituir-directo-btn").addEventListener("click", () =>
 document.getElementById("sustituir-hoy-btn").addEventListener("click", () => confirmarSustituir("hoy"));
 document.getElementById("sustituir-manana-btn").addEventListener("click", () => confirmarSustituir("manana"));
 
-function abrirModalFechaSeur(id) {
+// Fecha programada para un colchón por SEUR que aún no ha llegado (Jennifer,
+// 2026-10-06, 012517739-A: llega el 09/10 pero el cliente no está hasta la
+// semana del 03/11). Se guarda como retención del pedido; al marcarlo
+// recibido va directo a la carga de ese día.
+let seurFechaModo = "preparar";
+function fechaProgramadaSeur(b) {
+  const o = allOrders.find(x => x.id === b.orderId);
+  const r = o ? retencionDe(o) : null;
+  return r && r.hasta && r.hasta >= hoyMadrid() ? r.hasta : null;
+}
+function fechaProgramadaSeurTag(b) {
+  const f = fechaProgramadaSeur(b);
+  return f ? ' <span class="badge" style="background:#ede9fe;color:#5b21b6" title="Al marcarlo recibido irá a la carga de SEUR de ese día">📅 Sale el ' + f.slice(8, 10) + "/" + f.slice(5, 7) + "</span>" : "";
+}
+function abrirModalFechaSeur(id, modo) {
   const b = backorders.find(x => x.id === id);
   if (!b) return;
+  seurFechaModo = modo === "programar" ? "programar" : "preparar";
+  const programada = fechaProgramadaSeur(b);
+  document.getElementById("seur-fecha-modal-titulo").textContent = seurFechaModo === "programar" ? "¿En qué carga de SEUR saldrá cuando llegue?" : "¿En qué carga de SEUR sale?";
+  document.getElementById("seur-fecha-ok-btn").textContent = seurFechaModo === "programar" ? "Guardar fecha (sin marcar recibido)" : "Preparar para ese día";
+  document.getElementById("seur-fecha-quitar-btn").style.display = seurFechaModo === "programar" && programada ? "" : "none";
   seurFechaModalBackorderId = id;
   document.getElementById("seur-fecha-modal-texto").textContent = refLabel(b) + " — " + b.cantidad + "x " + b.stockModel + " (" + b.talla + ")";
   const input = document.getElementById("seur-fecha-input");
   input.min = hoyMadrid();
-  input.value = primerDiaSeur();
+  input.value = programada || primerDiaSeur();
   document.getElementById("seur-fecha-modal-overlay").classList.add("open");
 }
 function cerrarModalFechaSeur() {
@@ -8409,8 +8446,18 @@ document.getElementById("seur-fecha-ok-btn").addEventListener("click", () => {
   const fecha = document.getElementById("seur-fecha-input").value;
   const error = errorFechaSeur(fecha);
   if (error) { alert(error); return; }
+  if (seurFechaModo === "programar") { programarFechaSeur(fecha); return; }
   confirmarFechaSeur(fecha);
 });
+async function programarFechaSeur(fecha) {
+  const b = backorders.find(x => x.id === seurFechaModalBackorderId);
+  cerrarModalFechaSeur();
+  if (!b) return;
+  await guardarRetencion([b.orderId], fecha ? { hasta: fecha } : null);
+  mostrarAvisoBreve(fecha ? refLabel(b) + ": cuando llegue, saldrá en la carga de SEUR del " + fecha.slice(8, 10) + "/" + fecha.slice(5, 7) + "." : refLabel(b) + ": fecha quitada.");
+  loadPendientes();
+}
+document.getElementById("seur-fecha-quitar-btn").addEventListener("click", () => programarFechaSeur(null));
 
 // Campanita de "pedido cancelado con pendiente en Proveedores" (Jennifer,
 // 2026-09-16): el contador se refresca solo (carga inicial + cada update
@@ -10302,7 +10349,9 @@ async function handleFetch(request, env) {
       if (entry.reservaEnviada && url.searchParams.get("forzar") !== "1") {
         return Response.json({ ok: false, yaEnviada: entry.reservaEnviada }, { status: 409 });
       }
-      const avisoReserva = await reservarStockManual(env, entry);
+      const opciones = await request.json().catch(() => ({}));
+      const fechaSalida = /^\d{4}-\d{2}-\d{2}$/.test(opciones.fechaSalida || "") ? opciones.fechaSalida : null;
+      const avisoReserva = await reservarStockManual(env, entry, { agencia: opciones.agencia, fechaSalida });
       if (avisoReserva.ok) await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(id) + "/reserva-enviada", { method: "POST", body: "{}" });
       return Response.json({ ok: !!avisoReserva.ok, avisoReserva });
     }
@@ -10776,6 +10825,14 @@ async function handleFetch(request, env) {
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
+    if (url.pathname === "/api/cargas/borrar" && request.method === "POST") {
+      const { id } = await request.json();
+      const backorders = await (await inventoryStub(env).fetch("https://do/backorders")).json();
+      if (backorders.some((b) => b.cargaId === id && b.estado !== "cancelado")) return Response.json({ ok: false, error: "La carga todavía tiene artículos." }, { status: 409 });
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/cargas/borrar", { method: "POST", body: JSON.stringify({ id }) });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/cargas/remove" && request.method === "POST") {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);

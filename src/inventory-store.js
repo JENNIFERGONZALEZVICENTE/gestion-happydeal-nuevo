@@ -2063,7 +2063,8 @@ export class InventoryStore {
     }
     const undoSeurMatch = url.pathname.match(/^\/backorders\/([^/]+)\/deshacer-seur$/);
     if (undoSeurMatch && method === "POST") {
-      return this.undoSeurBackorder(decodeURIComponent(undoSeurMatch[1]));
+      const opciones = await request.json().catch(() => ({}));
+      return this.undoSeurBackorder(decodeURIComponent(undoSeurMatch[1]), opciones);
     }
     const alternativasMatch = url.pathname.match(/^\/backorders\/([^/]+)\/alternativas$/);
     if (alternativasMatch && method === "GET") {
@@ -3660,7 +3661,9 @@ export class InventoryStore {
   // referencia anterior, la próxima vez que salga de verdad no puede repetir
   // la misma referencia (choca en Seur) — se avanza a la siguiente (ver
   // nextRefSuffix).
-  async undoSeurBackorder(id) {
+  // mantenerRef (Jennifer, 2026-10-06, 012517739-A): se preparó por error y
+  // no salió ninguna etiqueta, así que la referencia no lleva sufijo nuevo.
+  async undoSeurBackorder(id, { mantenerRef } = {}) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
@@ -3695,7 +3698,7 @@ export class InventoryStore {
     entry.cargaId = null;
     entry.recibidoFabrica = false;
     entry.fechaRecibido = null;
-    entry.refSuffix = nextRefSuffix(entry.refSuffix);
+    if (!mantenerRef) entry.refSuffix = nextRefSuffix(entry.refSuffix);
 
     await this.state.storage.put("backorders", backorders);
     return Response.json({ ok: true, entry });

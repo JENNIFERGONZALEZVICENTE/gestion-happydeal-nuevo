@@ -965,6 +965,22 @@ export class OrdersStore {
       return Response.json({ ok: true, carga, añadidos });
     }
 
+    // Borrar una carga abierta que se ha quedado vacía (Jennifer,
+    // 2026-10-06: carga SEUR del 03/11 creada por error). El Worker
+    // comprueba antes que ningún artículo suelto siga en ella.
+    if (url.pathname === "/cargas/borrar" && request.method === "POST") {
+      const { id } = await request.json();
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const carga = cargas.find((c) => c.id === id);
+      if (!carga) return Response.json({ ok: false, error: "Carga no encontrada." }, { status: 404 });
+      if (carga.estado !== "abierta") return Response.json({ ok: false, error: "Solo se puede borrar una carga abierta." }, { status: 409 });
+      const orders = (await this.state.storage.get("orders")) || {};
+      if (Object.values(orders).some((o) => o.cargaId === id)) return Response.json({ ok: false, error: "La carga todavía tiene pedidos." }, { status: 409 });
+      await this.state.storage.put("cargas", cargas.filter((c) => c.id !== id));
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+
     if (url.pathname === "/cargas/remove" && request.method === "POST") {
       const { orderId } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};

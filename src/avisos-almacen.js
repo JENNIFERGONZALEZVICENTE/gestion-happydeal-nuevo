@@ -82,13 +82,17 @@ const TIPO_ETIQUETA = { colchon: "Colchón", almohada: "Almohada", topper: "Topp
 
 // Reserva de stock: un email por pedido con una etiqueta por bulto.
 // bultos: [{ articulo, parte }] ya desglosados (un canapé = varios bultos).
-export async function enviarReservaAlmacen(env, { pedido, cliente, lineasTexto, bultos }) {
+// agencia/fechaSalida (Jennifer, 2026-10-06): colchón por SEUR que llega
+// antes de que el cliente pueda recibirlo — se aparta hasta esa carga.
+export async function enviarReservaAlmacen(env, { pedido, cliente, lineasTexto, bultos, agencia, fechaSalida }) {
   const fecha = fechaHoyEs();
   const pdf = etiquetasReservaPdf(bultos.map((b, i) => ({
     pedido, cliente, articulo: b.articulo, parte: b.parte, bulto: i + 1, totalBultos: bultos.length, fecha,
   })));
   const texto = [
-    "Hay que RESERVAR en el almacén para este pedido (sale por Furniture):",
+    fechaSalida
+      ? `Hay que RESERVAR en el almacén para este pedido: sale por ${agencia || "SEUR"} en la carga del ${fechaSalida.slice(8, 10)}/${fechaSalida.slice(5, 7)}/${fechaSalida.slice(0, 4)} (NO antes, el cliente no puede recibirlo hasta entonces).`
+      : `Hay que RESERVAR en el almacén para este pedido (sale por ${agencia || "Furniture"}):`,
     "",
     ...lineasTexto.map((l) => "- " + l),
     "",
@@ -96,7 +100,8 @@ export async function enviarReservaAlmacen(env, { pedido, cliente, lineasTexto, 
     "",
     `Se adjuntan ${bultos.length} ${bultos.length === 1 ? "etiqueta" : "etiquetas"} (una por bulto) para pegar en cada parte.`,
   ].join("\n");
-  return enviarEmailAlmacen(env, { asunto: `Reserva de stock — ${pedido}`, texto, pdf, nombrePdf: `Reserva ${pedido}.pdf` });
+  const sale = fechaSalida ? ` (sale el ${fechaSalida.slice(8, 10)}/${fechaSalida.slice(5, 7)})` : "";
+  return enviarEmailAlmacen(env, { asunto: `Reserva de stock — ${pedido}${sale}`, texto, pdf, nombrePdf: `Reserva ${pedido}.pdf` });
 }
 
 // Bultos de un artículo SIN desglose de piezas (colchón, topper, almohada,
