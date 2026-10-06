@@ -3728,6 +3728,14 @@ export class InventoryStore {
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
     entry.referencia = referencia || "";
+    // "STOCK" = ya está en el almacén (Jennifer, 2026-10-06, BEZEN12263):
+    // queda marcado como recibido solo, y no hay que pedirlo a fábrica.
+    if (String(referencia || "").trim().toUpperCase() === "STOCK" && !entry.recibidoFabrica) {
+      entry.recibidoFabrica = true;
+      entry.fechaRecibido = new Date().toISOString();
+      entry.recibidoPorStock = true;
+      if (!entry.pedidoGenerado) entry.pedidoGenerado = true;
+    }
     await this.state.storage.put("backorders", backorders);
     return Response.json(entry);
   }

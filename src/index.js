@@ -5163,6 +5163,13 @@ async function guardarReferenciaPolival(id, referencia) {
   if (b) b.referencia = referencia;
   // "STOCK" manda la reserva al almacén con sus etiquetas (Jennifer, 2026-09-28).
   const data = await res.json().catch(() => ({}));
+  // STOCK = ya está en el almacén (Jennifer, 2026-10-06): el servidor lo
+  // marca recibido; si con eso el pedido ya está completo, sube a la carga.
+  if (b && data.recibidoPorStock) {
+    b.recibidoFabrica = true;
+    b.pedidoGenerado = true;
+    await checkAutoAddCarga(b.orderId);
+  }
   if (data.avisoReserva) {
     if (data.avisoReserva.ok && b) b.reservaEnviada = new Date().toISOString();
     alert(data.avisoReserva.ok
