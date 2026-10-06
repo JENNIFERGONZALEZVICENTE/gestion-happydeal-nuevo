@@ -1334,7 +1334,7 @@ export class OrdersStore {
       return Response.json((await this.state.storage.get("tareas")) || []);
     }
     if (url.pathname === "/tareas/guardar" && request.method === "POST") {
-      const { id, texto, fecha, pedidoId, pedidoRef, para, hecha, usuario } = await request.json();
+      const { id, texto, fecha, pedidoId, pedidoRef, para, hecha, nota, usuario } = await request.json();
       const tareas = (await this.state.storage.get("tareas")) || [];
       const ahora = new Date().toISOString();
       let t = id ? tareas.find((x) => x.id === id) : null;
@@ -1353,6 +1353,12 @@ export class OrdersStore {
         t.hecha = !!hecha;
         t.hechaPor = t.hecha ? usuario || null : null;
         t.fechaHecha = t.hecha ? ahora : null;
+      }
+      // Notas de la tarea (Jennifer, 2026-10-06): "ir rellenando información
+      // adicional" — historial con fecha y autor.
+      if (String(nota || "").trim()) {
+        t.notas = t.notas || [];
+        t.notas.push({ fecha: ahora, autor: usuario || null, texto: String(nota).trim() });
       }
       t.actualizado = ahora;
       await this.state.storage.put("tareas", tareas);

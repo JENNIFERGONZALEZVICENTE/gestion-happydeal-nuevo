@@ -2650,6 +2650,8 @@ function renderPage() {
       <input type="text" id="tarea-pedido" list="caso-pedidos-datalist" placeholder="BEZEN12276 o referencia de marketplace" autocomplete="off" />
     </label>
     <div id="tarea-pedido-info" class="caso-pedido-info"></div>
+    <div id="tarea-historial" class="caso-historial"></div>
+    <label class="caso-campo">Añadir nota <textarea id="tarea-nota" rows="3" placeholder="Información adicional, lo que se ha hecho, a quién se ha llamado..."></textarea></label>
     <div class="modal-actions">
       <button type="button" class="secondary" id="tarea-borrar-btn" style="margin-right:auto;color:#b91c1c">Borrar</button>
       <button type="button" class="secondary" id="tarea-modal-cancel">Cancelar</button>
@@ -8742,7 +8744,8 @@ function filaTarea(t, hoy) {
   return '<tr>' +
     '<td style="width:40px"><input type="checkbox" class="tarea-hecha-check" data-id="' + escapeAttr(t.id) + '"' + (t.hecha ? " checked" : "") + ' title="Marcar como hecha" /></td>' +
     '<td>' + (atrasada ? '<span class="badge" style="background:#dc2626;color:#fff">Atrasada · era el ' + escapeAttr(fechaTarea(t.fecha).slice(0, 5)) + '</span><br>' : "") + escapeAttr(t.texto || "") +
-      (t.hecha ? '<div style="font-size:11.5px;color:var(--muted)">Hecha por ' + escapeAttr(t.hechaPor || "") + " el " + escapeAttr(fechaHoraCaso(t.fechaHecha)) + '</div>' : "") + '</td>' +
+      (t.hecha ? '<div style="font-size:11.5px;color:var(--muted)">Hecha por ' + escapeAttr(t.hechaPor || "") + " el " + escapeAttr(fechaHoraCaso(t.fechaHecha)) + '</div>' : "") +
+      ((t.notas || []).length ? '<div style="font-size:12px;margin-top:4px;padding-left:8px;border-left:2px solid var(--border, #e5e7eb)">📝 <strong>' + escapeAttr(t.notas[t.notas.length - 1].autor || "") + '</strong> (' + escapeAttr(fechaHoraCaso(t.notas[t.notas.length - 1].fecha)) + '): ' + escapeAttr(t.notas[t.notas.length - 1].texto) + (t.notas.length > 1 ? ' <span style="color:var(--muted)">· ' + t.notas.length + ' notas</span>' : "") + '</div>' : "") + '</td>' +
     '<td><strong>' + escapeAttr(t.pedidoRef || "") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:300px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
     '<td style="white-space:nowrap">' + escapeAttr(RESPONSABLE_LABELS[t.para] || "Los dos") + '</td>' +
     '<td style="width:70px"><button type="button" class="secondary" data-tarea-abrir="' + escapeAttr(t.id) + '">Editar</button></td>' +
@@ -8810,6 +8813,12 @@ function abrirModalTarea(t) {
   const o = t && t.pedidoId != null ? allOrders.find(p => String(p.id) === String(t.pedidoId)) : null;
   document.getElementById("tarea-pedido-info").innerHTML = resumenPedidoCaso(o);
   document.getElementById("tarea-borrar-btn").style.display = t ? "" : "none";
+  document.getElementById("tarea-nota").value = "";
+  const notas = t ? t.notas || [] : [];
+  const hist = document.getElementById("tarea-historial");
+  hist.style.display = notas.length ? "" : "none";
+  hist.innerHTML = '<div style="font-weight:600;margin-bottom:4px">Notas</div>' + [...notas].reverse().map(n =>
+    '<div class="caso-historial-item"><div class="meta">' + escapeAttr(fechaHoraCaso(n.fecha)) + (n.autor ? " · " + escapeAttr(n.autor) : "") + '</div>' + escapeAttr(n.texto) + '</div>').join("");
   document.getElementById("tarea-modal-overlay").classList.add("open");
 }
 document.getElementById("tarea-pedido").addEventListener("change", () => {
@@ -8825,6 +8834,7 @@ document.getElementById("tarea-modal-ok").addEventListener("click", async () => 
     para: document.getElementById("tarea-para").value,
     pedidoId: o ? o.id : null,
     pedidoRef: o ? refLabel(o) : pedidoTxt,
+    nota: document.getElementById("tarea-nota").value,
     usuario: currentUser,
   };
   if (!body.texto || !body.fecha) { alert("Pon qué hay que hacer y la fecha."); return; }
