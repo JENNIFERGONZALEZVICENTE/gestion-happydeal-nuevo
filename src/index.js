@@ -762,6 +762,47 @@ function resolveMarketplaceItem(e, catalogMap) {
 // aquí (ver el handler de /api/<plataforma>/import) y se construye UN
 // pedido con TANTOS `items` como filas — mismo patrón que ya usa
 // mapOrder() de Shopify para los packs (varias líneas, un pedido).
+// "Forma" de un número de pedido de marketplace: primer carácter y
+// largo de cada tramo de cifras (ej. Leroy Merlin "002-26259L13344-A" ->
+// "0|#3-#5L#5-X", Worten "83728791-A" -> "8|#8-X").
+function formaPedidoMarketplace(ref) {
+  const r = String(ref || "").trim().toUpperCase().replace(/-[A-Z]$/, "-X");
+  return r.slice(0, 1) + "|" + r.replace(/\d+/g, (m) => "#" + m.length);
+}
+// null si el fichero encaja con la tienda; si no, { mensaje, probable, ajenos, total, ejemplo }.
+function comprobarTiendaFichero(orders, platform, existentes) {
+  const formas = new Map();
+  const refs = new Map();
+  for (const o of existentes) {
+    if (!o.platform || o.platform === "Shopify" || !o.orderRef) continue;
+    const f = formaPedidoMarketplace(o.orderRef);
+    if (!formas.has(f)) formas.set(f, new Set());
+    formas.get(f).add(o.platform);
+    if (o.platform !== platform) refs.set(String(o.orderRef).toUpperCase(), o.platform);
+  }
+  const votos = {};
+  let ajenos = 0;
+  let ejemplo = "";
+  for (const o of orders) {
+    const ref = String(o.orderRef || "").toUpperCase();
+    const enOtra = refs.get(ref);
+    const f = formas.get(formaPedidoMarketplace(ref));
+    const otraPorForma = f && !f.has(platform) ? [...f][0] : null;
+    const otra = enOtra || otraPorForma;
+    if (otra) {
+      ajenos++;
+      votos[otra] = (votos[otra] || 0) + 1;
+      if (!ejemplo) ejemplo = o.orderRef;
+    }
+  }
+  if (!orders.length || ajenos < Math.max(1, Math.ceil(orders.length / 2))) return null;
+  const probable = Object.entries(votos).sort((a, b) => b[1] - a[1])[0][0];
+  return {
+    probable, ajenos, total: orders.length, ejemplo,
+    mensaje: "Este fichero no parece de " + platform + ": " + ajenos + " de " + orders.length + " pedidos tienen el formato de " + probable + " (ej. " + ejemplo + "). No se ha subido nada.",
+  };
+}
+
 function mapMarketplaceOrder(entriesGrupo, catalogMap, platform) {
   const first = entriesGrupo[0];
   const items = [];
@@ -7077,12 +7118,22 @@ function initMarketplacePlatform(platformId) {
       return;
     }
     statusEl.textContent = "Subiendo " + entries.length + " pedidos...";
-    const res = await fetch("/api/" + platformId + "/import", {
+    const subir = forzar => fetch("/api/" + platformId + "/import", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ entries }),
+      body: JSON.stringify({ entries, forzar }),
     });
-    const data = await res.json();
+    let res = await subir(false);
+    let data = await res.json();
+    // Fichero de otra tienda (Jennifer, 2026-10-06): no se sube nada salvo
+    // que confirme que es correcto.
+    if (res.status === 409 && data.tiendaIncorrecta) {
+      statusEl.textContent = "⚠ " + data.mensaje;
+      if (!confirm("⚠ FICHERO INCORRECTO — " + data.mensaje + " ¿Quizá querías subirlo en " + data.probable + "? Pulsa Cancelar para no subir nada. Pulsa Aceptar SOLO si estás segura de que es el fichero correcto y quieres subirlo igualmente.")) return;
+      statusEl.textContent = "Subiendo " + entries.length + " pedidos...";
+      res = await subir(true);
+      data = await res.json();
+    }
     statusEl.textContent = data.actualizados + " pedidos actualizados · " + data.procesados + " tramitados ahora (nuevos, con descuento de stock)" + (data.sinMatch ? " · " + data.sinMatch + " con SKU sin reconocer" : "");
     await loadMarketplacePedidos(platformId);
     loadOrders(); // refresca el aviso rojo de fecha límite del menú
@@ -9935,7 +9986,7 @@ async function handleFetch(request, env) {
     const marketplaceImportMatch = url.pathname.match(/^\/api\/(carrefour|maison-du-monde|worten|conforama|conforama-es|leroy-merlin)\/import$/);
     if (marketplaceImportMatch && request.method === "POST") {
       const platform = MARKETPLACE_PLATFORM_BY_ID[marketplaceImportMatch[1]];
-      const { entries } = await request.json();
+      const { entries, forzar } = await request.json();
       const catalogRes = await inventoryStub(env).fetch("https://do/catalog");
       const catalogList = await catalogRes.json();
       const catalogMap = Object.fromEntries(catalogList.map((p) => [p.productId, p]));
@@ -9953,6 +10004,15 @@ async function handleFetch(request, env) {
       const orders = [...entriesPorPedido.values()].map((grupo) => mapMarketplaceOrder(grupo, catalogMap, platform));
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
+      // Fichero subido en la tienda equivocada (Jennifer, 2026-10-06: el de
+      // Worten se subió en Leroy Merlin y creó 52 pedidos falsos). Antes de
+      // guardar nada se compara con los pedidos que ya hay de cada tienda;
+      // si no encaja, se avisa y no se sube (salvo que confirme "forzar").
+      if (!forzar) {
+        const existentes = await (await stub.fetch("https://do/orders")).json();
+        const aviso = comprobarTiendaFichero(orders, platform, existentes);
+        if (aviso) return Response.json({ ok: false, tiendaIncorrecta: true, ...aviso }, { status: 409 });
+      }
       // PROCESAMIENTO_DESDE (arriba del fichero): solo los pedidos con
       // fecha igual o posterior pasan por el motor real de agencia/stock
       // (/orders/import); el resto se guarda sin tocar stock
