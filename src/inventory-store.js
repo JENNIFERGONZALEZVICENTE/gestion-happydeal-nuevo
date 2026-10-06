@@ -1304,6 +1304,14 @@ export function findBestPrefixMatch(segmentRaw, products) {
     if (bestForProduct) matches.push({ product: p, prefix: bestForProduct });
   }
   if (matches.length === 0) return null;
+  // Ficha "LIQUIDACIÓN" con código corto (ej. canapé de madera "CANMON",
+  // que cabe dentro de "PACKCANMONROB"): solo cuenta si el código dice
+  // LIQUIDACION, y en ese caso gana ella (Jennifer, 2026-10-06, BEZEN12242/
+  // 12263: la campanita preguntaba siempre por la ficha de liquidación).
+  const esLiquidacion = (m) => /LIQUIDACI[OÓ]N/i.test(m.product.stockModel || m.product.title || "");
+  const pideLiquidacion = /LIQUIDACI[OÓ]N/.test(segment);
+  const preferidas = matches.filter((m) => esLiquidacion(m) === pideLiquidacion);
+  if (preferidas.length && preferidas.length < matches.length) matches.splice(0, matches.length, ...preferidas);
   matches.sort((a, b) => b.prefix.length - a.prefix.length);
   const winner = matches[0];
   const idx = segment.indexOf(winner.prefix);
