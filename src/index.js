@@ -3681,7 +3681,9 @@ document.getElementById("descargar-excel-pendientes-btn").addEventListener("clic
       "Coste ud (tarifa)": costeUd(b),
       "Coste total (tarifa)": costeUd(b) === "" ? "" : Math.round(costeUd(b) * (b.cantidad || 1) * 100) / 100,
       "Ref. Polival": b.referencia || "",
-      "FUR/FPK": b.esPack && b.tipo === "colchon" ? (b.tipoEnvio || "") : "",
+      // Solo tiene sentido para lo que hay que pedir (Jennifer, 2026-10-06): un
+      // colchón que sale de stock no lleva FUR ni FPK.
+      "FUR/FPK": b.esPack && b.tipo === "colchon" && b.estado !== "cubierto" ? (b.tipoEnvio || "") : "",
       "Mercancía para pedir a fábrica": b.mercanciaFabrica || "",
       "Fecha del pedido": b.fecha || "",
       "Previsión de entrega": (b.fechaEstimadaLlegada || b.previsionEntrega) ? new Date((b.fechaEstimadaLlegada || b.previsionEntrega).slice(0, 10) + "T12:00:00").toLocaleDateString("es-ES") : "",
@@ -6038,11 +6040,12 @@ function furnitureRowCells(o) {
         // aquí (en vez de ocultarlo) para que quede claro que ese pedido lo
         // tiene, por si al final coincide con la tapicería y le interesa
         // mandarlo junto en la carga.
-        const esFpk = b.tipo === "colchon" && b.tipoEnvio === "FPK";
+        const deStock = b.tipo === "colchon" && b.estado === "cubierto" && String(b.id).endsWith("-cubierto");
+        const esFpk = !deStock && b.tipo === "colchon" && b.tipoEnvio === "FPK";
         return \`
         <label class="furniture-item-check\${esFpk ? " furniture-item-fpk" : ""}">
           <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
-          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + avisoRefDuplicada(b) + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}\${b.desdeAbierto ? ' <span class="abierto-tag">🟣 Sale de un colchón ABIERTO</span>' : ""}
+          \${refDeOtroPedido(b)}\${b.referencia ? b.referencia + avisoRefDuplicada(b) + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${esFpk ? ' <span class="fpk-tag">FPK · en ' + b.proveedor + ', sale independiente</span>' : ""}${deStock ? ' <span class="pedido-generado-tag">✓ Descontado de stock</span>' : ""}\${b.transformadoDesde ? ' <span class="transformado-tag" title="Transformado de un ' + b.transformadoDesde + ' que había en stock">🔧 Subido a transformar (desde ' + b.transformadoDesde + (b.fechaTransformacion ? ", " + new Date(b.fechaTransformacion).toLocaleDateString("es-ES") : "") + ')</span>' : ""}\${b.desdeAbierto ? ' <span class="abierto-tag">🟣 Sale de un colchón ABIERTO</span>' : ""}
         </label>\${todoJunto && b.tipo === "colchon" ? '<div class="todo-junto-tag">Ha solicitado enviarlo todo junto — NO SACAR POR SEPARADO</div>' : ""}\${reservaAlmacenHtml(b)}\${items.length > 1 ? \`<button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="1" title="Sacar este artículo del envío: se queda pendiente como línea propia con la referencia terminada en 2">Enviar aparte</button>\` : ""}\${abiertoTagHtml(b)}
       \`;
       }).join("")

@@ -2696,6 +2696,10 @@ export class InventoryStore {
         proveedor,
         estado: "cubierto",
         recibidoFabrica: true,
+        // Colchón que sale de stock en un pedido de Furniture (Jennifer,
+        // 2026-10-06, BEZEN12286): ya está descontado y reservado en el
+        // almacén, sale con la tapicería — nunca FPK ni Luso/New.
+        tipoEnvio: item.tipo === "colchon" && (agencia === "FURNITURE" || esPack) ? "FUR" : undefined,
         platform,
         orderRef,
       });
@@ -4621,7 +4625,11 @@ export class InventoryStore {
     // (no parte del pack) que comparte pedido con tapicería. No hay forma
     // automática de saber si debe esperar al mismo envío o salir aparte —
     // se marca para que ella decida pedido a pedido (ver reviewNote).
-    if (hasTapiceria && flat.some((c) => c.tipo === "colchon" && !c.fromPack)) {
+    // Si el colchón está en stock no hay nada que decidir (Jennifer,
+    // 2026-10-06, BEZEN12286): se descuenta, se reserva y sale con la
+    // tapicería.
+    const enStock = (c) => c.product && ((stock[stockKey(c.product.stockModel, c.talla)] || {}).cantidad || 0) >= (c.qty || 1);
+    if (hasTapiceria && flat.some((c) => c.tipo === "colchon" && !c.fromPack && !enStock(c))) {
       needsReview = true;
       reviewReasons.push("Hay un colchón suelto (no es parte del pack) en un pedido que también lleva tapicería. Decide si debe ir en el mismo envío que la tapicería o aparte.");
     }
