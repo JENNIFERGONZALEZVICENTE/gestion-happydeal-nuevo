@@ -2416,10 +2416,11 @@ function renderPage() {
     <button type="button" id="caso-nuevo-btn">+ Nuevo caso</button>
     <input id="casos-search" type="text" placeholder="Buscar por pedido, cliente, teléfono o motivo..." style="min-width:280px" />
     <select id="casos-responsable-filter">
-      <option value="">Todos los responsables</option>
-      <option value="JENNIFER">Jennifer</option>
-      <option value="SERGIO">Sergio</option>
-      <option value="AMBOS">Los dos</option>
+      <option value="">Mías y de los dos</option>
+      <option value="todas">Todas (también las del compañero)</option>
+      <option value="JENNIFER">Solo de Jennifer</option>
+      <option value="SERGIO">Solo de Sergio</option>
+      <option value="AMBOS">Solo de los dos</option>
     </select>
     <select id="casos-vista">
       <option value="revisar">Para revisar hoy</option>
@@ -2442,9 +2443,10 @@ function renderPage() {
     <button type="button" id="tarea-nueva-btn">+ Nueva tarea</button>
     <input id="tareas-search" type="text" placeholder="Buscar por tarea o pedido..." style="min-width:240px" />
     <select id="tareas-para-filter">
-      <option value="">Para todos</option>
-      <option value="JENNIFER">Jennifer</option>
-      <option value="SERGIO">Sergio</option>
+      <option value="">Mías y de los dos</option>
+      <option value="todas">Todas (también las del compañero)</option>
+      <option value="JENNIFER">Solo de Jennifer</option>
+      <option value="SERGIO">Solo de Sergio</option>
     </select>
     <select id="tareas-vista">
       <option value="pendientes">Pendientes</option>
@@ -8479,11 +8481,11 @@ let casos = [];
 let casoEditando = null;
 async function loadCasos() {
   try { casos = await (await fetch("/api/casos")).json(); } catch (e) { return; }
-  const abiertos = casos.filter(casoPorRevisar).length;
+  const abiertos = casos.filter(c => casoPorRevisar(c) && esDeMiAgenda(c.responsable)).length;
   const badge = document.getElementById("casos-badge");
   badge.style.display = abiertos ? "" : "none";
   badge.textContent = abiertos;
-  badge.style.background = casos.some(c => c.urgente && c.estado !== "cerrado") ? "#dc2626" : "#0d9488";
+  badge.style.background = casos.some(c => c.urgente && c.estado !== "cerrado" && esDeMiAgenda(c.responsable)) ? "#dc2626" : "#0d9488";
   if (document.getElementById("view-casos").style.display !== "none") renderCasos();
 }
 // Revisado hoy (Jennifer, 2026-10-05): "si ya se ha revisado un día, que
@@ -8491,6 +8493,27 @@ async function loadCasos() {
 function revisadoHoy(c) {
   const u = ultimoSeguimiento(c);
   return !u.sistema && !!u.fecha && haceDias(u.fecha).n <= 0;
+}
+// Cada uno ve por defecto lo suyo y lo de los dos (Jennifer, 2026-10-06:
+// "las tareas de Sergio solo las quiero ver cuando Sergio no haya venido").
+function esDeMiAgenda(persona) {
+  const quien = persona || "AMBOS";
+  return quien === "AMBOS" || quien === currentUser;
+}
+function filtroPersonaAgenda(valor, persona) {
+  const quien = persona || "AMBOS";
+  if (valor === "todas") return true;
+  if (!valor) return esDeMiAgenda(quien);
+  return quien === valor;
+}
+function rotularFiltrosAgenda() {
+  const otro = USERS.find(u => u !== currentUser);
+  const nombre = u => u ? u.charAt(0) + u.slice(1).toLowerCase() : "";
+  ["tareas-para-filter", "casos-responsable-filter"].forEach(id => {
+    const sel = document.getElementById(id);
+    sel.querySelector('option[value=""]').textContent = "Mías (" + nombre(currentUser) + ") y de los dos";
+    sel.querySelector('option[value="todas"]').textContent = "Todas (también las de " + nombre(otro) + ")";
+  });
 }
 function casoPorRevisar(c) {
   return c.estado !== "cerrado" && (c.urgente || !revisadoHoy(c));
@@ -8540,6 +8563,7 @@ function buscarPedidoCaso(texto) {
 const RESPONSABLE_LABELS = { AMBOS: "Los dos", JENNIFER: "Jennifer", SERGIO: "Sergio" };
 
 function selectAgenda() {
+  rotularFiltrosAgenda();
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.agenda === "casos"));
   document.getElementById("view-title").textContent = "Agenda de casos";
   hideAllViews();
@@ -8557,7 +8581,7 @@ function renderCasos() {
     : vista === "abiertos" ? c.estado !== "cerrado"
     : casoPorRevisar(c);
   const filas = casos.filter(c => enVista(c)
-    && (!resp || (c.responsable || "AMBOS") === resp)
+    && filtroPersonaAgenda(resp, c.responsable)
     && (!q || [c.pedidoRef, c.cliente, c.telefono, c.motivo].join(" ").toLowerCase().includes(q)));
   filas.sort((a, b) => verCerrados
     ? String(b.fechaCierre || "").localeCompare(String(a.fechaCierre || ""))
@@ -8686,7 +8710,7 @@ function tareasDeHoy() {
 }
 async function loadTareas() {
   try { tareas = await (await fetch("/api/tareas")).json(); } catch (e) { return; }
-  const deHoy = tareasDeHoy();
+  const deHoy = tareasDeHoy().filter(tareaParaMi);
   const atrasadas = deHoy.filter(t => t.fecha < hoyMadrid()).length;
   const badge = document.getElementById("tareas-badge");
   badge.style.display = deHoy.length ? "" : "none";
@@ -8710,6 +8734,7 @@ function tareaTag(o) {
 }
 
 function selectTareas() {
+  rotularFiltrosAgenda();
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.agenda === "tareas"));
   document.getElementById("view-title").textContent = "Agenda · Tareas";
   hideAllViews();
@@ -8757,7 +8782,7 @@ function renderTareas() {
   const para = document.getElementById("tareas-para-filter").value;
   const verHechas = document.getElementById("tareas-vista").value === "hechas";
   const filas = tareas.filter(t => !!t.hecha === verHechas
-    && (!para || !t.para || t.para === "AMBOS" || t.para === para)
+    && filtroPersonaAgenda(para, t.para)
     && (!q || [t.texto, t.pedidoRef].join(" ").toLowerCase().includes(q)));
   const nHoy = filas.filter(t => !t.hecha && t.fecha <= hoy).length;
   document.getElementById("tareas-count").textContent = verHechas ? filas.length + " tareas hechas" : filas.length + " tareas pendientes" + (nHoy ? " · " + nHoy + " para hoy o atrasadas" : "");
