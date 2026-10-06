@@ -625,6 +625,21 @@ export class OrdersStore {
       return Response.json({ ok: true });
     }
 
+    // Borrar pedidos subidos por error (Jennifer, 2026-10-06: un fichero de
+    // Worten subido en Leroy Merlin creó 52 pedidos "LM-…" falsos). Solo
+    // borra los ids indicados; no toca stock ni pendientes.
+    if (url.pathname === "/orders/borrar" && request.method === "POST") {
+      const { ids } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const borrados = [];
+      for (const id of ids || []) {
+        if (orders[id]) { delete orders[id]; borrados.push(id); }
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, borrados });
+    }
+
     if (url.pathname === "/orders/unprocess" && request.method === "POST") {
       const { ids } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};

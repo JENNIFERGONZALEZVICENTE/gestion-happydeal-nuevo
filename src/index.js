@@ -10863,6 +10863,11 @@ async function handleFetch(request, env) {
     }
 
     // Agenda de casos (Jennifer, 2026-10-05).
+    if (url.pathname === "/api/pedidos/borrar" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/borrar", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/pedidos/direccion" && request.method === "POST") {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do/orders/direccion", { method: "POST", body: await request.text() });
