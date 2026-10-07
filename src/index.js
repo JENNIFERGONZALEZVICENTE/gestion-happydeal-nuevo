@@ -6737,6 +6737,18 @@ function resolveKnownOrderNumber(digitsStr, knownOrderNumbers) {
     const candidato = Number(digitsStr.slice(0, digitsStr.length - cut));
     if (knownOrderNumbers.has(candidato)) return candidato;
   }
+  // Referencia recortada POR DELANTE para que quepa en 15 caracteres
+  // (Jennifer, 2026-10-07, REP6236L38574-A = reposición de Leroy Merlin
+  // 002-26236L38574-A, pedido 22623638574): al poner "REP"/"GC" delante se
+  // pierden los primeros dígitos, así que el número no es ningún pedido.
+  // Se busca el pedido cuyo número TERMINA en esos dígitos (con y sin el
+  // sufijo de envío), solo si hay uno y solo uno.
+  for (const cut of [0, 1, 2]) {
+    if (digitsStr.length - cut < 6) break;
+    const cola = digitsStr.slice(0, digitsStr.length - cut);
+    const coinciden = [...knownOrderNumbers].filter((n) => String(n).endsWith(cola));
+    if (coinciden.length === 1) return coinciden[0];
+  }
   return full || null;
 }
 function extractTrackingOrderNumber(text, knownOrderNumbers) {
