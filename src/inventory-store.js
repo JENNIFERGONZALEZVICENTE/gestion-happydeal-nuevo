@@ -3997,7 +3997,7 @@ export class InventoryStore {
   // aparece: SEUR usa el mismo botón "Preparar para SEUR" que un colchón
   // suelto normal (ver esColchonSeur en index.js); FURNITURE usa la línea
   // independiente de Furniture, igual que una reposición de tapicería.
-  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades }) {
+  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades, piezas, piezasIdx, canapeCompleto }) {
     const products = await this.load("products", {});
     const resolved = resolverItemReposicion(item, cambio, products);
     // Número de unidades (Jennifer, 2026-10-07: "tengo que poder elegir el
@@ -4078,7 +4078,13 @@ export class InventoryStore {
     // (COLCHÓN/CABECERO...) y se perdería el modelo real, así que se
     // ignora y se mantiene el nombre completo del artículo.
     const tieneDesglosePiezas = product.product_type === "Canapé" || product.stockModel.toLowerCase().includes("base");
-    const stockModelFinal = (tieneDesglosePiezas && parte) ? parte : product.stockModel;
+    // Varias piezas a la vez o el canapé entero (Jennifer, 2026-10-07): una
+    // sola reposición (misma referencia, mismo pedido a fábrica y mismo
+    // envío). El modelo es "TAPA + CAJÓN…" o el canapé completo.
+    const variasPiezas = tieneDesglosePiezas && Array.isArray(piezas) && piezas.length > 1;
+    const stockModelFinal = !tieneDesglosePiezas || canapeCompleto ? product.stockModel
+      : variasPiezas ? piezas.join(" + ")
+      : (parte || product.stockModel);
 
     const backorders = await this.load("backorders", []);
     const id = crypto.randomUUID();
@@ -4103,6 +4109,13 @@ export class InventoryStore {
     });
     const nuevo = backorders.find((b) => b.id === id);
     if (enStock > 0) nuevo.enStock = enStock;
+    // Para sacar en Furniture un bulto por pieza elegida (ver
+    // buildFurnitureExport): el modelo real del artículo y qué piezas son.
+    if (tieneDesglosePiezas && Array.isArray(piezasIdx) && piezasIdx.length) {
+      nuevo.stockModelArticulo = product.stockModel;
+      nuevo.piezasIdx = piezasIdx.map(Number).filter((n) => Number.isInteger(n) && n >= 0);
+      if (canapeCompleto) nuevo.canapeCompleto = true;
+    }
     // Reposición que en realidad es un CAMBIO (Jennifer, 2026-10-07): se
     // apunta qué artículo tenía el pedido antes.
     if (cambio) nuevo.cambio = { de: String(cambio.de || "") };

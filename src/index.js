@@ -1016,7 +1016,12 @@ async function reservarStockManual(env, entry, { agencia, fechaSalida } = {}) {
   const pedido = referenciaPedidoAlmacen(entry);
   let bultos;
   if (entry.tipo === "tapiceria") {
-    const piezas = piezasBackorder(entry, (o && o.product) || "", tapaPartidaFurniture((o && o.services) || ""), (o && o.services) || "");
+    let piezas = piezasBackorder(entry, (o && o.product) || "", tapaPartidaFurniture((o && o.services) || ""), (o && o.services) || "");
+    // Reposición de varias piezas / canapé completo (Jennifer, 2026-10-07).
+    if (Array.isArray(entry.piezasIdx) && entry.piezasIdx.length && entry.stockModelArticulo) {
+      const todas = piezasBackorder({ ...entry, stockModel: entry.stockModelArticulo }, (o && o.product) || "", tapaPartidaFurniture((o && o.services) || ""), (o && o.services) || "");
+      piezas = entry.canapeCompleto ? todas : entry.piezasIdx.map((i) => todas[i]).filter(Boolean);
+    }
     bultos = piezas.map((p) => {
       // p.texto = "<referencia> <parte> <resto>": para la etiqueta, el
       // artículo sin referencia ni parte, y la parte en grande aparte.
@@ -2546,6 +2551,7 @@ function renderPage() {
     </div>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Pieza exacta a reponer:</label>
     <select id="reposicion-pieza-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px"></select>
+    <div id="reposicion-piezas-checks" style="display:none;border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow:auto"></div>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Unidades:</label>
     <input id="reposicion-unidades" type="number" min="1" max="20" step="1" value="1" style="width:100px;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
     <div id="reposicion-colchon-agencia-block" style="display:none">
@@ -8249,6 +8255,8 @@ async function cargarPiezasReposicion() {
   const idx = Number(document.getElementById("reposicion-item-select").value);
   const item = reposicionOrderActual.items[idx];
   if (!item) return;
+  piezaSelect.style.display = "";
+  document.getElementById("reposicion-piezas-checks").style.display = "none";
   const cambio = datosCambioReposicion();
   if (cambio && !cambio.talla) {
     piezaSelect.innerHTML = '<option value="">Elige primero la medida nueva</option>';
@@ -8281,7 +8289,24 @@ async function cargarPiezasReposicion() {
   // la línea completa con modelo/medida/color, solo para que se vea clara
   // en el desplegable y quede apuntada en la mercancía a pedir.
   piezaSelect.innerHTML = ultimasPiezasReposicion.map((p, i) => \`<option value="\${i}">\${escapeAttr(p.texto)}</option>\`).join("");
+  // Varias piezas o el canapé entero (Jennifer, 2026-10-07): si el artículo
+  // se descompone en varias piezas, casillas en vez del desplegable — todo
+  // va en UNA reposición (misma referencia, mismo pedido a fábrica y mismo
+  // envío).
+  const checks = document.getElementById("reposicion-piezas-checks");
+  const variasPiezas = ultimasPiezasReposicion.length > 1;
+  piezaSelect.style.display = variasPiezas ? "none" : "";
+  checks.style.display = variasPiezas ? "" : "none";
+  checks.innerHTML = !variasPiezas ? "" :
+    '<label style="display:block;padding:4px 0;font-weight:700"><input type="checkbox" id="reposicion-canape-completo"> CANAPÉ COMPLETO (todas las piezas)</label>'
+    + ultimasPiezasReposicion.map((p, i) => '<label style="display:block;padding:3px 0;font-size:13px"><input type="checkbox" class="reposicion-pieza-check" value="' + i + '"> ' + escapeAttr(p.texto) + "</label>").join("");
 }
+document.getElementById("reposicion-piezas-checks").addEventListener("change", (e) => {
+  // "Canapé completo" marca/desmarca todas las piezas de golpe.
+  if (e.target.id === "reposicion-canape-completo") {
+    document.querySelectorAll(".reposicion-pieza-check").forEach(c => { c.checked = e.target.checked; c.disabled = e.target.checked; });
+  }
+});
 document.getElementById("reposicion-item-select").addEventListener("change", cargarPiezasReposicion);
 // SEUR nunca hace recogidas (Jennifer, 2026-09-22) — la pregunta de
 // recogida solo tiene sentido si se eligió FURNITURE; y la pregunta de
@@ -8312,11 +8337,24 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
   if (!reposicionOrderActual) return;
   const idx = Number(document.getElementById("reposicion-item-select").value);
   const item = reposicionOrderActual.items[idx];
-  const piezaIdx = document.getElementById("reposicion-pieza-select").value;
-  const piezaElegida = piezaIdx !== "" ? ultimasPiezasReposicion[Number(piezaIdx)] : null;
-  const nota = document.getElementById("reposicion-motivo").value.trim();
-  const piezaTexto = [piezaElegida?.texto, nota].filter(Boolean).join(" · ");
   const resultEl = document.getElementById("reposicion-modal-result");
+  // Piezas elegidas: casillas si el artículo tiene varias (canapé/base),
+  // desplegable si solo tiene una.
+  const conCasillas = document.getElementById("reposicion-piezas-checks").style.display !== "none";
+  const canapeCompleto = conCasillas && !!document.getElementById("reposicion-canape-completo")?.checked;
+  let piezasIdx = conCasillas
+    ? [...document.querySelectorAll(".reposicion-pieza-check:checked")].map(c => Number(c.value))
+    : (document.getElementById("reposicion-pieza-select").value !== "" ? [Number(document.getElementById("reposicion-pieza-select").value)] : []);
+  if (canapeCompleto) piezasIdx = ultimasPiezasReposicion.map((p, i) => i);
+  if (conCasillas && !piezasIdx.length) {
+    resultEl.textContent = "Marca las piezas a reponer (o CANAPÉ COMPLETO).";
+    return;
+  }
+  const piezasElegidas = piezasIdx.map(i => ultimasPiezasReposicion[i]).filter(Boolean);
+  const piezaElegida = piezasElegidas.length === 1 ? piezasElegidas[0] : null;
+  const nota = document.getElementById("reposicion-motivo").value.trim();
+  const textoPiezas = canapeCompleto ? "CANAPÉ COMPLETO" : piezasElegidas.map(p => p.texto).join(" + ");
+  const piezaTexto = [textoPiezas, nota].filter(Boolean).join(" · ");
   // Validación específica de colchón (Jennifer, 2026-09-22): sin esto no se
   // sabe si va por SEUR o Furniture, ni si hace falta recogida.
   const agenciaReposicion = document.getElementById("reposicion-agencia-select").value;
@@ -8359,6 +8397,10 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
       // características (medida, color) se conservan igual, vienen del
       // propio artículo resuelto en el servidor.
       parte: piezaElegida?.parte || null,
+      // Varias piezas / canapé completo (Jennifer, 2026-10-07).
+      piezas: conCasillas ? piezasElegidas.map(p => p.parte) : null,
+      piezasIdx: conCasillas ? piezasIdx : null,
+      canapeCompleto,
       agenciaReposicion: ultimoTipoReposicion === "colchon" ? agenciaReposicion : null,
       recogida: recogidaValue === "si",
       recogidaDestino: recogidaValue === "si" ? recogidaDestino : null,
@@ -9541,14 +9583,27 @@ async function buildFurnitureExport(env, cargaId) {
       }
     }
     const telefono = limpiarTelefonoFurniture(o.phone);
-    const descrip = [b.referencia, b.stockModel, b.talla, b.color].filter(Boolean).join(" ");
-    rows.push([
-      fechaTexto, "", "REP" + referenciaPedido(o), o.name, o.furnitureAddress || o.address || "",
-      o.postalCode || "", o.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
-      "", "", "", "", "", "", "", "", "", "", "",
-      montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
-      o.email || "", provinciaPorCp(o.postalCode), "",
-    ]);
+    // Varias piezas o canapé completo (Jennifer, 2026-10-07): un bulto por
+    // pieza elegida, con las mismas reglas que un canapé normal (y por cada
+    // unidad). Las reposiciones antiguas de una pieza siguen como siempre.
+    let descripciones = [[b.referencia, b.stockModel, b.talla, b.color].filter(Boolean).join(" ")];
+    if (Array.isArray(b.piezasIdx) && b.piezasIdx.length && b.stockModelArticulo) {
+      const todas = piezasBackorder({ ...b, stockModel: b.stockModelArticulo, cantidad: 1 }, o.product, tapaPartidaFurniture(o.services), o.services);
+      const elegidas = b.canapeCompleto ? todas : b.piezasIdx.map((i) => todas[i]).filter(Boolean);
+      if (elegidas.length) {
+        descripciones = [];
+        for (let u = 0; u < (b.cantidad || 1); u++) for (const p of elegidas) descripciones.push(p.texto);
+      }
+    }
+    for (const descrip of descripciones) {
+      rows.push([
+        fechaTexto, "", "REP" + referenciaPedido(o), o.name, o.furnitureAddress || o.address || "",
+        o.postalCode || "", o.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
+        "", "", "", "", "", "", "", "", "", "", "",
+        montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
+        o.email || "", provinciaPorCp(o.postalCode), "",
+      ]);
+    }
   }
 
   // Artículos enviados aparte (Jennifer, 2026-09-29): su propia carga
