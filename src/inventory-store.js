@@ -3980,9 +3980,12 @@ export class InventoryStore {
   // aparece: SEUR usa el mismo botón "Preparar para SEUR" que un colchón
   // suelto normal (ver esColchonSeur en index.js); FURNITURE usa la línea
   // independiente de Furniture, igual que una reposición de tapicería.
-  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio }) {
+  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades }) {
     const products = await this.load("products", {});
     const resolved = resolverItemReposicion(item, cambio, products);
+    // Número de unidades (Jennifer, 2026-10-07: "tengo que poder elegir el
+    // número de unidades") — antes siempre 1.
+    const cantidad = Math.max(1, Math.min(20, Math.floor(Number(unidades) || 1)));
     if (resolved.tipo === "pack" || resolved.tipo === "desconocido") {
       return Response.json({ ok: false, error: "No se ha podido resolver este artículo contra el Catálogo." }, { status: 400 });
     }
@@ -4014,24 +4017,24 @@ export class InventoryStore {
       mercanciaFabrica = product.stockModel + (talla ? " - MEDIDA: " + talla : "") + (color ? " - COLOR: " + color : "");
     }
 
-    // Stock real solo para colchones (Jennifer, 2026-09-22) — cantidad
-    // siempre 1 en una reposición, así que es binario: o hay una unidad en
-    // el fondo común y se descuenta en silencio, o no la hay y se deja el
-    // texto por defecto para pedirla a Luso/New (igual que cualquier
-    // pendiente normal de colchón suelto).
+    // Stock real solo para colchones (Jennifer, 2026-09-22) — es binario:
+    // o hay en el fondo común TODAS las unidades de la reposición y se
+    // descuentan en silencio, o no las hay y se deja el texto por defecto
+    // para pedirlas a Luso/New (igual que cualquier pendiente normal de
+    // colchón suelto).
     let recibidoFabrica = false;
     if (tipo === "colchon") {
       const congelado = await this.load("stockCongelado", false);
       const stock = await this.load("stock", {});
       const key = stockKey(product.stockModel, talla);
       const row = stock[key] || { stockModel: product.stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
-      if (row.cantidad > 0) {
+      if (row.cantidad >= cantidad) {
         if (!congelado) {
-          row.cantidad -= 1;
+          row.cantidad -= cantidad;
           stock[key] = row;
           await this.state.storage.put("stock", stock);
           await this.logMovement({
-            stockModel: product.stockModel, talla, campo: "cantidad", delta: -1, resultante: row.cantidad,
+            stockModel: product.stockModel, talla, campo: "cantidad", delta: -cantidad, resultante: row.cantidad,
             origen: "reposicion", orderNumber, platform, orderRef,
           });
         }
@@ -4069,7 +4072,7 @@ export class InventoryStore {
       // al fondo del listado y se quedaría "traspapelada" en vez de
       // aparecer arriba, recién añadida. orderDate (recibido del cliente)
       // se ignora a propósito para este campo.
-      talla, color, tipo, cantidad: 1, orderDate: new Date().toISOString(),
+      talla, color, tipo, cantidad, orderDate: new Date().toISOString(),
       esPack: false, proveedor, needsDecision: false, referencia, mercanciaFabrica,
       platform, orderRef, reposicion: true, piezaTexto: piezaTexto || "",
       recibidoFabrica,

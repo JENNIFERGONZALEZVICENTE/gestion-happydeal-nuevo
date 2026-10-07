@@ -2546,6 +2546,8 @@ function renderPage() {
     </div>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Pieza exacta a reponer:</label>
     <select id="reposicion-pieza-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px"></select>
+    <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Unidades:</label>
+    <input id="reposicion-unidades" type="number" min="1" max="20" step="1" value="1" style="width:100px;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
     <div id="reposicion-colchon-agencia-block" style="display:none">
       <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Es un colchón — ¿sale por SEUR o por FURNITURE?</label>
       <select id="reposicion-agencia-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px">
@@ -8161,6 +8163,7 @@ function abrirReposicionDesdePedido(orderId) {
     return \`<option value="\${i}">\${escapeAttr(label)}</option>\`;
   }).join("");
   document.getElementById("reposicion-motivo").value = "";
+  document.getElementById("reposicion-unidades").value = "1";
   document.getElementById("reposicion-modal-result").textContent = "";
   document.getElementById("reposicion-agencia-select").value = "";
   document.getElementById("reposicion-recogida-select").value = "";
@@ -8320,6 +8323,11 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
     resultEl.textContent = "Para un cambio, elige el modelo y la medida nuevos.";
     return;
   }
+  const unidades = Math.floor(Number(document.getElementById("reposicion-unidades").value));
+  if (!(unidades >= 1 && unidades <= 20)) {
+    resultEl.textContent = "Indica cuántas unidades (de 1 a 20).";
+    return;
+  }
   if (ultimoTipoReposicion === "colchon") {
     if (!agenciaReposicion) {
       resultEl.textContent = "Indica si el colchón sale por SEUR o por FURNITURE.";
@@ -8351,6 +8359,7 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
       recogida: recogidaValue === "si",
       recogidaDestino: recogidaValue === "si" ? recogidaDestino : null,
       cambio,
+      unidades,
     }),
   });
   const body = await res.json();
@@ -10549,7 +10558,7 @@ async function handleFetch(request, env) {
         const stubOrders = env.ORDERS_STORE.get(idOrders);
         const allOrders = await stubOrders.fetch("https://do/orders").then((r) => r.json());
         const order = allOrders.find((o) => String(o.id) === String(payload.orderId));
-        const notaNueva = (payload.cambio ? "REPOSICIÓN POR CAMBIO (antes: " + (payload.cambio.de || "?") + "): " : "REPOSICIÓN: ") + (payload.piezaTexto || "artículo completo");
+        const notaNueva = (payload.cambio ? "REPOSICIÓN POR CAMBIO (antes: " + (payload.cambio.de || "?") + "): " : "REPOSICIÓN: ") + (Number(payload.unidades) > 1 ? payload.unidades + "x " : "") + (payload.piezaTexto || "artículo completo");
         const notas = order && order.notas ? order.notas + " · " + notaNueva : notaNueva;
         await stubOrders.fetch("https://do/orders/meta", { method: "POST", body: JSON.stringify({ id: payload.orderId, notas }) });
       }
