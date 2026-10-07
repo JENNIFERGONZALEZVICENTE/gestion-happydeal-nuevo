@@ -5077,7 +5077,7 @@ function renderPendientes() {
       <td>\${b.color || "—"}</td>
       <td>\${b.talla}\${b.transformadoDesde ? '<br><span class="transformado-tag" title="Transformado de un colchón de otra medida que había en stock">Transformado desde ' + b.transformadoDesde + '</span>' : ""}</td>
       \${skuCell}
-      <td>\${b.cantidad}</td>
+      <td>\${b.cantidad}\${b.enStock ? '<br><span class="reposicion-tag" title="Unidades que ya se han sacado del stock: al pedido a fábrica solo va el resto">' + b.enStock + ' ya en stock · pedir ' + Math.max(0, b.cantidad - b.enStock) + '</span>' : ""}</td>
       \${showSkuCol ? costeTarifaCell(b) : ""}
       \${refPolivalCell}
       <td><textarea class="fabricacion-input" data-id="\${b.id}" placeholder="cómo pedirlo a fábrica...">\${escapeAttr(b.mercanciaFabrica != null ? b.mercanciaFabrica : (b.nombreFabricacion || ""))}</textarea></td>
@@ -5338,9 +5338,13 @@ function filasPedidoFabrica(seleccionados) {
   // cada colchón, así que se suman las cantidades en una sola línea.
   const grupos = new Map();
   seleccionados.forEach(b => {
+    // Reposición con unidades ya sacadas del stock (Jennifer, 2026-10-07):
+    // a fábrica solo va lo que falta.
+    const aPedir = (b.cantidad || 1) - (b.enStock || 0);
+    if (aPedir <= 0) return;
     const clave = modeloConTalla(b);
     if (!grupos.has(clave)) grupos.set(clave, 0);
-    grupos.set(clave, grupos.get(clave) + (b.cantidad || 1));
+    grupos.set(clave, grupos.get(clave) + aPedir);
   });
   const filas = [...grupos.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
@@ -8371,7 +8375,7 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
   // Stock parcial (Jennifer, 2026-10-07): avisar de cuántas salen de stock.
   const deStock = Number(body.enStock) || 0;
   alert(deStock > 0
-    ? "Reposición registrada — " + deStock + " ud. sale(n) del stock" + (unidades > deStock ? " y " + (unidades - deStock) + " ud. queda(n) para pedir a fábrica." : " (no hace falta pedir a fábrica).")
+    ? "Reposición registrada (una sola línea de " + unidades + " ud.) — " + deStock + " ya en stock" + (unidades > deStock ? ", pedir " + (unidades - deStock) + " a fábrica." : " (no hace falta pedir a fábrica).")
     : "Reposición registrada — ya está en Proveedores pendientes.");
   await loadOrders();
   if (document.getElementById("view-pendientes").style.display !== "none") loadPendientes();

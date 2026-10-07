@@ -2206,7 +2206,7 @@ export class InventoryStore {
     }
 
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
-      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, previsionEntrega } = await request.json();
+      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, previsionEntrega, cantidad, enStock } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return new Response("not found", { status: 404 });
@@ -2214,6 +2214,10 @@ export class InventoryStore {
       // por servidos sin haber salido).
       if (estado !== undefined && ["pendiente", "cubierto", "servido"].includes(estado)) entry.estado = estado;
       if (recibidoFabrica !== undefined) entry.recibidoFabrica = !!recibidoFabrica;
+      // Corrección a mano de unidades (Jennifer, 2026-10-07, BEZEN12022): no
+      // toca el stock, solo el pendiente.
+      if (cantidad !== undefined && Number(cantidad) >= 1) entry.cantidad = Math.floor(Number(cantidad));
+      if (enStock !== undefined) entry.enStock = Math.max(0, Math.floor(Number(enStock) || 0)) || undefined;
       // "Pendiente de revisión antes de pedir" (Jennifer, 2026-10-01: pedidos
       // de Maison du Monde que entraron con un precio incorrecto, a la
       // espera de que el cliente pague la diferencia): { motivo } o null.
@@ -3230,7 +3234,12 @@ export class InventoryStore {
   // - sacado de un abierto: vuelve a los abiertos;
   // - transformado: no se devuelve nada (ya está cortado).
   async cancelarUnidadesDe(backorders, entry, n) {
+    // Reposición con unidades ya sacadas del stock (Jennifer, 2026-10-07,
+    // `enStock`): las canceladas vuelven primero de esas.
+    const devolverStock = entry.reposicion ? Math.min(n, entry.enStock || 0) : 0;
+    if (devolverStock) entry.enStock = (entry.enStock - devolverStock) || undefined;
     const e = separarUnidades(backorders, entry, n, "cx");
+    if (e !== entry) e.enStock = undefined;
     // Pedido para stock: ni toca "vendido pendiente" ni stock real.
     if (e.paraStock || e.stockPedidoId) await this.liberarPedidoStock(backorders, e, e.cantidad);
     if (e.paraStock) {
@@ -3244,7 +3253,12 @@ export class InventoryStore {
     const row = stock[key] || { stockModel: e.stockModel, talla: e.talla, cantidad: 0, vendidoPendiente: 0 };
     const mov = { stockModel: e.stockModel, talla: e.talla, origen: "cancelacion", orderNumber: e.orderNumber, platform: e.platform, orderRef: e.orderRef };
     if (e.estado === "pendiente") {
-      if (e.tipo === "colchon") {
+      if (devolverStock) {
+        row.cantidad = (row.cantidad || 0) + devolverStock;
+        await this.logMovement({ ...mov, campo: "cantidad", delta: devolverStock, resultante: row.cantidad });
+      }
+      // Una reposición nunca sumó "vendido pendiente" (Jennifer, 2026-10-07).
+      if (e.tipo === "colchon" && !e.reposicion) {
         const antes = row.vendidoPendiente || 0;
         row.vendidoPendiente = Math.max(0, antes - e.cantidad);
         await this.logMovement({ ...mov, campo: "vendidoPendiente", delta: row.vendidoPendiente - antes, resultante: row.vendidoPendiente });
@@ -3438,7 +3452,9 @@ export class InventoryStore {
     // un gesto comercial (almohada) nunca lo incrementó al crearse, así que
     // no hay nada que descontar aquí (Jennifer, 2026-09-22: las almohadas de
     // gesto comercial también salen por SEUR, reusando este mismo botón).
-    if (entry.tipo === "colchon") {
+    // Una reposición tampoco lo sumó nunca (Jennifer, 2026-10-07): restarlo
+    // aquí descuadraba el "vendido pendiente" de otros pedidos.
+    if (entry.tipo === "colchon" && !entry.reposicion) {
       const stock = await this.load("stock", {});
       const key = stockKey(entry.stockModel, entry.talla);
       const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
@@ -3699,8 +3715,9 @@ export class InventoryStore {
     }
 
     // Igual que en resolveSeurBackorder: "vendidoPendiente" solo existe para
-    // colchones (Jennifer, 2026-09-22, gestos comerciales de almohada).
-    if (entry.tipo === "colchon") {
+    // colchones (Jennifer, 2026-09-22, gestos comerciales de almohada) y
+    // nunca para reposiciones (Jennifer, 2026-10-07).
+    if (entry.tipo === "colchon" && !entry.reposicion) {
       const stock = await this.load("stock", {});
       const key = stockKey(entry.stockModel, entry.talla);
       const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };
@@ -4020,9 +4037,10 @@ export class InventoryStore {
     // Stock real solo para colchones (Jennifer, 2026-09-22). Con varias
     // unidades (Jennifer, 2026-10-07: "no ha detectado que en el stock había
     // una"), se usa lo que haya en el fondo común y SOLO lo que falte se
-    // pide a Luso/New — en dos pendientes separados: uno "ya en stock" y
-    // otro para pedir a fábrica (igual que cualquier colchón suelto).
-    const mercanciaPedir = mercanciaFabrica;
+    // pide a Luso/New — en UNA sola línea (Jennifer, 2026-10-07: "la línea
+    // tendría que haber sido de 2 unidades y poner una en stock", porque
+    // salen juntas por SEUR): `enStock` = unidades ya descontadas del stock;
+    // al pedido a fábrica solo va cantidad - enStock.
     let enStock = 0;
     if (tipo === "colchon") {
       const congelado = await this.load("stockCongelado", false);
@@ -4040,12 +4058,15 @@ export class InventoryStore {
         });
       }
     }
-    const partes = [
-      // Si va por Furniture y ya lo tenemos en el almacén, no hace falta
-      // esperar a "Marcar recibido" — está físicamente disponible ya.
-      { cantidad: enStock, mercancia: "REPOSICIÓN — ya en stock, no hace falta pedir a fábrica", recibidoFabrica: agenciaReposicion === "FURNITURE" },
-      { cantidad: cantidad - enStock, mercancia: mercanciaPedir, recibidoFabrica: false },
-    ].filter((p) => p.cantidad > 0);
+    if (enStock >= cantidad) {
+      mercanciaFabrica = "REPOSICIÓN — ya en stock, no hace falta pedir a fábrica";
+    } else if (enStock > 0) {
+      mercanciaFabrica += " · " + enStock + " UD YA EN STOCK (descontada) — PEDIR " + (cantidad - enStock);
+    }
+    if (piezaTexto) mercanciaFabrica += " · PIEZA A REPONER: " + piezaTexto;
+    // Si va por Furniture y ya está TODO en el almacén, no hace falta
+    // esperar a "Marcar recibido" — está físicamente disponible ya.
+    const recibidoFabrica = enStock >= cantidad && agenciaReposicion === "FURNITURE";
 
     // "Modelo" de la reposición: la PIEZA elegida (ej. "TAPA"), no el
     // nombre completo del canapé (Jennifer, 2026-09-21) — medida y color se
@@ -4060,40 +4081,36 @@ export class InventoryStore {
     const stockModelFinal = (tieneDesglosePiezas && parte) ? parte : product.stockModel;
 
     const backorders = await this.load("backorders", []);
-    const ids = [];
-    for (const p of partes) {
-      const id = crypto.randomUUID();
-      ids.push(id);
-      pushBackorder(backorders, {
-        id,
-        orderId, orderNumber,
-        stockModel: stockModelFinal,
-        // Fecha de HOY, no la del pedido original (Jennifer, 2026-09-22): una
-        // reposición puede pedirse semanas después de la venta, y Polival/New/
-        // Furniture ordenan sus listas de pendientes por esta fecha — si se
-        // usara la del pedido, una reposición de un pedido antiguo se colaría
-        // al fondo del listado y se quedaría "traspapelada" en vez de
-        // aparecer arriba, recién añadida. orderDate (recibido del cliente)
-        // se ignora a propósito para este campo.
-        talla, color, tipo, cantidad: p.cantidad, orderDate: new Date().toISOString(),
-        esPack: false, proveedor, needsDecision: false, referencia,
-        mercanciaFabrica: p.mercancia + (piezaTexto ? " · PIEZA A REPONER: " + piezaTexto : ""),
-        platform, orderRef, reposicion: true, piezaTexto: piezaTexto || "",
-        recibidoFabrica: p.recibidoFabrica,
-        agenciaReposicion: tipo === "colchon" ? agenciaReposicion : null,
-        recogida: tipo === "colchon" && agenciaReposicion === "FURNITURE" ? !!recogida : false,
-        recogidaDestino: tipo === "colchon" && agenciaReposicion === "FURNITURE" && recogida ? (recogidaDestino || null) : null,
-      });
-      // Reposición que en realidad es un CAMBIO (Jennifer, 2026-10-07): se
-      // apunta qué artículo tenía el pedido antes.
-      if (cambio) backorders.find((b) => b.id === id).cambio = { de: String(cambio.de || "") };
-    }
+    const id = crypto.randomUUID();
+    pushBackorder(backorders, {
+      id,
+      orderId, orderNumber,
+      stockModel: stockModelFinal,
+      // Fecha de HOY, no la del pedido original (Jennifer, 2026-09-22): una
+      // reposición puede pedirse semanas después de la venta, y Polival/New/
+      // Furniture ordenan sus listas de pendientes por esta fecha — si se
+      // usara la del pedido, una reposición de un pedido antiguo se colaría
+      // al fondo del listado y se quedaría "traspapelada" en vez de
+      // aparecer arriba, recién añadida. orderDate (recibido del cliente)
+      // se ignora a propósito para este campo.
+      talla, color, tipo, cantidad, orderDate: new Date().toISOString(),
+      esPack: false, proveedor, needsDecision: false, referencia, mercanciaFabrica,
+      platform, orderRef, reposicion: true, piezaTexto: piezaTexto || "",
+      recibidoFabrica,
+      agenciaReposicion: tipo === "colchon" ? agenciaReposicion : null,
+      recogida: tipo === "colchon" && agenciaReposicion === "FURNITURE" ? !!recogida : false,
+      recogidaDestino: tipo === "colchon" && agenciaReposicion === "FURNITURE" && recogida ? (recogidaDestino || null) : null,
+    });
+    const nuevo = backorders.find((b) => b.id === id);
+    if (enStock > 0) nuevo.enStock = enStock;
+    // Reposición que en realidad es un CAMBIO (Jennifer, 2026-10-07): se
+    // apunta qué artículo tenía el pedido antes.
+    if (cambio) nuevo.cambio = { de: String(cambio.de || "") };
     await this.state.storage.put("backorders", backorders);
     // Devuelve el id (Jennifer, 2026-09-21) — hace falta para poder subir
     // fotos justificando el motivo justo después de crear la reposición
-    // (ver /admin/reposicion/foto). Con stock parcial hay dos pendientes:
-    // `id` es el primero, `ids` todos, `enStock` cuántas salen de stock.
-    return Response.json({ ok: true, id: ids[0], ids, enStock });
+    // (ver /admin/reposicion/foto). `enStock`: cuántas salen del stock.
+    return Response.json({ ok: true, id, enStock });
   }
 
   // Adjuntar foto(s) a una reposición ya creada (Jennifer, 2026-09-21):
