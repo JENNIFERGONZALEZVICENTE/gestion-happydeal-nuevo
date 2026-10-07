@@ -855,6 +855,21 @@ function normalizeColorKey(color) {
   return normalizeKey(color).replace(/-/g, " ").replace(/\s+/g, " ").trim();
 }
 
+// Color de un canapé a partir del texto del producto, cuando el pedido no lo
+// trae aparte (Maison du Monde: "Canapé abatible en tela beige…") —
+// Jennifer, 2026-10-07. Solo colores que existen en la receta de ese
+// canapé; si encajan varios, el nombre más largo ("gris niebla" > "gris").
+function adivinarColorCanape(title, texto) {
+  const recipeKey = matchCanapeRecipeKey(title);
+  if (!recipeKey || !texto) return "";
+  const t = " " + normalizeColorKey(texto) + " ";
+  let mejor = "";
+  for (const key of Object.keys(CANAPE_RECIPES[recipeKey].colores || {})) {
+    if (t.includes(" " + key + " ") && key.length > mejor.length) mejor = key;
+  }
+  return mejor ? mejor.replace(/\b\w/g, (c) => c.toUpperCase()) : "";
+}
+
 function buildCanapeMercancia(title, colorRaw, talla, servicesText) {
   const recipeKey = matchCanapeRecipeKey(title);
   if (!recipeKey) {
@@ -3997,7 +4012,7 @@ export class InventoryStore {
   // aparece: SEUR usa el mismo botón "Preparar para SEUR" que un colchón
   // suelto normal (ver esColchonSeur en index.js); FURNITURE usa la línea
   // independiente de Furniture, igual que una reposición de tapicería.
-  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades, piezas, piezasIdx, canapeCompleto }) {
+  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades, piezas, piezasIdx, canapeCompleto, services, productoTexto }) {
     const products = await this.load("products", {});
     const resolved = resolverItemReposicion(item, cambio, products);
     // Número de unidades (Jennifer, 2026-10-07: "tengo que poder elegir el
@@ -4006,7 +4021,8 @@ export class InventoryStore {
     if (resolved.tipo === "pack" || resolved.tipo === "desconocido") {
       return Response.json({ ok: false, error: "No se ha podido resolver este artículo contra el Catálogo." }, { status: 400 });
     }
-    const { product, talla, color, tipo } = resolved;
+    const { product, talla, tipo } = resolved;
+    let { color } = resolved;
     const proveedor = product.proveedor || null;
     if (!proveedor) {
       return Response.json({ ok: false, error: "Este artículo no tiene proveedor asignado en el Catálogo." }, { status: 400 });
@@ -4021,7 +4037,23 @@ export class InventoryStore {
     const referencia = proveedor === "POLIVAL" ? await nextReposicionReferencia(this.state) : null;
 
     let mercanciaFabrica = null;
-    if (product.product_type === "Canapé") {
+    // CANAPÉ COMPLETO (Jennifer, 2026-10-07: "que se pidieran como se piden
+    // los canapés de cero, con la misma descripción"): la receta normal de
+    // fábrica, con la tapa partida/reforzada del pedido, y sin añadir la
+    // pieza a reponer. Si el pedido no trae color (Maison du Monde), se busca
+    // en el texto del producto ("en tela beige").
+    let recetaCanapeCompleto = false;
+    if (canapeCompleto && product.product_type === "Canapé") {
+      if (!color) color = adivinarColorCanape(product.title, productoTexto);
+      const built = buildCanapeMercancia(product.title, color, talla, services || "");
+      if (built.texto) {
+        mercanciaFabrica = built.texto;
+        recetaCanapeCompleto = true;
+      }
+    }
+    if (mercanciaFabrica) {
+      // ya resuelto arriba (canapé completo)
+    } else if (product.product_type === "Canapé") {
       mercanciaFabrica = buildCanapeMercancia(product.title, color, talla, "").texto || null;
     } else if (product.product_type === "Cabecero") {
       mercanciaFabrica = buildCabeceroMercancia(product.title, color, talla, "").texto || null;
@@ -4063,7 +4095,7 @@ export class InventoryStore {
     } else if (enStock > 0) {
       mercanciaFabrica += " · " + enStock + " UD YA EN STOCK (descontada) — PEDIR " + (cantidad - enStock);
     }
-    if (piezaTexto) mercanciaFabrica += " · PIEZA A REPONER: " + piezaTexto;
+    if (piezaTexto && !recetaCanapeCompleto) mercanciaFabrica += " · PIEZA A REPONER: " + piezaTexto;
     // Si va por Furniture y ya está TODO en el almacén, no hace falta
     // esperar a "Marcar recibido" — está físicamente disponible ya.
     const recibidoFabrica = enStock >= cantidad && agenciaReposicion === "FURNITURE";

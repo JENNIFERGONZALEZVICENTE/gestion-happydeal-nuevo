@@ -8401,6 +8401,10 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
       piezas: conCasillas ? piezasElegidas.map(p => p.parte) : null,
       piezasIdx: conCasillas ? piezasIdx : null,
       canapeCompleto,
+      // Para pedir el canapé completo con la receta normal (tapa partida o
+      // reforzada, color desde el texto si el pedido no lo trae).
+      services: reposicionOrderActual.services || "",
+      productoTexto: reposicionOrderActual.product || "",
       agenciaReposicion: ultimoTipoReposicion === "colchon" ? agenciaReposicion : null,
       recogida: recogidaValue === "si",
       recogidaDestino: recogidaValue === "si" ? recogidaDestino : null,
