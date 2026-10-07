@@ -4017,35 +4017,35 @@ export class InventoryStore {
       mercanciaFabrica = product.stockModel + (talla ? " - MEDIDA: " + talla : "") + (color ? " - COLOR: " + color : "");
     }
 
-    // Stock real solo para colchones (Jennifer, 2026-09-22) — es binario:
-    // o hay en el fondo común TODAS las unidades de la reposición y se
-    // descuentan en silencio, o no las hay y se deja el texto por defecto
-    // para pedirlas a Luso/New (igual que cualquier pendiente normal de
-    // colchón suelto).
-    let recibidoFabrica = false;
+    // Stock real solo para colchones (Jennifer, 2026-09-22). Con varias
+    // unidades (Jennifer, 2026-10-07: "no ha detectado que en el stock había
+    // una"), se usa lo que haya en el fondo común y SOLO lo que falte se
+    // pide a Luso/New — en dos pendientes separados: uno "ya en stock" y
+    // otro para pedir a fábrica (igual que cualquier colchón suelto).
+    const mercanciaPedir = mercanciaFabrica;
+    let enStock = 0;
     if (tipo === "colchon") {
       const congelado = await this.load("stockCongelado", false);
       const stock = await this.load("stock", {});
       const key = stockKey(product.stockModel, talla);
       const row = stock[key] || { stockModel: product.stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
-      if (row.cantidad >= cantidad) {
-        if (!congelado) {
-          row.cantidad -= cantidad;
-          stock[key] = row;
-          await this.state.storage.put("stock", stock);
-          await this.logMovement({
-            stockModel: product.stockModel, talla, campo: "cantidad", delta: -cantidad, resultante: row.cantidad,
-            origen: "reposicion", orderNumber, platform, orderRef,
-          });
-        }
-        mercanciaFabrica = "REPOSICIÓN — ya en stock, no hace falta pedir a fábrica";
-        // Si va por Furniture y ya lo tenemos en el almacén, no hace falta
-        // esperar a "Marcar recibido" — está físicamente disponible ya.
-        recibidoFabrica = agenciaReposicion === "FURNITURE";
+      enStock = Math.max(0, Math.min(cantidad, row.cantidad || 0));
+      if (enStock > 0 && !congelado) {
+        row.cantidad -= enStock;
+        stock[key] = row;
+        await this.state.storage.put("stock", stock);
+        await this.logMovement({
+          stockModel: product.stockModel, talla, campo: "cantidad", delta: -enStock, resultante: row.cantidad,
+          origen: "reposicion", orderNumber, platform, orderRef,
+        });
       }
     }
-
-    if (piezaTexto) mercanciaFabrica += " · PIEZA A REPONER: " + piezaTexto;
+    const partes = [
+      // Si va por Furniture y ya lo tenemos en el almacén, no hace falta
+      // esperar a "Marcar recibido" — está físicamente disponible ya.
+      { cantidad: enStock, mercancia: "REPOSICIÓN — ya en stock, no hace falta pedir a fábrica", recibidoFabrica: agenciaReposicion === "FURNITURE" },
+      { cantidad: cantidad - enStock, mercancia: mercanciaPedir, recibidoFabrica: false },
+    ].filter((p) => p.cantidad > 0);
 
     // "Modelo" de la reposición: la PIEZA elegida (ej. "TAPA"), no el
     // nombre completo del canapé (Jennifer, 2026-09-21) — medida y color se
@@ -4060,34 +4060,40 @@ export class InventoryStore {
     const stockModelFinal = (tieneDesglosePiezas && parte) ? parte : product.stockModel;
 
     const backorders = await this.load("backorders", []);
-    const id = crypto.randomUUID();
-    pushBackorder(backorders, {
-      id,
-      orderId, orderNumber,
-      stockModel: stockModelFinal,
-      // Fecha de HOY, no la del pedido original (Jennifer, 2026-09-22): una
-      // reposición puede pedirse semanas después de la venta, y Polival/New/
-      // Furniture ordenan sus listas de pendientes por esta fecha — si se
-      // usara la del pedido, una reposición de un pedido antiguo se colaría
-      // al fondo del listado y se quedaría "traspapelada" en vez de
-      // aparecer arriba, recién añadida. orderDate (recibido del cliente)
-      // se ignora a propósito para este campo.
-      talla, color, tipo, cantidad, orderDate: new Date().toISOString(),
-      esPack: false, proveedor, needsDecision: false, referencia, mercanciaFabrica,
-      platform, orderRef, reposicion: true, piezaTexto: piezaTexto || "",
-      recibidoFabrica,
-      agenciaReposicion: tipo === "colchon" ? agenciaReposicion : null,
-      recogida: tipo === "colchon" && agenciaReposicion === "FURNITURE" ? !!recogida : false,
-      recogidaDestino: tipo === "colchon" && agenciaReposicion === "FURNITURE" && recogida ? (recogidaDestino || null) : null,
-    });
-    // Reposición que en realidad es un CAMBIO (Jennifer, 2026-10-07): se
-    // apunta qué artículo tenía el pedido antes.
-    if (cambio) backorders.find((b) => b.id === id).cambio = { de: String(cambio.de || "") };
+    const ids = [];
+    for (const p of partes) {
+      const id = crypto.randomUUID();
+      ids.push(id);
+      pushBackorder(backorders, {
+        id,
+        orderId, orderNumber,
+        stockModel: stockModelFinal,
+        // Fecha de HOY, no la del pedido original (Jennifer, 2026-09-22): una
+        // reposición puede pedirse semanas después de la venta, y Polival/New/
+        // Furniture ordenan sus listas de pendientes por esta fecha — si se
+        // usara la del pedido, una reposición de un pedido antiguo se colaría
+        // al fondo del listado y se quedaría "traspapelada" en vez de
+        // aparecer arriba, recién añadida. orderDate (recibido del cliente)
+        // se ignora a propósito para este campo.
+        talla, color, tipo, cantidad: p.cantidad, orderDate: new Date().toISOString(),
+        esPack: false, proveedor, needsDecision: false, referencia,
+        mercanciaFabrica: p.mercancia + (piezaTexto ? " · PIEZA A REPONER: " + piezaTexto : ""),
+        platform, orderRef, reposicion: true, piezaTexto: piezaTexto || "",
+        recibidoFabrica: p.recibidoFabrica,
+        agenciaReposicion: tipo === "colchon" ? agenciaReposicion : null,
+        recogida: tipo === "colchon" && agenciaReposicion === "FURNITURE" ? !!recogida : false,
+        recogidaDestino: tipo === "colchon" && agenciaReposicion === "FURNITURE" && recogida ? (recogidaDestino || null) : null,
+      });
+      // Reposición que en realidad es un CAMBIO (Jennifer, 2026-10-07): se
+      // apunta qué artículo tenía el pedido antes.
+      if (cambio) backorders.find((b) => b.id === id).cambio = { de: String(cambio.de || "") };
+    }
     await this.state.storage.put("backorders", backorders);
     // Devuelve el id (Jennifer, 2026-09-21) — hace falta para poder subir
     // fotos justificando el motivo justo después de crear la reposición
-    // (ver /admin/reposicion/foto).
-    return Response.json({ ok: true, id });
+    // (ver /admin/reposicion/foto). Con stock parcial hay dos pendientes:
+    // `id` es el primero, `ids` todos, `enStock` cuántas salen de stock.
+    return Response.json({ ok: true, id: ids[0], ids, enStock });
   }
 
   // Adjuntar foto(s) a una reposición ya creada (Jennifer, 2026-09-21):

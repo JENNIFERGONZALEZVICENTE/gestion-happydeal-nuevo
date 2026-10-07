@@ -8368,7 +8368,11 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
     return;
   }
   cerrarModalReposicion();
-  alert("Reposición registrada — ya está en Proveedores pendientes.");
+  // Stock parcial (Jennifer, 2026-10-07): avisar de cuántas salen de stock.
+  const deStock = Number(body.enStock) || 0;
+  alert(deStock > 0
+    ? "Reposición registrada — " + deStock + " ud. sale(n) del stock" + (unidades > deStock ? " y " + (unidades - deStock) + " ud. queda(n) para pedir a fábrica." : " (no hace falta pedir a fábrica).")
+    : "Reposición registrada — ya está en Proveedores pendientes.");
   await loadOrders();
   if (document.getElementById("view-pendientes").style.display !== "none") loadPendientes();
 });
