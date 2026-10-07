@@ -1403,6 +1403,21 @@ function resolveItem(item, products) {
   return { tipo, product, talla: normalizeTalla(item.variantTitle), color: tipo === "tapiceria" ? extractColor(item.variantTitle) : "", variantTitle: item.variantTitle, qty: item.qty };
 }
 
+// Reposición que en realidad es un CAMBIO de modelo/medida (Jennifer,
+// 2026-10-07: "el cliente decide hacer un cambio de medida de modelo").
+// No es lo habitual: sin `cambio`, se repone el mismo artículo del pedido
+// (resolveItem, como siempre). Con `cambio: { productId, talla, color }`
+// se usa el artículo elegido a mano del Catálogo en lugar del del pedido.
+function resolverItemReposicion(item, cambio, products) {
+  if (!cambio) return resolveItem(item, products);
+  const product = products[cambio.productId];
+  if (!product || product.product_type === "Pack") return { tipo: "desconocido" };
+  const tipo = TYPE_MAP[product.product_type] || "otro";
+  const talla = String(cambio.talla || "").trim().toUpperCase();
+  const color = tipo === "tapiceria" ? String(cambio.color || "").trim() : "";
+  return { tipo, product, talla, color, variantTitle: [color, talla].filter(Boolean).join(" / "), qty: 1 };
+}
+
 // Para el alta/baja rápida: localizar el "modelo de stock" a partir de lo
 // que Jennifer teclee, por nombre o por SKU (con la misma tolerancia a
 // prefijos/alias que ya usa el emparejamiento de packs).
@@ -3927,9 +3942,9 @@ export class InventoryStore {
   // pueda calcular el desglose real de piezas físicas (descripcionesBackorder,
   // las mismas reglas que usa la exportación a Furniture) antes de que
   // Jennifer confirme la reposición.
-  async resolverItemPreview({ item }) {
+  async resolverItemPreview({ item, cambio }) {
     const products = await this.load("products", {});
-    const resolved = resolveItem(item, products);
+    const resolved = resolverItemReposicion(item, cambio, products);
     if (resolved.tipo === "pack" || resolved.tipo === "desconocido") {
       return Response.json({ ok: false, error: "No se ha podido resolver este artículo contra el Catálogo." }, { status: 400 });
     }
@@ -3965,9 +3980,9 @@ export class InventoryStore {
   // aparece: SEUR usa el mismo botón "Preparar para SEUR" que un colchón
   // suelto normal (ver esColchonSeur en index.js); FURNITURE usa la línea
   // independiente de Furniture, igual que una reposición de tapicería.
-  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino }) {
+  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio }) {
     const products = await this.load("products", {});
-    const resolved = resolveItem(item, products);
+    const resolved = resolverItemReposicion(item, cambio, products);
     if (resolved.tipo === "pack" || resolved.tipo === "desconocido") {
       return Response.json({ ok: false, error: "No se ha podido resolver este artículo contra el Catálogo." }, { status: 400 });
     }
@@ -4062,6 +4077,9 @@ export class InventoryStore {
       recogida: tipo === "colchon" && agenciaReposicion === "FURNITURE" ? !!recogida : false,
       recogidaDestino: tipo === "colchon" && agenciaReposicion === "FURNITURE" && recogida ? (recogidaDestino || null) : null,
     });
+    // Reposición que en realidad es un CAMBIO (Jennifer, 2026-10-07): se
+    // apunta qué artículo tenía el pedido antes.
+    if (cambio) backorders.find((b) => b.id === id).cambio = { de: String(cambio.de || "") };
     await this.state.storage.put("backorders", backorders);
     // Devuelve el id (Jennifer, 2026-09-21) — hace falta para poder subir
     // fotos justificando el motivo justo después de crear la reposición

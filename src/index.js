@@ -2530,6 +2530,20 @@ function renderPage() {
     <p id="reposicion-modal-texto" style="color:var(--muted);font-size:13px"></p>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Producto del pedido a reponer:</label>
     <select id="reposicion-item-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px"></select>
+    <button type="button" id="reposicion-cambio-toggle" style="background:none;border:none;padding:4px 0;margin:2px 0 0;color:var(--muted);font-size:11.5px;text-decoration:underline;cursor:pointer">↔ ¿Es un cambio de modelo o medida?</button>
+    <div id="reposicion-cambio-block" style="display:none;margin-top:6px;padding:10px 12px;border:1px dashed #d97706;border-radius:8px;background:rgba(217,119,6,0.06)">
+      <div style="font-size:12px;color:#b45309;font-weight:600;margin-bottom:6px">CAMBIO — se repone otro modelo/medida en lugar del del pedido</div>
+      <label style="display:block;font-size:12.5px;color:var(--muted);margin:4px 0 4px">Modelo nuevo:</label>
+      <select id="reposicion-cambio-modelo" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px"></select>
+      <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Medida nueva:</label>
+      <input id="reposicion-cambio-talla" type="text" list="reposicion-cambio-tallas" placeholder="ej. 150X190" autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
+      <datalist id="reposicion-cambio-tallas"></datalist>
+      <div id="reposicion-cambio-color-block">
+        <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Color:</label>
+        <input id="reposicion-cambio-color" type="text" placeholder="ej. Beige" autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
+      </div>
+      <button type="button" class="secondary" id="reposicion-cambio-quitar" style="margin-top:8px;font-size:12px">Quitar el cambio (reponer lo mismo del pedido)</button>
+    </div>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Pieza exacta a reponer:</label>
     <select id="reposicion-pieza-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px"></select>
     <div id="reposicion-colchon-agencia-block" style="display:none">
@@ -5055,7 +5069,7 @@ function renderPendientes() {
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
-      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? '<span class="reposicion-tag">REPOSICIÓN</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}</td>
+      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
@@ -6120,7 +6134,7 @@ function reposicionRowCells(b) {
         <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
         \${b.referencia ? b.referencia + " — " : ""}1x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}
       </label>
-      \${b.piezaTexto ? '<div class="reposicion-tag">REPOSICIÓN: ' + escapeAttr(b.piezaTexto) + '</div>' : ""}
+      \${b.piezaTexto ? '<div class="reposicion-tag">REPOSICIÓN' + (b.cambio ? " POR CAMBIO (antes: " + escapeAttr(b.cambio.de || "") + ")" : "") + ': ' + escapeAttr(b.piezaTexto) + '</div>' : ""}
       \${b.tipo === "colchon" && b.agenciaReposicion === "FURNITURE" ? (b.recogida
         ? '<div class="reposicion-tag" style="background:#fee2e2;color:#991b1b">RECOGIDA: ' + (b.recogidaDestino === "desechar" ? "desechar" : "vuelve a instalaciones") + '</div>'
         : '<div class="reposicion-tag">SIN recogida</div>') : ""}
@@ -8154,9 +8168,65 @@ function abrirReposicionDesdePedido(orderId) {
   document.getElementById("reposicion-colchon-agencia-block").style.display = "none";
   document.getElementById("reposicion-colchon-recogida-block").style.display = "none";
   document.getElementById("reposicion-colchon-destino-block").style.display = "none";
+  activarCambioReposicion(false);
   cargarPiezasReposicion();
   document.getElementById("reposicion-modal-overlay").classList.add("open");
 }
+// Reposición por CAMBIO de modelo/medida (Jennifer, 2026-10-07): "no es lo
+// habitual", así que va escondida tras un enlace pequeño. Con el cambio
+// activo, el artículo a reponer es el elegido aquí (modelo del Catálogo +
+// medida + color) en vez del del pedido — ver resolverItemReposicion en
+// inventory-store.js. Todo lo demás (piezas, SEUR/FURNITURE, recogida)
+// funciona igual que una reposición normal.
+let reposicionCambioActivo = false;
+const TIPOS_CON_COLOR_CAMBIO = ["Canapé", "Canapé fijo", "Base", "Cabecero"];
+function etiquetaItemReposicion(item) {
+  const prod = catalogoProducts.find(p => p.productId === item.productId);
+  return (prod ? prod.stockModel : (item.sku || "Artículo")) + (item.variantTitle ? " (" + item.variantTitle + ")" : "");
+}
+function rellenarTallasCambioReposicion() {
+  const prod = catalogoProducts.find(p => String(p.productId) === document.getElementById("reposicion-cambio-modelo").value);
+  document.getElementById("reposicion-cambio-tallas").innerHTML = ((prod && prod.tallas) || []).map(t => '<option value="' + escapeAttr(t) + '">').join("");
+  document.getElementById("reposicion-cambio-color-block").style.display = prod && TIPOS_CON_COLOR_CAMBIO.includes(prod.product_type) ? "" : "none";
+}
+async function activarCambioReposicion(activo) {
+  reposicionCambioActivo = activo;
+  document.getElementById("reposicion-cambio-block").style.display = activo ? "" : "none";
+  document.getElementById("reposicion-cambio-toggle").style.display = activo ? "none" : "";
+  if (!activo) return;
+  if (!catalogoProducts.length) {
+    try { catalogoProducts = await (await fetch("/api/inventario/catalogo")).json(); } catch (e) { /* sin catálogo no hay modelos que elegir */ }
+  }
+  const item = reposicionOrderActual && reposicionOrderActual.items[Number(document.getElementById("reposicion-item-select").value)];
+  const modelos = catalogoProducts.filter(p => p.product_type !== "Pack" && !p.excluido && p.stockModel)
+    .sort((a, b) => (a.product_type || "").localeCompare(b.product_type || "") || a.stockModel.localeCompare(b.stockModel));
+  const tipos = [...new Set(modelos.map(p => p.product_type || "Otros"))];
+  document.getElementById("reposicion-cambio-modelo").innerHTML = tipos.map(t =>
+    '<optgroup label="' + escapeAttr(t) + '">' + modelos.filter(p => (p.product_type || "Otros") === t)
+      .map(p => '<option value="' + p.productId + '"' + (item && p.productId === item.productId ? " selected" : "") + ">" + escapeAttr(p.stockModel) + "</option>").join("") + "</optgroup>"
+  ).join("");
+  // Color de partida: el del artículo del pedido ("Beige / 160x200 cm").
+  const partes = String((item && item.variantTitle) || "").split("/");
+  document.getElementById("reposicion-cambio-color").value = partes.length > 1 ? partes[0].trim() : "";
+  document.getElementById("reposicion-cambio-talla").value = "";
+  rellenarTallasCambioReposicion();
+  cargarPiezasReposicion();
+}
+function datosCambioReposicion() {
+  if (!reposicionCambioActivo || !reposicionOrderActual) return null;
+  const item = reposicionOrderActual.items[Number(document.getElementById("reposicion-item-select").value)];
+  return {
+    productId: Number(document.getElementById("reposicion-cambio-modelo").value),
+    talla: document.getElementById("reposicion-cambio-talla").value.trim().toUpperCase(),
+    color: document.getElementById("reposicion-cambio-color").value.trim(),
+    de: item ? etiquetaItemReposicion(item) : "",
+  };
+}
+document.getElementById("reposicion-cambio-toggle").addEventListener("click", () => activarCambioReposicion(true));
+document.getElementById("reposicion-cambio-quitar").addEventListener("click", () => { activarCambioReposicion(false); cargarPiezasReposicion(); });
+document.getElementById("reposicion-cambio-modelo").addEventListener("change", () => { rellenarTallasCambioReposicion(); cargarPiezasReposicion(); });
+document.getElementById("reposicion-cambio-talla").addEventListener("change", cargarPiezasReposicion);
+document.getElementById("reposicion-cambio-color").addEventListener("change", cargarPiezasReposicion);
 // Al elegir el producto del pedido, se piden al servidor las piezas físicas
 // reales de ESE artículo (mismas reglas que la exportación a Furniture —
 // TAPA/CAJÓN/FONDO/etc. para un canapé, una sola opción para lo demás),
@@ -8172,11 +8242,17 @@ async function cargarPiezasReposicion() {
   const idx = Number(document.getElementById("reposicion-item-select").value);
   const item = reposicionOrderActual.items[idx];
   if (!item) return;
+  const cambio = datosCambioReposicion();
+  if (cambio && !cambio.talla) {
+    piezaSelect.innerHTML = '<option value="">Elige primero la medida nueva</option>';
+    ultimasPiezasReposicion = [];
+    return;
+  }
   piezaSelect.innerHTML = "<option>Cargando piezas...</option>";
   const res = await fetch("/api/inventario/reposicion/piezas", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ item, services: reposicionOrderActual.services, productoTexto: reposicionOrderActual.product }),
+    body: JSON.stringify({ item, services: reposicionOrderActual.services, productoTexto: reposicionOrderActual.product, cambio }),
   });
   const body = await res.json();
   ultimasPiezasReposicion = (res.ok && body.ok && body.piezas) ? body.piezas : [];
@@ -8239,6 +8315,11 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
   const agenciaReposicion = document.getElementById("reposicion-agencia-select").value;
   const recogidaValue = document.getElementById("reposicion-recogida-select").value;
   const recogidaDestino = document.getElementById("reposicion-destino-select").value;
+  const cambio = datosCambioReposicion();
+  if (cambio && (!cambio.productId || !cambio.talla)) {
+    resultEl.textContent = "Para un cambio, elige el modelo y la medida nuevos.";
+    return;
+  }
   if (ultimoTipoReposicion === "colchon") {
     if (!agenciaReposicion) {
       resultEl.textContent = "Indica si el colchón sale por SEUR o por FURNITURE.";
@@ -8269,6 +8350,7 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
       agenciaReposicion: ultimoTipoReposicion === "colchon" ? agenciaReposicion : null,
       recogida: recogidaValue === "si",
       recogidaDestino: recogidaValue === "si" ? recogidaDestino : null,
+      cambio,
     }),
   });
   const body = await res.json();
@@ -10467,7 +10549,7 @@ async function handleFetch(request, env) {
         const stubOrders = env.ORDERS_STORE.get(idOrders);
         const allOrders = await stubOrders.fetch("https://do/orders").then((r) => r.json());
         const order = allOrders.find((o) => String(o.id) === String(payload.orderId));
-        const notaNueva = "REPOSICIÓN: " + (payload.piezaTexto || "artículo completo");
+        const notaNueva = (payload.cambio ? "REPOSICIÓN POR CAMBIO (antes: " + (payload.cambio.de || "?") + "): " : "REPOSICIÓN: ") + (payload.piezaTexto || "artículo completo");
         const notas = order && order.notas ? order.notas + " · " + notaNueva : notaNueva;
         await stubOrders.fetch("https://do/orders/meta", { method: "POST", body: JSON.stringify({ id: payload.orderId, notas }) });
       }
@@ -10553,10 +10635,10 @@ async function handleFetch(request, env) {
     // elegir la pieza, la referencia de verdad se asigna al confirmar
     // (ver crearReposicion).
     if (url.pathname === "/api/inventario/reposicion/piezas" && request.method === "POST") {
-      const { item, services, productoTexto } = await request.json();
+      const { item, services, productoTexto, cambio } = await request.json();
       const previewRes = await inventoryStub(env).fetch("https://do/admin/reposicion/preview", {
         method: "POST",
-        body: JSON.stringify({ item }),
+        body: JSON.stringify({ item, cambio }),
       });
       if (!previewRes.ok) return new Response(await previewRes.text(), { status: previewRes.status });
       const info = await previewRes.json();
