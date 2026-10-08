@@ -5636,7 +5636,9 @@ async function checkAutoAddCarga(orderId) {
   // Un colchón de pack marcado FPK sale independiente por SEUR, no junto con
   // la tapicería — no debe bloquear que el resto del pedido (tapicería,
   // almohadas...) suba solo a la carga de Furniture en cuanto esté listo.
-  const esFpkPendiente = i => i.esPack && i.tipo === "colchon" && i.tipoEnvio === "FPK";
+  // También el colchón SUELTO marcado FPK (Jennifer, 2026-10-08, BEZEN12219:
+  // todo recibido salvo el París de Luso en FPK y no subía a la carga).
+  const esFpkPendiente = i => i.tipo === "colchon" && i.tipoEnvio === "FPK";
   const itemsFurniture = items.filter(i => !esFpkPendiente(i));
   const todosRecibidos = itemsFurniture.length > 0 && itemsFurniture.every(i => i.recibidoFabrica);
   const colchonFpkPendiente = items.some(i => esFpkPendiente(i) && i.estado === "pendiente");
@@ -5899,7 +5901,7 @@ function reservaAlmacenHtml(b) {
   if (!b.recibidoFabrica) return "";
   const o = allOrders.find(x => String(x.id) === String(b.orderId));
   if (!o || o.agencia !== "FURNITURE") return "";
-  const resto = backordersPorPedido(o.id).filter(x => x.id !== b.id && !(x.esPack && x.tipo === "colchon" && x.tipoEnvio === "FPK"));
+  const resto = backordersPorPedido(o.id).filter(x => x.id !== b.id && !(x.tipo === "colchon" && x.tipoEnvio === "FPK"));
   if (!resto.some(x => !x.recibidoFabrica)) return ""; // ya está todo: sale en la carga
   return ' <button type="button" class="secondary reservar-almacen-btn" data-reservar-almacen="' + escapeAttr(b.id) + '" title="Manda al almacén el email con las etiquetas de reserva para que lo aparten para este cliente">📦 Reservar en almacén</button>';
 }
@@ -6425,7 +6427,7 @@ function retencionDe(o) {
 }
 function todoRecibidoFurniture(o) {
   const items = pedidosDelGrupo(o).filter(p => !p.cancelado).flatMap(p => backordersPorPedido(p.id))
-    .filter(i => !(i.esPack && i.tipo === "colchon" && i.tipoEnvio === "FPK"));
+    .filter(i => !(i.tipo === "colchon" && i.tipoEnvio === "FPK"));
   return items.length > 0 && items.every(i => i.recibidoFabrica);
 }
 function fechaCortaEs(f) {
