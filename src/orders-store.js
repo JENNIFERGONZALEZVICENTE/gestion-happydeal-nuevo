@@ -805,11 +805,14 @@ export class OrdersStore {
     }
 
     if (url.pathname === "/orders/meta" && request.method === "POST") {
-      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta, needsReview, retenido, tapiceriaEnviada } = await request.json();
+      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta, needsReview, retenido, tapiceriaEnviada, gestionadoExterno } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const existing = orders[id];
       if (!existing) return new Response("not found", { status: 404 });
       if (colorTag !== undefined) existing.colorTag = colorTag || null;
+      // Quitar la marca de "gestionado por otra vía" (Jennifer, 2026-10-08,
+      // LM 002-26262L40115-A: ahora sí sale en nuestra carga de Furniture).
+      if (gestionadoExterno !== undefined) existing.gestionadoExterno = !!gestionadoExterno;
       if (observaciones !== undefined) existing.observaciones = observaciones;
       // "Notas" (Jennifer, 2026-08-26): campo libre visible en Pedidos >
       // Shopify y en Furniture > Pedidos pendientes, para avisos del
