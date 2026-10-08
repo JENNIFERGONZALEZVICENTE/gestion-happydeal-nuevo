@@ -5271,6 +5271,7 @@ async function guardarReferenciaPolival(id, referencia) {
     b.recibidoFabrica = true;
     b.pedidoGenerado = true;
     await checkAutoAddCarga(b.orderId);
+    await checkAutoAddEnvioAparte(b.id);
   }
   if (data.avisoReserva) {
     if (data.avisoReserva.ok && b) b.reservaEnviada = new Date().toISOString();
@@ -5610,6 +5611,22 @@ async function resolverPendiente(id) {
   avisarReservaAutomatica(entry);
   await loadPendientes();
   if (orderId != null && entry && entry.recibidoFabrica) await checkAutoAddCarga(orderId);
+  if (entry && entry.recibidoFabrica) await checkAutoAddEnvioAparte(id);
+}
+
+// Envío aparte recibido (Jennifer, 2026-10-08, cabecero 1341FUR de
+// BEZEN12031: "lo marco recibido pero no sube solo a la carga"): va en su
+// propia línea, así que checkAutoAddCarga (por pedido) no lo veía. En cuanto
+// se marca recibido, sube solo a la próxima carga de Furniture.
+async function checkAutoAddEnvioAparte(backorderId) {
+  const b = backorders.find(x => x.id === backorderId);
+  if (!b || !b.envioAparte || b.cargaId || !b.recibidoFabrica || (b.estado !== "pendiente" && b.estado !== "cubierto")) return;
+  const o = allOrders.find(x => String(x.id) === String(b.orderId));
+  if (o && (o.cancelado || o.recogeCliente)) return;
+  if (o && (o.notas || "").trim() && !confirm(refLabel(b) + (b.refSuffix || "") + ' tiene una nota: "' + o.notas.trim() + '". ¿Añadir el envío aparte a la próxima carga igualmente?')) return;
+  await anadirReposicionesACarga([b.id]);
+  const carga = allCargas.find(c => c.id === b.cargaId);
+  mostrarAvisoBreve(refLabel(b) + (b.refSuffix || "") + ": envío aparte recibido — añadido a la carga" + (carga ? " del " + fechaCortaEs(carga.fecha) : "") + ".");
 }
 
 // Subida automática a la carga (Jennifer, 2026-08-26): en cuanto TODOS los
@@ -6400,6 +6417,7 @@ function renderFurniture() {
       if (b) b.recibidoFabrica = chk.checked;
       if (b && entry && entry.reservaEnviada) b.reservaEnviada = entry.reservaEnviada;
       if (chk.checked && b) await checkAutoAddCarga(b.orderId);
+      if (chk.checked && b) await checkAutoAddEnvioAparte(b.id);
       renderFurniture();
     });
   });
