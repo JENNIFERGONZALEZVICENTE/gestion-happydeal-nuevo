@@ -1305,7 +1305,8 @@ function renderPage() {
     position: sticky;
     top: 0;
   }
-  tbody tr:hover { background: var(--brand-light); }
+  /* Ratón encima: azul grisáceo, distinto del verde de "ya pedido" (Jennifer, 2026-10-08). */
+  tbody tr:hover { background: #e6eef8; }
   #payment-filter, #estado-filter { text-transform: none; font-size: 11px; margin-top: 4px; padding: 2px 4px; font-weight: 400; letter-spacing: normal; }
   #carrefour-table td:first-child, #maison-du-monde-table td:first-child, #worten-table td:first-child, #conforama-table td:first-child, #conforama-es-table td:first-child, #leroy-merlin-table td:first-child { white-space: nowrap; }
   /* Tabla de Pedidos > Shopify más compacta (Jennifer, 2026-09-16): filas
@@ -1847,8 +1848,10 @@ function renderPage() {
   .pedido-generado-tag { display: block; font-size: 13px; font-weight: 600; color: #146138; margin-top: 4px; }
   .reposicion-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #fef3c7; color: #92400e; }
   .gesto-comercial-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #f3e8ff; color: #6b21a8; }
-  tr.fila-pedido-generado { background: #eafaf0; }
-  tr.fila-pedido-generado:hover { background: #d9f5e3; }
+  /* Ya pedido a fábrica: verde más oscuro y raya verde a la izquierda (Jennifer, 2026-10-08). */
+  tr.fila-pedido-generado { background: #cdeed9; }
+  tr.fila-pedido-generado td:first-child { box-shadow: inset 4px 0 0 #1f8a4c; }
+  tr.fila-pedido-generado:hover { background: #b5e3c6; }
   tr.fila-grupo-inicio td, tr.fila-grupo-medio td, tr.fila-grupo-fin td { border-left: 2px solid var(--brand); border-right: 2px solid var(--brand); }
   tr.fila-grupo-inicio td { border-top: 2px solid var(--brand); }
   tr.fila-grupo-fin td { border-bottom: 2px solid var(--brand); }
