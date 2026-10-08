@@ -3658,7 +3658,18 @@ document.getElementById("search").addEventListener("input", applyFilter);
 document.getElementById("pendientes-referencia-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-pedido-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-sku-search").addEventListener("input", renderPendientes);
-document.getElementById("pendientes-ocultar-recibidos").addEventListener("change", renderPendientes);
+// "Ocultar ya recibidos de fábrica" marcado por defecto y recordado en este
+// navegador (Jennifer, 2026-10-08): al marcar un colchón como recibido (y
+// mandarse la reserva al almacén) la fila seguía a la vista, y al volver a
+// pulsar se desmarcaba sin querer.
+(() => {
+  const chk = document.getElementById("pendientes-ocultar-recibidos");
+  try { chk.checked = localStorage.getItem("hd_ocultar_recibidos") !== "0"; } catch (e) { chk.checked = true; }
+  chk.addEventListener("change", () => {
+    try { localStorage.setItem("hd_ocultar_recibidos", chk.checked ? "1" : "0"); } catch (e) { /* sin localStorage */ }
+    renderPendientes();
+  });
+})();
 // "Mostrar cancelados" se recuerda en este navegador (Jennifer, 2026-09-29).
 (() => {
   const chk = document.getElementById("pendientes-mostrar-cancelados");
