@@ -4937,8 +4937,11 @@ function renderPendientes() {
   // FECHA real (parseFechaGenerica), no por orderNumber — un orderNumber de
   // marketplace no es un correlativo cronológico y puede colar un pedido
   // antiguo por delante de uno de Shopify mucho más reciente (o al revés).
+  // En Polival, lo que aún no está pedido a fábrica va SIEMPRE arriba del
+  // todo (Jennifer, 2026-10-08: un re-pedido con fecha antigua, BEZEN122132,
+  // quedaba intercalado entre los ya pedidos).
   const pendientesOrdenadas = currentProveedorFilter === "polival"
-    ? [...pendientes].sort((a, b) => parseFechaGenerica(b.fecha) - parseFechaGenerica(a.fecha))
+    ? [...pendientes].sort((a, b) => (!!a.pedidoGenerado - !!b.pedidoGenerado) || (parseFechaGenerica(b.fecha) - parseFechaGenerica(a.fecha)))
     : [...pendientes].sort((a, b) => parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha));
   tbody.innerHTML = pendientesOrdenadas.map((b, i) => {
     const anterior = pendientesOrdenadas[i - 1];
