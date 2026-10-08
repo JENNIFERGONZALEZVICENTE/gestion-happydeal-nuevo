@@ -5839,7 +5839,7 @@ function elegirCargaFurniture() {
   cargaFurnitureElegidaId = cargaAbierta ? cargaAbierta.id : null;
 }
 function pedidosEnCargaFurniture(cargaId) {
-  return allOrders.filter(o => o.agencia === "FURNITURE" && o.cargaId === cargaId && !o.gestionadoExterno && !esMiembroSecundario(o)).length
+  return allOrders.filter(o => o.agencia === "FURNITURE" && o.cargaId === cargaId && !esMiembroSecundario(o)).length
     + backorders.filter(b => (b.envioAparte || b.reposicion) && b.cargaId === cargaId && (b.estado === "pendiente" || b.estado === "cubierto")).length;
 }
 function renderPestanasFurniture() {
@@ -6231,7 +6231,9 @@ function renderFurniture() {
   // figure como enviado (Jennifer, 2026-09-29, caso BEZEN12194: marcado como
   // enviado en el sistema antiguo pero sale en esta carga).
   const enCarga = cargaAbierta
-    ? allOrders.filter(o => o.agencia === "FURNITURE" && o.cargaId === cargaAbierta.id && !o.gestionadoExterno && !esMiembroSecundario(o))
+    ? // Un pedido "gestionado por otra vía" que SÍ se ha metido en una carga
+    // nuestra se ve en ella (Jennifer, 2026-10-08, LM 002-26262L40115-A).
+    allOrders.filter(o => o.agencia === "FURNITURE" && o.cargaId === cargaAbierta.id && !esMiembroSecundario(o))
     : [];
   const busquedaPedido = document.getElementById("furniture-pedido-search").value.trim().toLowerCase();
   const busquedaReferencia = document.getElementById("furniture-referencia-search").value.trim().toLowerCase();
