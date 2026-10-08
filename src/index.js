@@ -10455,7 +10455,11 @@ async function handleFetch(request, env) {
       // recibido cuyo pedido todavía espera a otro artículo.
       let entry = null;
       try { entry = JSON.parse(texto); } catch (e) { /* respuesta no JSON */ }
-      if (res.ok && entry && entry.recibidoFabrica && entry.tipo === "colchon" && entry.tipoEnvio === "FUR" && !entry.reservaEnviada) {
+      // También almohadas, toppers y protectores (Jennifer, 2026-10-08,
+      // N076FUR de BEZEN12280: "al marcar unas almohadas como recibidas no
+      // se envía solo el email de reserva").
+      const reservaAuto = entry && (entry.tipo === "colchon" ? entry.tipoEnvio === "FUR" : ["almohada", "topper", "protector"].includes(entry.tipo));
+      if (res.ok && entry && entry.recibidoFabrica && reservaAuto && !entry.reservaEnviada && !entry.reposicion && !entry.gestoComercial && !entry.envioAparte) {
         const backorders = await inventoryStub(env).fetch("https://do/backorders").then((r) => r.json());
         const resto = backorders.filter((b) => String(b.orderId) === String(entry.orderId) && b.id !== entry.id
           && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial && !b.envioAparte
