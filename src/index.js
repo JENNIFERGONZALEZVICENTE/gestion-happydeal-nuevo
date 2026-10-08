@@ -8809,6 +8809,10 @@ function resumenPedidoCaso(o) {
   const producto = String(o.product || "");
   return [o.platform || "Shopify", producto.length > 140 ? producto.slice(0, 140) + "…" : producto, o.agencia || "", estado].filter(Boolean).map(escapeAttr).join(" · ");
 }
+// Pedidos de Shopify anteriores a este número nunca se tramitan solos
+// (SHOPIFY_PROCESAMIENTO_DESDE en orders-store.js) — se pueden traer de
+// Shopify sin riesgo de tocar stock.
+const SHOPIFY_CORTE_TRAMITACION = 12223;
 function buscarPedidoCaso(texto) {
   const t = String(texto || "").trim().toUpperCase();
   if (!t) return null;
@@ -8848,8 +8852,9 @@ function renderCasos() {
     const h = haceDias(u.fecha);
     return '<tr' + (c.urgente ? ' style="background:rgba(254,226,226,.6)"' : "") + '>' +
       '<td>' + (c.urgente ? '<span class="badge" style="background:#dc2626;color:#fff">🔴 URGENTE — responder hoy</span><br>' : "") + '<strong>' + escapeAttr(c.pedidoRef || "—") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:320px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
-      '<td>' + escapeAttr(c.cliente || "") + '</td>' +
-      '<td style="white-space:nowrap">' + escapeAttr(c.telefono || "") + '</td>' +
+      // Nombre/teléfono del pedido si el caso se guardó sin ellos (Jennifer, 2026-10-08).
+      '<td>' + escapeAttr(c.cliente || (o && o.name) || "") + '</td>' +
+      '<td style="white-space:nowrap">' + escapeAttr(c.telefono || (o && o.phone) || "") + '</td>' +
       '<td style="max-width:280px">' + escapeAttr(c.motivo || "") + '</td>' +
       '<td>' + escapeAttr(RESPONSABLE_LABELS[c.responsable] || "Los dos") + '</td>' +
       '<td style="white-space:nowrap"><strong>' + escapeAttr(RESPONSABLE_LABELS[u.autor] || u.autor || "—") + '</strong><br><span' + (c.estado !== "cerrado" && h.n >= 3 ? ' class="caso-atrasado"' : "") + '>' + escapeAttr(fechaHoraCaso(u.fecha, u.soloDia)) + ' (' + h.texto + ')</span>' + (revisadoHoy(c) && c.estado !== "cerrado" ? '<br><span class="badge" style="background:#dcfce7;color:#166534">✔ Revisado hoy</span>' : "") + '</td>' +
@@ -8868,8 +8873,8 @@ function abrirModalCaso(caso, pedidoInicial) {
   document.getElementById("caso-modal-titulo").textContent = caso ? "Caso " + (caso.pedidoRef || caso.cliente || "") : "Nuevo caso";
   document.getElementById("caso-pedidos-datalist").innerHTML = allOrders.slice(-1500).map(p => '<option value="' + escapeAttr(refLabel(p)) + '">' + escapeAttr(p.name || "") + '</option>').join("");
   document.getElementById("caso-pedido").value = caso ? caso.pedidoRef || "" : o ? refLabel(o) : "";
-  document.getElementById("caso-cliente").value = caso ? caso.cliente || "" : o ? o.name || "" : "";
-  document.getElementById("caso-telefono").value = caso ? caso.telefono || "" : o ? o.phone || "" : "";
+  document.getElementById("caso-cliente").value = (caso && caso.cliente) || (o && o.name) || "";
+  document.getElementById("caso-telefono").value = (caso && caso.telefono) || (o && o.phone) || "";
   document.getElementById("caso-motivo").value = caso ? caso.motivo || "" : "";
   document.getElementById("caso-responsable").value = caso ? caso.responsable || "AMBOS" : "AMBOS";
   document.getElementById("caso-nota").value = "";
@@ -8900,13 +8905,21 @@ document.getElementById("caso-pedido").addEventListener("change", () => {
 });
 async function guardarCaso(extra) {
   const pedidoTxt = document.getElementById("caso-pedido").value.trim();
-  const o = buscarPedidoCaso(pedidoTxt);
+  let o = buscarPedidoCaso(pedidoTxt);
+  // Pedido antiguo de Shopify que no está en la app (Jennifer, 2026-10-08,
+  // BEZEN11510): se trae de Shopify sin tramitarlo (anterior al corte), para
+  // tener nombre, teléfono y dirección en el caso.
+  const numAntiguo = !o && (pedidoTxt.toUpperCase().match(/^(?:BEZEN)?0*(\\d{3,6})$/) || [])[1];
+  if (numAntiguo && Number(numAntiguo) < SHOPIFY_CORTE_TRAMITACION) {
+    const r = await fetch("/api/admin/importar-pedido-suelto", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ numero: Number(numAntiguo) }) }).then(x => x.json()).catch(() => ({}));
+    if (r.ok) { await loadOrders(); o = buscarPedidoCaso(pedidoTxt) || allOrders.find(p => String(p.id) === String(r.id)) || null; }
+  }
   const body = {
     id: casoEditando ? casoEditando.id : undefined,
     pedidoId: o ? o.id : null,
     pedidoRef: o ? refLabel(o) : pedidoTxt,
-    cliente: document.getElementById("caso-cliente").value.trim(),
-    telefono: document.getElementById("caso-telefono").value.trim(),
+    cliente: document.getElementById("caso-cliente").value.trim() || (o && o.name) || "",
+    telefono: document.getElementById("caso-telefono").value.trim() || (o && o.phone) || "",
     motivo: document.getElementById("caso-motivo").value.trim(),
     responsable: document.getElementById("caso-responsable").value,
     urgente: document.getElementById("caso-urgente").checked,
