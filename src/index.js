@@ -1847,6 +1847,7 @@ function renderPage() {
   #pendientes-filter-row input, #furniture-filter-row input { width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12.5px; font-weight: 400; text-transform: none; border: 1px solid var(--border); border-radius: 4px; }
   .pedido-generado-tag { display: block; font-size: 13px; font-weight: 600; color: #146138; margin-top: 4px; }
   .reposicion-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #fef3c7; color: #92400e; }
+  .recoge-cliente-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #e0e7ff; color: #3730a3; }
   .gesto-comercial-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #f3e8ff; color: #6b21a8; }
   /* Ya pedido a fábrica: verde más oscuro y raya verde a la izquierda (Jennifer, 2026-10-08). */
   tr.fila-pedido-generado { background: #cdeed9; }
@@ -5067,7 +5068,16 @@ function renderPendientes() {
     // Cancelado (Jennifer, 2026-09-29): se ve solo con "Mostrar cancelados",
     // en gris y sin botones.
     const esCancelado = b.estado === "cancelado";
-    const resolverCell = b.paraStock && !esCancelado
+    // "Viene el cliente a recogerlo" (Jennifer, 2026-10-08): sin cargas; al
+    // llegar se marca recibido y, cuando se lo lleva, "Entregado al cliente".
+    const pedidoFila = allOrders.find(o => String(o.id) === String(b.orderId));
+    const recoge = !!(pedidoFila && pedidoFila.recogeCliente) && !b.paraStock;
+    const recogeCell = !recoge ? "" : (pedidoFila.entregadoCliente
+      ? '<span class="pedido-generado-tag">✅ Entregado al cliente ' + new Date(pedidoFila.entregadoCliente.fecha).toLocaleDateString("es-ES") + "</span>"
+      : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\`
+        + (b.recibidoFabrica ? ' <button type="button" class="entregado-cliente-btn" data-entregado-cliente="' + escapeAttr(String(b.orderId)) + '" title="El cliente ya se lo ha llevado: el pedido queda servido">✅ Entregado al cliente</button>' : ""));
+    const resolverCell = recoge && !esCancelado ? recogeCell
+      : b.paraStock && !esCancelado
       ? (b.recibidoFabrica
           ? '<span class="pedido-generado-tag">✓ Recibido ' + (b.fechaRecibido ? new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") + '</span>'
           : '<button type="button" class="recibir-stock-btn" data-id="' + escapeAttr(b.id) + '" title="Ha llegado del proveedor: lo que no tiene cliente pasa al stock">Marcar recibido (al stock)</button>')
@@ -5076,11 +5086,13 @@ function renderPendientes() {
       : esColchonSeur
       ? \`<button type="button" class="recibido-seur-btn" data-id="\${b.id}" title="Recibido: entra solo en la carga de SEUR (antes de las 15:00, la de hoy; después, la de mañana)">Marcar recibido</button> <button type="button" class="secondary resolver-seur-btn" data-id="\${b.id}" title="Recibido y programado para el día que pida el cliente">📅 Otro día</button> <button type="button" class="secondary programar-seur-btn" data-id="\${b.id}" title="Todavía no ha llegado: cuando lo marques recibido irá a la carga de SEUR de este día">⏳ Programar fecha</button>\${fechaProgramadaSeurTag(b)}\${sustituirBtnHtml}\`
       : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${reservaAlmacenHtml(b)}\${sustituirBtnHtml}\`;
-    const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button> <button type="button" class="secondary revisar-pendiente-btn" data-revisar-pendiente="\${escapeAttr(b.id)}" title="Hay algo que ver antes de pedirlo: pasa al recuadro de revisión y no se puede pedir hasta marcarlo revisado">🔍 Revisar</button></div>\`;
+    const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button> <button type="button" class="secondary revisar-pendiente-btn" data-revisar-pendiente="\${escapeAttr(b.id)}" title="Hay algo que ver antes de pedirlo: pasa al recuadro de revisión y no se puede pedir hasta marcarlo revisado">🔍 Revisar</button>\${b.paraStock || !pedidoFila ? "" : (recoge
+        ? ' <button type="button" class="secondary recoge-cliente-btn" data-recoge-cliente="' + escapeAttr(String(b.orderId)) + '" data-activo="0" title="El cliente ya no viene: vuelve a su agencia de antes">↩ Ya no lo recoge</button>'
+        : ' <button type="button" class="secondary recoge-cliente-btn" data-recoge-cliente="' + escapeAttr(String(b.orderId)) + '" data-activo="1" title="El cliente viene a recogerlo al almacén: no va en ninguna carga de SEUR ni de Furniture">🏬 Recoge el cliente</button>')}</div>\`;
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
-      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}</td>
+      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}\${recoge ? '<span class="recoge-cliente-tag">🏬 RECOGE EL CLIENTE</span>' : ""}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
@@ -5615,7 +5627,8 @@ function soloFaltanAlmohadas(items) {
 }
 async function checkAutoAddCarga(orderId) {
   const order = allOrders.find(o => o.id === orderId);
-  if (!order || order.cargaId || order.cancelado) return;
+  // Si viene el cliente a recogerlo, nunca sube a una carga (Jennifer, 2026-10-08).
+  if (!order || order.cargaId || order.cancelado || order.recogeCliente) return;
   // Envío conjunto (Jennifer, 2026-09-28): el grupo entero espera hasta que
   // TODOS sus pedidos estén recibidos, y entonces sube junto a la carga.
   const grupo = pedidosDelGrupo(order).filter(o => !o.cancelado);
@@ -5914,6 +5927,35 @@ document.addEventListener("click", async (e) => {
   b.reservaEnviada = new Date().toISOString();
   mostrarAvisoBreve("Reserva enviada al almacén: " + refLabel(b));
   if (document.getElementById("view-furniture").style.display !== "none") renderFurniture(); else renderPendientes();
+}, true);
+
+// "Viene el cliente a recogerlo" / "Entregado al cliente" (Jennifer,
+// 2026-10-08): ver /api/pedidos/recoge-cliente y /api/pedidos/entregado-cliente.
+document.addEventListener("click", async (e) => {
+  const btnRecoge = e.target.closest("[data-recoge-cliente]");
+  const btnEntregado = e.target.closest("[data-entregado-cliente]");
+  if (!btnRecoge && !btnEntregado) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const id = (btnRecoge || btnEntregado).dataset.recogeCliente || (btnRecoge || btnEntregado).dataset.entregadoCliente;
+  const order = allOrders.find(o => String(o.id) === String(id));
+  const ref = order ? refLabel(order) : id;
+  const orderId = order ? order.id : id;
+  let res;
+  if (btnRecoge) {
+    const activo = btnRecoge.dataset.activo === "1";
+    if (!confirm(activo
+      ? "¿El cliente viene a recoger " + ref + "?\\n\\nSe saca de cualquier carga abierta de SEUR o Furniture y ya no entrará en ninguna."
+      : "¿" + ref + " ya NO lo recoge el cliente?\\n\\nVuelve a su agencia de antes.")) return;
+    res = await fetch("/api/pedidos/recoge-cliente", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: orderId, activo, usuario: currentUser }) });
+  } else {
+    if (!confirm("¿El cliente ya se ha llevado " + ref + "?\\n\\nEl pedido queda como servido.")) return;
+    res = await fetch("/api/pedidos/entregado-cliente", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: orderId, usuario: currentUser }) });
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { alert(data.error || "No se ha podido guardar."); return; }
+  await loadOrders();
+  loadPendientes();
 }, true);
 
 // Entregas en Valdemoro (Jennifer, 2026-09-30: "cuando un pedido sea para
@@ -10989,6 +11031,42 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/inventario/admin/cargar-furniture-manual" && request.method === "POST") {
       return proxyInventory(env, "/admin/cargar-furniture-manual", request);
     }
+    // "Viene el cliente a recogerlo" (Jennifer, 2026-10-08): fuera de toda
+    // carga de SEUR/Furniture. Además del pedido, saca de las cargas
+    // ABIERTAS los artículos que estuvieran ya preparados en ellas por su
+    // cuenta (colchón "listo-seur", reposición o envío aparte).
+    if (url.pathname === "/api/pedidos/recoge-cliente" && request.method === "POST") {
+      const bodyText = await request.text();
+      const { id, activo } = JSON.parse(bodyText);
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/recoge-cliente", { method: "POST", body: bodyText });
+      const result = await res.json();
+      if (res.ok && result.ok && activo) {
+        const [cargas, backorders] = await Promise.all([
+          stub.fetch("https://do/cargas").then((r) => r.json()),
+          inventoryStub(env).fetch("https://do/backorders").then((r) => r.json()),
+        ]);
+        const abiertas = new Set((Array.isArray(cargas) ? cargas : []).filter((c) => c.estado === "abierta").map((c) => c.id));
+        for (const b of backorders) {
+          if (String(b.orderId) === String(id) && b.cargaId && abiertas.has(b.cargaId)) {
+            await inventoryStub(env).fetch("https://do/admin/reposicion/carga-remove", { method: "POST", body: JSON.stringify({ id: b.id }) });
+          }
+        }
+      }
+      return Response.json(result, { status: res.status });
+    }
+    // Se lo ha llevado el cliente: el pedido queda servido y el "vendido
+    // pendiente" se cuadra igual que cuando sale un envío (settleShipment).
+    if (url.pathname === "/api/pedidos/entregado-cliente" && request.method === "POST") {
+      const bodyText = await request.text();
+      const { id } = JSON.parse(bodyText);
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/entregado-cliente", { method: "POST", body: bodyText });
+      if (!res.ok) return new Response(await res.text(), { status: res.status });
+      const settle = await inventoryStub(env).fetch("https://do/settle-shipment", { method: "POST", body: JSON.stringify({ orderId: id }) }).then((r) => r.json());
+      return Response.json({ ok: true, settled: settle.settled });
+    }
+
     if (url.pathname === "/api/pedidos/admin/pasar-a-furniture" && request.method === "POST") {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do/orders/pasar-a-furniture", { method: "POST", body: await request.text() });

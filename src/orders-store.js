@@ -35,7 +35,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal", "recogeCliente", "agenciaAntesDeRecogida", "entregadoCliente"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -565,6 +565,45 @@ export class OrdersStore {
     // Un colchón transformado sale siempre por Furniture (Jennifer,
     // 2026-09-28): si el pedido iba por SEUR, pasa a FURNITURE (se recuerda
     // la agencia anterior) y sale de cualquier carga de SEUR abierta.
+    // "Viene el cliente a recogerlo" (Jennifer, 2026-10-08): aunque lo
+    // recibamos de Luso/New/Polival, no va en ninguna carga de SEUR ni de
+    // Furniture. Agencia "RECOGE CLIENTE" (se guarda la de antes para poder
+    // deshacerlo) y fuera de cualquier carga ABIERTA.
+    if (url.pathname === "/orders/recoge-cliente" && request.method === "POST") {
+      const { id, activo, usuario } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[id];
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      if (activo) {
+        if (!order.recogeCliente) {
+          order.agenciaAntesDeRecogida = order.agencia || null;
+          order.recogeCliente = { fecha: new Date().toISOString(), usuario: usuario || null };
+        }
+        order.agencia = "RECOGE CLIENTE";
+        const carga = order.cargaId && cargas.find((c) => c.id === order.cargaId);
+        if (carga && carga.estado === "abierta") order.cargaId = null;
+      } else {
+        order.agencia = order.agenciaAntesDeRecogida || null;
+        order.recogeCliente = null;
+        order.agenciaAntesDeRecogida = null;
+        order.entregadoCliente = null;
+      }
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, agencia: order.agencia });
+    }
+    if (url.pathname === "/orders/entregado-cliente" && request.method === "POST") {
+      const { id, usuario } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[id];
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      order.entregadoCliente = { fecha: new Date().toISOString(), usuario: usuario || null };
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+
     if (url.pathname === "/orders/pasar-a-furniture" && request.method === "POST") {
       const { orderId, motivo } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
@@ -901,7 +940,7 @@ export class OrdersStore {
       let añadidos = 0;
       for (const id of orderIds || []) {
         const order = orders[id];
-        if (!order || order.cargaId) continue;
+        if (!order || order.cargaId || order.recogeCliente) continue;
         order.cargaId = abierta.id;
         añadidos++;
       }
@@ -956,7 +995,7 @@ export class OrdersStore {
       let añadidos = 0;
       for (const id of orderIds || []) {
         const order = orders[id];
-        if (!order || order.cargaId) continue;
+        if (!order || order.cargaId || order.recogeCliente) continue;
         order.cargaId = carga.id;
         añadidos++;
       }
