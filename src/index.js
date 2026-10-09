@@ -2195,6 +2195,8 @@ function renderPage() {
     <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-ocultar-recibidos"> Ocultar ya recibidos de fábrica</label>
     <label class="ocultar-recibidos-label"><input type="checkbox" id="pendientes-mostrar-cancelados"> Mostrar cancelados</label>
     <button type="button" id="descargar-excel-pendientes-btn" class="secondary">Descargar Excel (todos los proveedores)</button>
+    <span class="ocultar-recibidos-label" title="Lo que se ha marcado como recibido y se ha mandado apartar al almacén ese día">Reservas al almacén del <input type="date" id="reservas-almacen-fecha"></span>
+    <button type="button" id="descargar-reservas-almacen-btn" class="secondary">Descargar listado de reservas</button>
   </div>
   <div class="carga-abierta-box revision-box" id="revision-box" style="display:none">
     <div class="toolbar"><h3 style="margin:0">Pendientes de revisión antes de pedir</h3></div>
@@ -3734,6 +3736,45 @@ document.getElementById("descargar-excel-pendientes-btn").addEventListener("clic
   XLSX.utils.book_append_sheet(wb, ws, "Pendientes proveedor");
   const fecha = new Date().toISOString().slice(0, 10);
   XLSX.writeFile(wb, "Pendientes_Proveedores_" + fecha + ".xlsx");
+});
+// Listado de lo mandado a apartar al almacén un día concreto (Jennifer,
+// 2026-10-09: "cuando venga el camión, para que sea más sencillo") — todo
+// pendiente con reservaEnviada ese día (hora de Madrid), agrupado por
+// modelo y medida para cotejarlo con lo descargado.
+(() => {
+  const inp = document.getElementById("reservas-almacen-fecha");
+  inp.value = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+})();
+document.getElementById("descargar-reservas-almacen-btn").addEventListener("click", () => {
+  const dia = document.getElementById("reservas-almacen-fecha").value;
+  if (!dia) { alert("Elige el día."); return; }
+  const diaMadrid = iso => new Date(iso).toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  const lista = backorders
+    .filter(b => b.reservaEnviada && diaMadrid(b.reservaEnviada) === dia && b.estado !== "cancelado")
+    .sort((a, b) => (a.stockModel + "|" + a.talla).localeCompare(b.stockModel + "|" + b.talla) || a.reservaEnviada.localeCompare(b.reservaEnviada));
+  const diaEs = new Date(dia + "T12:00:00").toLocaleDateString("es-ES");
+  if (!lista.length) { alert("No hay reservas al almacén del " + diaEs + "."); return; }
+  const filas = lista.map(b => {
+    const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+    return {
+      "Hora reserva": new Date(b.reservaEnviada).toLocaleTimeString("es-ES", { timeZone: "Europe/Madrid", hour: "2-digit", minute: "2-digit" }),
+      Pedido: (b.tipo === "colchon" && b.tipoEnvio === "FUR" ? "FUR" : "") + refLabel(b) + (b.refSuffix || ""),
+      Cliente: o.name || "",
+      Tipo: b.tipo || "",
+      Modelo: b.stockModel,
+      Medida: b.talla,
+      Color: b.color || "",
+      Cantidad: b.cantidad,
+      Proveedor: b.proveedor || "",
+      "Ref. Polival": b.referencia || "",
+      Envío: o.agencia || "",
+      Estado: b.estado === "servido" ? "Ya salió" : b.cargaId || o.cargaId ? "En carga" : "Apartado",
+    };
+  });
+  const ws = XLSX.utils.json_to_sheet(filas);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Reservas almacén");
+  XLSX.writeFile(wb, "Reservas_almacen_" + dia + ".xlsx");
 });
 document.getElementById("furniture-pedido-search").addEventListener("input", renderFurniture);
 document.getElementById("furniture-referencia-search").addEventListener("input", renderFurniture);
