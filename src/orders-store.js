@@ -70,7 +70,7 @@ const DIAS_SEMANA = ["DOMINGO", "LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIER
 // ser festivo... si subo pedidos nuevos directamente se meterán en la carga
 // del 13/10"). Lo que caiga en un festivo pasa al siguiente día laborable.
 // Misma lista que FESTIVOS_SIN_CARGA en index.js.
-const FESTIVOS_SIN_CARGA = ["2026-10-12"];
+const FESTIVOS_SIN_CARGA = ["2026-10-12", "2026-11-09", "2026-12-07", "2026-12-24", "2026-12-25", "2026-12-31", "2027-01-01"];
 function esDiaSinCargaSeur(fecha) {
   const w = new Date(fecha + "T12:00:00Z").getUTCDay();
   return w === 0 || w === 6 || FESTIVOS_SIN_CARGA.includes(fecha);

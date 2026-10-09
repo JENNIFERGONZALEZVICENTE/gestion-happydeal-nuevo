@@ -7928,7 +7928,7 @@ function hoyMadrid() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
 }
 // Festivos sin carga (Jennifer, 2026-10-09: el lunes 12/10 no hay carga).
-const FESTIVOS_SIN_CARGA = ["2026-10-12"];
+const FESTIVOS_SIN_CARGA = ["2026-10-12", "2026-11-09", "2026-12-07", "2026-12-24", "2026-12-25", "2026-12-31", "2027-01-01"];
 function finVentanaSeur() {
   const hoy = hoyMadrid();
   const d = new Date((hoy < "2026-10-01" ? "2026-10-01" : hoy) + "T12:00:00Z");
@@ -10629,7 +10629,7 @@ function calificaNetExpressExport(title, talla) {
 // (hora de Madrid). Devuelve el motivo si no vale, o null.
 // Festivos sin carga (Jennifer, 2026-10-09). Misma lista que en
 // orders-store.js; también la usa la página.
-const FESTIVOS_SIN_CARGA = ["2026-10-12"];
+const FESTIVOS_SIN_CARGA = ["2026-10-12", "2026-11-09", "2026-12-07", "2026-12-24", "2026-12-25", "2026-12-31", "2027-01-01"];
 function errorFechaCargaSeur(fecha) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha || "")) return "Fecha no válida.";
   const w = new Date(fecha + "T12:00:00Z").getUTCDay();
