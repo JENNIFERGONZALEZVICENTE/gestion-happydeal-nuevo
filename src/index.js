@@ -7927,13 +7927,15 @@ function pedidosSeurFueraDeCarga() {
 function hoyMadrid() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
 }
+// Festivos sin carga (Jennifer, 2026-10-09: el lunes 12/10 no hay carga).
+const FESTIVOS_SIN_CARGA = ["2026-10-12"];
 function finVentanaSeur() {
   const hoy = hoyMadrid();
   const d = new Date((hoy < "2026-10-01" ? "2026-10-01" : hoy) + "T12:00:00Z");
   let n = 0, ultimo = "";
   while (n < 5) {
     const w = d.getUTCDay();
-    if (w !== 0 && w !== 6) { n++; ultimo = d.toISOString().slice(0, 10); }
+    if (w !== 0 && w !== 6 && !FESTIVOS_SIN_CARGA.includes(d.toISOString().slice(0, 10))) { n++; ultimo = d.toISOString().slice(0, 10); }
     d.setUTCDate(d.getUTCDate() + 1);
   }
   return ultimo;
@@ -7942,6 +7944,7 @@ function errorFechaSeur(fecha) {
   if (!fecha) return "Elige primero el día.";
   const w = new Date(fecha + "T12:00:00Z").getUTCDay();
   if (w === 0 || w === 6) return "No hay cargas de SEUR ni sábado ni domingo.";
+  if (FESTIVOS_SIN_CARGA.includes(fecha)) return "Ese día es festivo: no hay carga.";
   if (fecha < hoyMadrid()) return "Esa fecha ya ha pasado.";
   return null;
 }
@@ -10624,10 +10627,14 @@ function calificaNetExpressExport(title, talla) {
 
 // Fecha elegida para una carga de SEUR: AAAA-MM-DD, laborable y no pasada
 // (hora de Madrid). Devuelve el motivo si no vale, o null.
+// Festivos sin carga (Jennifer, 2026-10-09). Misma lista que en
+// orders-store.js; también la usa la página.
+const FESTIVOS_SIN_CARGA = ["2026-10-12"];
 function errorFechaCargaSeur(fecha) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha || "")) return "Fecha no válida.";
   const w = new Date(fecha + "T12:00:00Z").getUTCDay();
   if (w === 0 || w === 6) return "No hay cargas de SEUR ni sábado ni domingo.";
+  if (FESTIVOS_SIN_CARGA.includes(fecha)) return "Ese día es festivo: no hay carga.";
   const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
   if (fecha < hoy) return "Esa fecha ya ha pasado.";
   return null;

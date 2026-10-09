@@ -66,8 +66,17 @@ function cargaFechaKey(d) {
 // y puede haber varias cargas abiertas a la vez (la de hoy y la de mañana),
 // así que se buscan/crean por fecha exacta en vez de "la abierta".
 const DIAS_SEMANA = ["DOMINGO", "LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO"];
+// Festivos sin carga (Jennifer, 2026-10-09: "el lunes 12/10 no hay carga por
+// ser festivo... si subo pedidos nuevos directamente se meterán en la carga
+// del 13/10"). Lo que caiga en un festivo pasa al siguiente día laborable.
+// Misma lista que FESTIVOS_SIN_CARGA en index.js.
+const FESTIVOS_SIN_CARGA = ["2026-10-12"];
+function esDiaSinCargaSeur(fecha) {
+  const w = new Date(fecha + "T12:00:00Z").getUTCDay();
+  return w === 0 || w === 6 || FESTIVOS_SIN_CARGA.includes(fecha);
+}
 function skipWeekend(d) {
-  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  while (d.getDay() === 0 || d.getDay() === 6 || FESTIVOS_SIN_CARGA.includes(cargaFechaKey(d))) d.setDate(d.getDate() + 1);
   return d;
 }
 // Corte a las 15:00 (Jennifer, 2026-09-08): un pedido con stock que entra
@@ -89,7 +98,11 @@ function nextSeurCargaDate(from) {
 // sábado, que no existe como carga real).
 function seurCargaDateFromChoice(choice) {
   // Fecha concreta (AAAA-MM-DD) elegida en el desplegable de días abiertos.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(choice || "")) return new Date(choice + "T00:00:00Z");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(choice || "")) {
+    const d = new Date(choice + "T00:00:00Z");
+    while (esDiaSinCargaSeur(d.toISOString().slice(0, 10))) d.setUTCDate(d.getUTCDate() + 1);
+    return d;
+  }
   // "auto" (Jennifer, 2026-09-30: "si los marco como recibidos y el colchón
   // va solo se tienen que preparar solos para SEUR"): corte de las 15:00 en
   // hora de Madrid — antes de las 15:00, la carga de HOY; después, la de
@@ -101,7 +114,7 @@ function seurCargaDateFromChoice(choice) {
     const hora = Number(ahora.toLocaleString("en-GB", { timeZone: "Europe/Madrid", hour: "2-digit", hour12: false }));
     const d = new Date(hoy + "T00:00:00Z");
     d.setUTCDate(d.getUTCDate() + (hora >= 15 ? 1 : 0));
-    while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() + 1);
+    while (esDiaSinCargaSeur(d.toISOString().slice(0, 10))) d.setUTCDate(d.getUTCDate() + 1);
     return d;
   }
   const d = new Date();
@@ -124,8 +137,7 @@ function diasCargaSeur(n = 5) {
   const d = new Date((hoy < SEUR_SEMANA_DESDE ? SEUR_SEMANA_DESDE : hoy) + "T12:00:00Z");
   const dias = [];
   while (dias.length < n) {
-    const w = d.getUTCDay();
-    if (w !== 0 && w !== 6) dias.push(d.toISOString().slice(0, 10));
+    if (!esDiaSinCargaSeur(d.toISOString().slice(0, 10))) dias.push(d.toISOString().slice(0, 10));
     d.setUTCDate(d.getUTCDate() + 1);
   }
   return dias;
@@ -166,6 +178,7 @@ async function asegurarCargasFurniture(storage) {
     const w = d.getUTCDay();
     if (!(w in DIAS_CARGA)) continue;
     const fecha = d.toISOString().slice(0, 10);
+    if (FESTIVOS_SIN_CARGA.includes(fecha)) continue;
     const delDia = cargas.filter((c) => (c.tipo || "furniture") === "furniture" && c.fecha === fecha);
     if (delDia.some((c) => c.estado === "abierta")) { abiertas++; continue; }
     if (delDia.length) continue; // ya tuvo su carga y está cerrada
@@ -179,6 +192,10 @@ async function asegurarCargasFurniture(storage) {
 
 async function getOrCreateCargaByFecha(storage, tipo, dateObj) {
   const cargas = (await storage.get("cargas")) || [];
+  if (tipo === "seur") {
+    dateObj = new Date(cargaFechaKey(dateObj) + "T00:00:00Z");
+    while (esDiaSinCargaSeur(cargaFechaKey(dateObj))) dateObj.setUTCDate(dateObj.getUTCDate() + 1);
+  }
   const fecha = cargaFechaKey(dateObj);
   let carga = cargas.find((c) => (c.tipo || "furniture") === tipo && c.fecha === fecha && c.estado === "abierta");
   if (!carga) {
@@ -186,7 +203,7 @@ async function getOrCreateCargaByFecha(storage, tipo, dateObj) {
       id: crypto.randomUUID(),
       tipo,
       fecha,
-      dia: DIAS_SEMANA[dateObj.getDay()],
+      dia: DIAS_SEMANA[new Date(fecha + "T12:00:00Z").getUTCDay()],
       estado: "abierta",
       fechaCreacion: new Date().toISOString(),
       fechaCierre: null,
