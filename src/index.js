@@ -1555,6 +1555,13 @@ function renderPage() {
   }
   .modal-box h3 { margin: 0 0 0.75rem; color: var(--brand-dark); }
   .modal-box-wide { width: min(760px, 92vw); }
+  #buscador-general { width: 230px; padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.4); font: inherit; font-size: 13px; }
+  .buscador-datos { font-size: 13px; line-height: 1.5; margin: 6px 0 10px; }
+  .buscador-nota { margin-top: 4px; padding: 4px 8px; background: #fef9c3; border-radius: 6px; }
+  .modal-box h4 { margin: 12px 0 4px; color: var(--brand-dark); }
+  .buscador-donde { margin: 0 0 0 18px; padding: 0; font-size: 13px; line-height: 1.6; }
+  .buscador-historico { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .buscador-historico td { padding: 4px 6px; border-bottom: 1px dashed var(--border, #e5e7eb); vertical-align: top; }
   .avisos-bell-btn {
     position: relative;
     background: rgba(255,255,255,0.15);
@@ -1951,6 +1958,7 @@ function renderPage() {
       <p>Vista en vivo sincronizada con tu tienda</p>
     </div>
     <div style="display:flex;align-items:center;gap:14px">
+      <input type="search" id="buscador-general" placeholder="🔎 Buscar pedido (nº, nombre, teléfono…)" title="Escribe y pulsa Intro: todo lo del pedido en la app y su histórico" />
       <button type="button" id="avisos-cancelados-btn" class="avisos-bell-btn" title="Pedidos cancelados con pendiente en Proveedores">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a1 1 0 0 1 1 1v1.06A7.002 7.002 0 0 1 19 11v3.586l1.707 1.707A1 1 0 0 1 20 18H4a1 1 0 0 1-.707-1.707L5 14.586V11a7.002 7.002 0 0 1 6-6.94V3a1 1 0 0 1 1-1zm0 20a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22z"/></svg>
         <span id="avisos-cancelados-count" class="avisos-bell-count" style="display:none">0</span>
@@ -1959,6 +1967,16 @@ function renderPage() {
     </div>
   </div>
 </header>
+
+<div class="modal-overlay" id="buscador-modal-overlay">
+  <div class="modal-box modal-box-wide">
+    <h3 id="buscador-titulo">Buscar pedido</h3>
+    <div id="buscador-resultado"></div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="buscador-cerrar-btn">Cerrar</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal-overlay" id="avisos-cancelados-modal-overlay">
   <div class="modal-box modal-box-wide">
@@ -7532,7 +7550,7 @@ function renderEnviosSeur() {
     (!soloPunto || (e.enPunto && !e.archivado)) &&
     (!ocultarEntregados || !esEntregado(e)) &&
     (!ocultarArchivados || !e.archivado) &&
-    (!q ||[e.ref, e.nombre, e.observaciones, e.nota].join(" ").toLowerCase().includes(q)) &&
+    (!q ||[e.ref, e.refSeur, e.nombre, e.observaciones, e.nota].join(" ").toLowerCase().includes(q)) &&
     (!estado || (e.estadoSeur || "__sin__") === estado) &&
     (!reclamado || (reclamado === "si" ? e.reclamado : reclamado === "no" ? !e.reclamado : reclamado === "respuesta" ? e.correoNoLeidos > 0 : !!(e.correo && e.correo.mensajes && e.correo.mensajes.length))) &&
     (!pais || e.pais === pais));
@@ -7566,7 +7584,10 @@ function renderEnviosSeur() {
       (e.correoNoLeidos ? "💬 SEUR ha respondido (" + e.correoNoLeidos + ")" : nMsg ? "💬 Ver conversación (" + nMsg + ")" : "✉ Escribir a SEUR") + '</button>';
     return '<tr' + (e.reclamado ? ' style="background:rgba(253,230,138,.25)"' : '') + '>' +
       '<td style="white-space:nowrap">' + (e.sinCarga ? "" : '<span style="font-size:11px;color:var(--muted)">' + escapeAttr(e.diaCarga || diaSemana(e.fechaCarga)) + '</span><br>') + '<strong>' + escapeAttr(fechaCorta(e.fechaCarga)) + '</strong>' + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío anterior a las cargas del sistema: sale aquí porque tiene conversación con SEUR">anterior a las cargas</span>' : '') + '</td>' +
-      '<td><strong>' + escapeAttr(e.ref) + '</strong></td>' +
+      '<td>' + (e.refSeur && e.refSeur !== e.ref
+        ? '<strong>' + escapeAttr(e.refSeur) + '</strong><br><span style="color:var(--muted);font-size:11px">antes ' + escapeAttr(e.ref) + '</span>'
+        : '<strong>' + escapeAttr(e.ref) + '</strong>') +
+        '<br><button type="button" class="secondary envio-seur-ref" data-i="' + i + '" style="margin-top:4px;padding:2px 8px;font-size:11px" title="Si la etiqueta se subió a SEUR con otra referencia (ej. terminada en 2)">✎ Cambiar referencia</button></td>' +
       '<td>' + escapeAttr(e.nombre || "") + '</td>' +
       '<td>' + escapeAttr(e.pais || "") + '</td>' +
       '<td>' + escapeAttr(e.observaciones || "") + '</td>' +
@@ -7586,6 +7607,18 @@ function renderEnviosSeur() {
       if (ta.value === (e.nota || "")) return;
       e.nota = ta.value;
       await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, nota: ta.value }) });
+    });
+  });
+  // Referencia con la que se subió de verdad (Jennifer, 2026-10-09).
+  tbody.querySelectorAll(".envio-seur-ref").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const e = enviosSeur[Number(btn.dataset.i)];
+      const nueva = prompt("Referencia con la que está subida en SEUR (déjalo vacío para volver a " + e.ref + "):", e.refSeur || e.ref);
+      if (nueva === null) return;
+      const valor = nueva.trim().toUpperCase();
+      const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, refSeur: valor && valor !== e.ref ? valor : null }) });
+      if (!res.ok) { alert("No se pudo guardar la referencia."); return; }
+      await loadCasosRevisarSeur(true);
     });
   });
   tbody.querySelectorAll(".envio-seur-correo").forEach(btn => {
@@ -7964,6 +7997,7 @@ function renderSeurCargas() {
       return \`
       <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
         \${cells}
+        <td class="seur-envio-notas" data-carga-id="\${carga.id}" data-order-id="\${escapeAttr(String(o.id))}" data-suffix="\${escapeAttr(refSuffix || "")}" data-backorder="\${backorderId ? "1" : ""}"><span style="color:var(--muted);font-size:11px">…</span></td>
         <td>\${backorderId
           ? \`<button type="button" class="quitar-seur-btn" data-id="\${backorderId}">\${quitarLabel}</button>\`
           : \`<button type="button" class="sacar-carga-btn sacar-carga-seur-btn" data-order-id="\${escapeAttr(String(o.id))}">Sacar de la carga</button>\`}\${moverHtml}</td>
@@ -7982,7 +8016,7 @@ function renderSeurCargas() {
         <div class="inventario-count">\${filas.length} pedidos en esta carga</div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th><th></th></tr></thead>
+            <thead><tr><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th><th style="min-width:260px">Ref. en SEUR · Notas</th><th></th></tr></thead>
             <tbody>\${filasHtml}</tbody>
           </table>
         </div>
@@ -8047,6 +8081,7 @@ function renderSeurCargas() {
   document.querySelectorAll(".descargar-seur-btn").forEach(btn => {
     btn.addEventListener("click", () => descargarFicheroSeur(btn.dataset.id));
   });
+  [...aLaVista, ...programadas].forEach(c => rellenarNotasCargaSeur(c.id));
   document.querySelectorAll(".mover-seur-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       const fecha = btn.parentElement.querySelector(".mover-seur-fecha").value;
@@ -8060,6 +8095,50 @@ function renderSeurCargas() {
       loadSeur();
     });
   });
+}
+
+// Ref. en SEUR y notas de cada envío de la carga (Jennifer, 2026-10-09).
+// Las celdas de un mismo pedido se reparten sus envíos: las de un artículo
+// suelto se quedan los que acaban en su sufijo; la fila del pedido, el resto.
+async function rellenarNotasCargaSeur(cargaId) {
+  const data = await fetch("/api/cargas/seur/envios-carga?cargaId=" + encodeURIComponent(cargaId)).then(r => r.json()).catch(() => ({}));
+  const celdas = [...document.querySelectorAll('.seur-envio-notas[data-carga-id="' + cargaId + '"]')];
+  if (!data.ok) { celdas.forEach(td => { td.innerHTML = ""; }); return; }
+  const usados = new Set();
+  const pintar = (td, envs) => {
+    envs.forEach(e => usados.add(e));
+    td.innerHTML = envs.map(e => {
+      const i = data.envios.indexOf(e);
+      return '<div style="margin-bottom:6px">' +
+        (e.refSeur ? '<strong>' + escapeAttr(e.refSeur) + '</strong> <span style="color:var(--muted);font-size:11px">(antes ' + escapeAttr(e.ref) + ')</span>' : '<strong>' + escapeAttr(e.ref) + '</strong>') +
+        ' <button type="button" class="secondary carga-seur-ref-btn" data-i="' + i + '" style="padding:1px 6px;font-size:11px" title="Si la etiqueta se subió a SEUR con otra referencia (ej. terminada en 2)">✎</button>' +
+        '<textarea class="carga-seur-nota" data-i="' + i + '" rows="2" style="display:block;width:100%;min-width:240px;margin-top:3px;font:inherit;font-size:12px;resize:vertical" placeholder="Notas del envío...">' + escapeAttr(e.nota || "") + '</textarea></div>';
+    }).join("") || '<span style="color:var(--muted);font-size:11px">—</span>';
+    td.querySelectorAll(".carga-seur-nota").forEach(ta => {
+      ta.addEventListener("focus", () => { editing = true; });
+      ta.addEventListener("blur", async () => {
+        editing = false;
+        const e = data.envios[Number(ta.dataset.i)];
+        if (ta.value === (e.nota || "")) return;
+        e.nota = ta.value;
+        await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, nota: ta.value }) });
+      });
+    });
+    td.querySelectorAll(".carga-seur-ref-btn").forEach(btn => btn.addEventListener("click", async () => {
+      const e = data.envios[Number(btn.dataset.i)];
+      const nueva = prompt("Referencia con la que está subida en SEUR (déjalo vacío para volver a " + e.ref + "):", e.refSeur || e.ref);
+      if (nueva === null) return;
+      const valor = nueva.trim().toUpperCase();
+      const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, refSeur: valor && valor !== e.ref ? valor : null }) });
+      if (!res.ok) { alert("No se pudo guardar la referencia."); return; }
+      rellenarNotasCargaSeur(cargaId);
+    }));
+  };
+  const deOrden = td => data.envios.filter(e => String(e.orderId) === td.dataset.orderId && !usados.has(e));
+  // Primero los artículos sueltos con sufijo, luego el resto.
+  celdas.filter(td => td.dataset.backorder && td.dataset.suffix).forEach(td => pintar(td, deOrden(td).filter(e => e.ref.endsWith(td.dataset.suffix)).slice(0, 1)));
+  celdas.filter(td => !td.dataset.backorder).forEach(td => pintar(td, deOrden(td)));
+  celdas.filter(td => td.dataset.backorder && !td.dataset.suffix).forEach(td => pintar(td, deOrden(td)));
 }
 
 // Antes de descargar avisa si algún artículo no tiene un peso conocido
@@ -8805,6 +8884,184 @@ document.getElementById("avisos-cancelados-cerrar-btn").addEventListener("click"
 });
 document.getElementById("avisos-cancelados-modal-overlay").addEventListener("click", (e) => {
   if (e.target.id === "avisos-cancelados-modal-overlay") e.currentTarget.classList.remove("open");
+});
+
+// Buscador general de pedidos (Jennifer, 2026-10-09: "si busco el pedido
+// BEZEN12158, que me salga todo lo relacionado con este pedido en todos los
+// puntos del sistema y me dé un histórico"). Se monta con lo que ya guarda
+// la app; no hay un registro aparte.
+const normBusca = x => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+function fechaBusca(x) {
+  if (!x) return 0;
+  const s = String(x).trim();
+  const m = /^([0-9]{1,2})[-/]([0-9]{1,2})[-/]([0-9]{4})/.exec(s);
+  if (m) return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]), 12).getTime();
+  const t = Date.parse(s.length === 10 ? s + "T12:00:00" : s);
+  return Number.isNaN(t) ? 0 : t;
+}
+function fechaHoraBusca(t, soloDia) {
+  if (!t) return "";
+  const d = new Date(t);
+  // Las fechas sin hora (Furniture, SEUR) se guardan a las 12:00 en punto.
+  if (d.getHours() === 12 && d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0) soloDia = true;
+  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" }) + (soloDia ? "" : " " + d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }));
+}
+let buscadorDatos = null;
+async function cargarDatosBuscador() {
+  const j = u => fetch(u).then(r => r.json()).catch(() => []);
+  const [orders, bos, cargas, movs, casosL, tareasL] = await Promise.all([
+    j("/api/pedidos/shopify"), j("/api/inventario/pendientes"), j("/api/cargas"), j("/api/inventario/movimientos"), j("/api/casos"), j("/api/tareas"),
+  ]);
+  buscadorDatos = { orders, bos, cargas, movs, casos: casosL, tareas: tareasL };
+  return buscadorDatos;
+}
+function pedidosQueCoinciden(q, d) {
+  const n = normBusca(q);
+  if (!n) return [];
+  const sinPrefijo = n.replace(/^(REP|GC)/, "");
+  const texto = q.trim().toLowerCase();
+  return d.orders.filter(o => {
+    const refs = [refLabel(o), o.orderRef, "BEZEN" + o.orderNumber, o.orderNumber].map(normBusca).filter(Boolean);
+    if (refs.some(r => r === n || r === sinPrefijo)) return true;
+    // Referencias de SEUR ("…2", "GCBEZEN…", la cambiada a mano).
+    const seur = (o.seurTracking || []).map(t => t.referencia).concat(Object.keys(o.enviosSeurInfo || {}), Object.values(o.enviosSeurInfo || {}).map(i => i.refSeur)).map(normBusca).filter(Boolean);
+    if (seur.some(r => r === n)) return true;
+    if (sinPrefijo.length >= 5 && refs.some(r => r.includes(sinPrefijo))) return true;
+    if (texto.length >= 4 && /[a-z]/.test(texto) && (o.name || "").toLowerCase().includes(texto)) return true;
+    const tel = n.replace(/^34/, "");
+    if (/^[0-9]{9,}$/.test(tel) && normBusca(o.phone).endsWith(tel)) return true;
+    if (texto.includes("@") && (o.email || "").toLowerCase() === texto) return true;
+    return false;
+  });
+}
+function nombreArticuloBusca(b) {
+  const tipo = b.tipo === "colchon" ? "Colchón" : b.tipo === "almohada" ? "Almohada" : b.tipo === "canape" ? "Canapé" : b.tipo === "base" ? "Base" : (b.tipo || "");
+  const modelo = nombreCortoModelo(b.stockModel);
+  return [modelo.toLowerCase().startsWith(tipo.toLowerCase()) ? "" : tipo, modelo, b.talla, b.color].filter(Boolean).join(" ") + (b.cantidad > 1 ? " (" + b.cantidad + " ud.)" : "");
+}
+function fichaPedidoBuscador(o, d) {
+  const ref = refLabel(o);
+  const cargaDe = id => d.cargas.find(c => c.id === id);
+  const textoCarga = c => c ? ((c.tipo === "seur" ? "SEUR" : "Furniture") + " del " + (c.dia ? c.dia.toLowerCase() + " " : "") + fechaHoraBusca(fechaBusca(c.fecha), true) + (c.estado === "cerrada" ? " (ya salió)" : " (abierta)")) : "";
+  const bos = d.bos.filter(b => String(b.orderId) === String(o.id));
+  const ev = [];
+  const add = (t, texto, quien) => { if (t) ev.push({ t, texto, quien: quien || "" }); };
+
+  add(fechaBusca(o.orderDate), "Pedido recibido en " + (o.platform || "Shopify") + (o.price ? " · " + o.price + " " + (o.currency || "EUR") : ""));
+  add(fechaBusca(o.fechaTramitacion), "Pedido tramitado en la app");
+  add(fechaBusca(o.noSalioSeur), "Marcado como «no salió» en SEUR");
+  if (o.recogeCliente) add(fechaBusca(o.recogeCliente.fecha), "Marcado «viene el cliente a recogerlo»", o.recogeCliente.usuario);
+  if (o.entregadoCliente) add(fechaBusca(o.entregadoCliente.fecha), "Entregado al cliente en mano", o.entregadoCliente.usuario);
+  for (const b of bos) {
+    const art = nombreArticuloBusca(b) + (b.referencia ? " [" + b.referencia + "]" : "");
+    const prov = b.proveedor ? " · " + b.proveedor : "";
+    add(fechaBusca(b.fecha), (b.reposicion ? "Reposición creada: " : b.gestoComercial ? "Gesto comercial creado: " : "Artículo pendiente creado: ") + art + prov, b.creadoPor);
+    add(fechaBusca(b.fechaPedidoFabrica), "Pedido a fábrica" + prov + ": " + art);
+    add(fechaBusca(b.fechaRecibido), "Recibido de fábrica: " + art);
+    add(fechaBusca(b.reservaEnviada), "Email de reserva al almacén: " + art);
+    add(fechaBusca(b.fechaCancelado), "Cancelado: " + art);
+    add(fechaBusca(b.fechaTransformacion), "Transformado: " + art);
+  }
+  const movs = d.movs.filter(m => m.orderNumber && String(m.orderNumber) === String(o.orderNumber) && (m.platform || "Shopify") === (o.platform || "Shopify") && (!o.orderRef || !m.orderRef || m.orderRef === o.orderRef));
+  for (const m of movs) add(fechaBusca(m.fecha), "Stock " + (m.delta > 0 ? "+" : "") + m.delta + " " + (m.campo === "vendidoPendiente" ? "vendido pendiente" : "unidades") + ": " + nombreCortoModelo(m.stockModel) + " " + (m.talla || "") + (m.origen ? " (" + m.origen + ")" : ""), m.usuario);
+  // Cargas en las que ha salido (las cerradas guardan sus envíos).
+  for (const c of d.cargas) {
+    const envs = (c.envios || []).filter(e => String(e.orderId) === String(o.id));
+    for (const e of envs) add(fechaBusca(c.fechaCierre || c.fecha), "Salió en la carga de " + textoCarga(c) + " con referencia " + e.ref + (e.observaciones ? " · " + e.observaciones : ""));
+    if (!envs.length && c.estado === "cerrada" && (o.cargaId === c.id || bos.some(b => b.cargaId === c.id))) add(fechaBusca(c.fechaCierre || c.fecha), "Salió en la carga de " + textoCarga(c));
+  }
+  for (const t of o.furnitureTracking || []) {
+    add(fechaBusca(t.fechaAlmacen), "Furniture: en almacén (albarán " + (t.albaran || "") + ")");
+    if (t.estado) add(fechaBusca(t.fechaPrevista) || fechaBusca(t.fechaAlmacen), "Furniture: " + t.estado);
+  }
+  for (const t of o.seurTracking || []) {
+    if (t.anulado) continue;
+    add(fechaBusca(t.fechaCreacion), "SEUR: envío registrado con referencia " + t.referencia + (t.numeroExpedicion ? " (expedición " + t.numeroExpedicion + ")" : ""));
+    if (t.estado && t.fechaSituacion) add(fechaBusca(t.fechaSituacion) + 1, "SEUR " + t.referencia + ": " + t.estado);
+  }
+  for (const [r, info] of Object.entries(o.enviosSeurInfo || {})) {
+    add(fechaBusca(info.fechaReclamado), "Reclamado a SEUR (" + (info.refSeur || r) + ")");
+    add(fechaBusca(info.fechaArchivado), "Envío SEUR archivado (" + (info.refSeur || r) + ")");
+    for (const msg of (info.correo && info.correo.mensajes) || []) add(fechaBusca(msg.fecha), (msg.deSeur ? "Email de SEUR: " : "Email a SEUR: ") + (msg.asunto || ""));
+  }
+  const casosP = d.casos.filter(c => String(c.pedidoId) === String(o.id) || normBusca(c.pedidoRef) === normBusca(ref));
+  for (const c of casosP) for (const nota of c.notas || []) add(fechaBusca(nota.fecha), "Caso «" + (c.motivo || "") + "»: " + nota.texto, nota.autor);
+  const tareasP = d.tareas.filter(t => String(t.pedidoId) === String(o.id) || normBusca(t.pedidoRef) === normBusca(ref));
+  for (const t of tareasP) {
+    add(fechaBusca(t.creado), "Tarea creada: " + t.texto + (t.fecha ? " (para el " + fechaHoraBusca(fechaBusca(t.fecha), true) + ")" : ""), t.creadoPor);
+    add(fechaBusca(t.fechaHecha), "Tarea hecha: " + t.texto, t.hechaPor);
+  }
+  ev.sort((a, b) => a.t - b.t);
+
+  // Dónde está ahora.
+  const donde = [];
+  if (o.cancelado || o.shopifyCancelado) donde.push("❌ Pedido CANCELADO");
+  donde.push("📦 Pedidos · " + (o.platform || "Shopify") + (o.agencia ? " — agencia " + o.agencia : "") + (o.shippingStatus === "fulfilled" || o.shopifyFulfilled ? " — enviado" : ""));
+  if (o.cargaId) donde.push("🚚 En la carga de " + textoCarga(cargaDe(o.cargaId)));
+  if (o.retenido) donde.push("⏸ Retenido" + (o.retenido.hasta ? " hasta el " + fechaHoraBusca(fechaBusca(o.retenido.hasta), true) : ""));
+  if (o.recogeCliente) donde.push("🙋 Lo recoge el cliente" + (o.entregadoCliente ? " (ya entregado)" : ""));
+  for (const b of bos) {
+    let txt;
+    if (b.estado === "pendiente") txt = "🏭 Proveedores · " + (b.proveedor || "sin proveedor") + ": " + nombreArticuloBusca(b) + " — " + (b.recibidoFabrica ? "recibido de fábrica" : b.pedidoGenerado ? "pedido a fábrica, esperando" : "SIN PEDIR a fábrica") + (b.tipoEnvio ? " · " + b.tipoEnvio : "") + (b.reservaEnviada ? " · reservado en almacén" : "");
+    else if (b.estado === "listo-seur") txt = "🚚 " + nombreArticuloBusca(b) + " — preparado para la carga de " + textoCarga(cargaDe(b.cargaId));
+    else if (b.estado === "cubierto") txt = "✅ " + nombreArticuloBusca(b) + " — cubierto con stock";
+    else if (b.estado === "servido") txt = "✔ " + nombreArticuloBusca(b) + " — ya enviado";
+    else if (b.estado === "cancelado") txt = "❌ " + nombreArticuloBusca(b) + " — cancelado";
+    else txt = nombreArticuloBusca(b) + " — " + b.estado;
+    donde.push(txt + (b.referencia ? " [" + b.referencia + "]" : "") + (b.refSuffix ? " · envío " + b.refSuffix : ""));
+  }
+  for (const c of casosP) donde.push("📋 Caso: " + (c.motivo || "") + " — " + (c.estado === "cerrado" ? "cerrado" : "ABIERTO"));
+  for (const t of tareasP) donde.push("📝 Tarea: " + t.texto + " — " + (t.hecha ? "hecha" : "pendiente"));
+
+  const notasSeur = Object.entries(o.enviosSeurInfo || {}).filter(([, i]) => (i.nota || "").trim() || i.refSeur)
+    .map(([r, i]) => "<li><strong>" + escapeAttr(i.refSeur || r) + "</strong>" + (i.refSeur ? ' <span style="color:var(--muted)">(antes ' + escapeAttr(r) + ")</span>" : "") + (i.nota ? ": " + escapeAttr(i.nota) : "") + "</li>").join("");
+  const segs = (o.seurTracking || []).filter(t => !t.anulado && t.seguimiento).map(t => '<a href="' + escapeAttr(t.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">SEUR ' + escapeAttr(t.referencia) + "</a>")
+    .concat((o.furnitureTracking || []).filter(t => t.seguimiento).map(t => '<a href="' + escapeAttr(t.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Furniture ' + escapeAttr(t.albaran || "") + "</a>"));
+
+  return '<div class="buscador-ficha">' +
+    '<h3 style="margin:0 0 4px">' + escapeAttr(ref) + ' <span style="font-weight:400;color:var(--muted);font-size:13px">' + escapeAttr(o.platform || "Shopify") + " · " + escapeAttr(formatOrderDate(o.orderDate)) + "</span></h3>" +
+    '<div class="buscador-datos">' +
+      "<div><strong>" + escapeAttr(o.name || "") + "</strong> · " + escapeAttr(o.phone || "") + (o.email ? " · " + escapeAttr(o.email) : "") + "</div>" +
+      "<div>" + escapeAttr(o.address || "") + "</div>" +
+      "<div>" + escapeAttr(o.product || "") + "</div>" +
+      (o.services ? '<div style="color:var(--muted)">' + escapeAttr(o.services) + "</div>" : "") +
+      "<div>" + escapeAttr([o.paymentMethod, o.paymentStatus].filter(Boolean).join(" · ")) + "</div>" +
+      ((o.notas || "").trim() ? '<div class="buscador-nota">📝 ' + escapeAttr(o.notas) + "</div>" : "") +
+      (notasSeur ? '<div class="buscador-nota">Envíos SEUR:<ul style="margin:2px 0 0 18px;padding:0">' + notasSeur + "</ul></div>" : "") +
+      (segs.length ? "<div>Seguimiento: " + segs.join(" · ") + "</div>" : "") +
+    "</div>" +
+    '<h4>Dónde está ahora</h4><ul class="buscador-donde">' + donde.map(x => "<li>" + escapeAttr(x) + "</li>").join("") + "</ul>" +
+    "<h4>Histórico</h4>" +
+    (ev.length ? '<table class="buscador-historico"><tbody>' + ev.map(e => '<tr><td style="white-space:nowrap;color:var(--muted)">' + fechaHoraBusca(e.t) + "</td><td>" + escapeAttr(e.texto) + (e.quien ? ' <span style="color:var(--muted);font-size:11px">· ' + escapeAttr(e.quien) + "</span>" : "") + "</td></tr>").join("") + "</tbody></table>" : '<p style="color:var(--muted)">Sin movimientos guardados.</p>') +
+    "</div>";
+}
+async function buscarPedidoGeneral(q) {
+  const overlay = document.getElementById("buscador-modal-overlay");
+  const cont = document.getElementById("buscador-resultado");
+  document.getElementById("buscador-titulo").textContent = "Buscar: " + q;
+  cont.innerHTML = '<p style="color:var(--muted)">Buscando…</p>';
+  overlay.classList.add("open");
+  const d = await cargarDatosBuscador();
+  const encontrados = pedidosQueCoinciden(q, d);
+  if (!encontrados.length) { cont.innerHTML = '<p>No he encontrado ningún pedido con «' + escapeAttr(q) + '». Prueba con el nº de pedido, la referencia, el nombre o el teléfono.</p>'; return; }
+  if (encontrados.length === 1) { cont.innerHTML = fichaPedidoBuscador(encontrados[0], d); return; }
+  encontrados.sort((a, b) => parseFechaGenerica(b.orderDate) - parseFechaGenerica(a.orderDate));
+  cont.innerHTML = "<p>" + encontrados.length + " pedidos coinciden:</p>" + encontrados.slice(0, 50).map(o =>
+    '<button type="button" class="secondary buscador-elegir" data-id="' + escapeAttr(String(o.id)) + '" style="display:block;width:100%;text-align:left;margin:4px 0">' +
+    "<strong>" + escapeAttr(refLabel(o)) + "</strong> · " + escapeAttr(o.name || "") + " · " + escapeAttr(formatOrderDate(o.orderDate)) + ' <span style="color:var(--muted)">' + escapeAttr(o.product || "") + "</span></button>").join("");
+  cont.querySelectorAll(".buscador-elegir").forEach(btn => btn.addEventListener("click", () => {
+    const o = d.orders.find(x => String(x.id) === btn.dataset.id);
+    if (o) cont.innerHTML = fichaPedidoBuscador(o, d);
+  }));
+}
+document.getElementById("buscador-general").addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  const q = e.target.value.trim();
+  if (q) buscarPedidoGeneral(q);
+});
+document.getElementById("buscador-cerrar-btn").addEventListener("click", () => document.getElementById("buscador-modal-overlay").classList.remove("open"));
+document.getElementById("buscador-modal-overlay").addEventListener("click", e => {
+  if (e.target.id === "buscador-modal-overlay") e.currentTarget.classList.remove("open");
 });
 
 // Agenda de casos (Jennifer, 2026-10-05): "casos que nos llaman clientes y
@@ -10174,15 +10431,16 @@ async function actualizarCorreosSeur(env, segundaPasada) {
   for (const o of orders) {
     for (const [ref, info] of Object.entries(o.enviosSeurInfo || {})) {
       if (!info.correo || !(info.correo.threadIds || []).length) continue;
-      const t = (o.seurTracking || []).find((x) => norm(x.referencia) === norm(ref));
-      lineas.push({ o, ref, correo: info.correo, expedicion: t ? String(t.numeroExpedicion || "") : "" });
+      const t = (o.seurTracking || []).find((x) => norm(x.referencia) === norm(info.refSeur || ref));
+      lineas.push({ o, ref, refBusca: info.refSeur || ref, correo: info.correo, expedicion: t ? String(t.numeroExpedicion || "") : "" });
     }
+    const refsCambiadas = new Set(Object.values(o.enviosSeurInfo || {}).map((i) => norm(i.refSeur)).filter(Boolean));
     // Envíos SIN conversación guardada (Jennifer, 2026-10-02, 76414228-A:
     // el email salió pero la app no lo apuntó): si SEUR contesta citando la
     // referencia o la expedición, la conversación se engancha sola.
     for (const t of o.seurTracking || []) {
       const ref = t.referencia;
-      if (t.anulado || !ref || norm(ref).length < 8) continue;
+      if (t.anulado || !ref || norm(ref).length < 8 || refsCambiadas.has(norm(ref))) continue;
       const info = (o.enviosSeurInfo || {})[ref];
       if (info && info.correo && (info.correo.threadIds || []).length) continue;
       lineas.push({ o, ref, correo: { threadIds: [], destino: destinoSeurDePedido(o) }, expedicion: String(t.numeroExpedicion || ""), sinConversacion: true });
@@ -10198,7 +10456,7 @@ async function actualizarCorreosSeur(env, segundaPasada) {
     const ids = new Set(l.correo.threadIds);
     for (const m of r.sueltos || []) {
       const texto = norm((m.asunto || "") + " " + (m.texto || ""));
-      if (texto.includes(norm(l.ref)) || (l.expedicion.length >= 6 && texto.includes(norm(l.expedicion)))) ids.add(m.threadId);
+      if (texto.includes(norm(l.refBusca || l.ref)) || (l.expedicion.length >= 6 && texto.includes(norm(l.expedicion)))) ids.add(m.threadId);
     }
     const porId = new Map();
     for (const id of ids) for (const m of (r.hilos || {})[id] || []) porId.set(m.id, { ...m, threadId: id });
@@ -11277,11 +11535,11 @@ async function handleFetch(request, env) {
         for (const e of envios) porPedido[e.orderId] = (porPedido[e.orderId] || 0) + 1;
         for (const e of envios) {
           const o = ordersById.get(e.orderId);
-          const t = estadoSeurDeLinea(o, e.ref, porPedido[e.orderId]);
-          if (t) usados.add(t);
           const info = (o && o.enviosSeurInfo && o.enviosSeurInfo[e.ref]) || {};
+          const t = estadoSeurDeLinea(o, info.refSeur || e.ref, porPedido[e.orderId]);
+          if (t) usados.add(t);
           lista.push({
-            ...e, cargaId: c.id, fechaCarga: c.fecha, diaCarga: c.dia, fechaCierre: c.fechaCierre || null,
+            ...e, refSeur: info.refSeur || "", cargaId: c.id, fechaCarga: c.fecha, diaCarga: c.dia, fechaCierre: c.fechaCierre || null,
             estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
             nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
             archivado: !!info.archivado, fechaArchivado: info.fechaArchivado || null,
@@ -11298,10 +11556,10 @@ async function handleFetch(request, env) {
       for (const o of datos.orders) {
         for (const [ref, info] of Object.entries(o.enviosSeurInfo || {})) {
           if ((!info.manual && (!info.correo || !(info.correo.mensajes || []).length)) || yaEnLista.has(String(o.id) + "|" + ref)) continue;
-          const t = estadoSeurDeLinea(o, ref, 1);
+          const t = estadoSeurDeLinea(o, info.refSeur || ref, 1);
           const m = t ? /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(t.fechaCreacion || "").trim()) : null;
           lista.push({
-            orderId: o.id, ref, nombre: o.name || "", pais: o.countryCode || "", observaciones: "",
+            orderId: o.id, ref, refSeur: info.refSeur || "", nombre: o.name || "", pais: o.countryCode || "", observaciones: "",
             cargaId: null, fechaCarga: m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : "", diaCarga: "", sinCarga: true,
             estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
             nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
@@ -11338,12 +11596,13 @@ async function handleFetch(request, env) {
       const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
       const o = orders.find((x) => String(x.id) === String(orderId));
       if (!o) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
-      const t = estadoSeurDeLinea(o, ref, 1);
+      const refReal = (o.enviosSeurInfo && o.enviosSeurInfo[ref] && o.enviosSeurInfo[ref].refSeur) || ref;
+      const t = estadoSeurDeLinea(o, refReal, 1);
       const exp = t && t.numeroExpedicion ? String(t.numeroExpedicion) : "";
       const destino = destinoSeurDePedido(o);
-      const asunto = `Consulta envío ${ref}${exp ? " · Expedición " + exp : ""} — Global Happy Deal`;
+      const asunto = `Consulta envío ${refReal}${exp ? " · Expedición " + exp : ""} — Global Happy Deal`;
       const cuerpo = [
-        `Referencia: ${ref}`,
+        `Referencia: ${refReal}`,
         exp ? `Nº de expedición: ${exp}` : null,
         `Destinatario: ${o.name || ""} — ${o.postalCode || ""} ${o.city || ""}`.trim(),
         "",
@@ -11544,6 +11803,22 @@ async function handleFetch(request, env) {
           "x-seur-avisos": String(result.avisos.length),
         },
       });
+    }
+
+    // Notas y referencia real por envío dentro de la carga del día
+    // (Jennifer, 2026-10-09: "necesito que aparezca ahí para ponerle las
+    // notas"). Misma clave (referencia del fichero) que Envíos SEUR, así la
+    // nota sigue ahí cuando se cierra la carga.
+    if (url.pathname === "/api/cargas/seur/envios-carga" && request.method === "GET") {
+      const cargaId = url.searchParams.get("cargaId") || "";
+      const datos = await cargarDatosSeurExport(env);
+      const result = await buildSeurExport(env, cargaId, { datos });
+      if (result.error) return Response.json({ ok: false, error: result.error }, { status: 400 });
+      const ordersById = new Map(datos.orders.map((o) => [o.id, o]));
+      return Response.json({ ok: true, envios: enviosDeExportSeur(result).map((e) => {
+        const info = ((ordersById.get(e.orderId) || {}).enviosSeurInfo || {})[e.ref] || {};
+        return { ...e, nota: info.nota || "", refSeur: info.refSeur || "" };
+      }) });
     }
 
     if (url.pathname === "/api/cargas/seur/export-avisos" && request.method === "GET") {

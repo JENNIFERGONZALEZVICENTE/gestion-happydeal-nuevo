@@ -1443,13 +1443,17 @@ export class OrdersStore {
     // Notas y "Reclamado a SEUR" por línea enviada (Jennifer, 2026-10-01),
     // guardado en el pedido por referencia de SEUR.
     if (url.pathname === "/orders/envio-seur-info" && request.method === "POST") {
-      const { orderId, ref, nota, reclamado, archivado, correo, manual } = await request.json();
+      const { orderId, ref, nota, reclamado, archivado, correo, manual, refSeur } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const order = orders[orderId];
       if (!order || !ref) return new Response("not found", { status: 404 });
       const info = (order.enviosSeurInfo = order.enviosSeurInfo || {});
       const e = (info[ref] = info[ref] || {});
       if (nota !== undefined) e.nota = String(nota);
+      // Referencia con la que se subió de verdad a SEUR (Jennifer,
+      // 2026-10-09: "la he tenido que modificar y subirla con la referencia
+      // terminada en dos"). El seguimiento se busca con esta.
+      if (refSeur !== undefined) e.refSeur = String(refSeur || "").trim().toUpperCase() || null;
       if (reclamado !== undefined) {
         e.reclamado = !!reclamado;
         e.fechaReclamado = reclamado ? new Date().toISOString() : null;
