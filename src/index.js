@@ -5232,7 +5232,13 @@ function renderPendientes() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) { alert(data.error || "No se pudo preparar para SEUR."); btn.disabled = false; return; }
       if (programada && bo) {
-        await guardarRetencion([bo.orderId], null);
+        // La fecha programada solo se quita cuando ya no queda nada más de
+        // ese pedido por llegar (Jennifer, 2026-10-09, BEZEN12279: al marcar
+        // GC-003 se borró y GC-002, marcado justo después, se fue a la carga
+        // de hoy sin email de reserva).
+        const idsGrupo = new Set(pedidosDelGrupo(allOrders.find(o => o.id === bo.orderId) || { id: bo.orderId }).map(p => p.id));
+        const quedan = backorders.some(x => idsGrupo.has(x.orderId) && x.id !== bo.id && x.estado === "pendiente" && !x.recibidoFabrica);
+        if (!quedan) await guardarRetencion([bo.orderId], null);
         // Aviso al almacén para que lo aparte hasta esa carga (Jennifer, 2026-10-06).
         const rr = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/reservar-almacen?forzar=1", {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agencia: "SEUR", fechaSalida: programada }),
