@@ -2144,7 +2144,8 @@ export class InventoryStore {
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === decodeURIComponent(reservaMatch[1]));
       if (!entry) return new Response("not found", { status: 404 });
-      entry.reservaEnviada = new Date().toISOString();
+      const { fecha } = await request.json().catch(() => ({}));
+      entry.reservaEnviada = fecha && !isNaN(Date.parse(fecha)) ? new Date(fecha).toISOString() : new Date().toISOString();
       await this.state.storage.put("backorders", backorders);
       return Response.json(entry);
     }
@@ -3452,16 +3453,22 @@ export class InventoryStore {
   // sentido para colchones sueltos con proveedor Luso/New (esPack:false) —
   // los de Furniture usan el flujo de "recibido de fábrica" normal.
   async resolveSeurBackorder(id, fecha) {
-    const backorders = await this.load("backorders", []);
-    const entry = backorders.find((b) => b.id === id);
-    if (!entry) return new Response("not found", { status: 404 });
-    if (entry.paraStock) return Response.json({ ok: false, error: "Es un pedido para stock: se marca recibido y pasa al stock." }, { status: 400 });
-    if (entry.estado !== "pendiente") {
+    // La carga (otro Durable Object) se pide ANTES de leer los pendientes
+    // (Jennifer, 2026-10-09, BEZEN12264/12188/12146): mientras esperaba esa
+    // respuesta entraban otras peticiones (p. ej. apuntar la reserva al
+    // almacén de otro colchón) y al guardar esta lista vieja se perdían.
+    const previo = (await this.load("backorders", [])).find((b) => b.id === id);
+    if (!previo) return new Response("not found", { status: 404 });
+    if (previo.paraStock) return Response.json({ ok: false, error: "Es un pedido para stock: se marca recibido y pasa al stock." }, { status: 400 });
+    if (previo.estado !== "pendiente") {
       return Response.json({ ok: false, error: "Este pendiente ya no está pendiente." }, { status: 409 });
     }
 
     const carga = await this.getOrCreateSeurCarga(fecha);
     if (!carga) return Response.json({ ok: false, error: "Fecha de carga no válida." }, { status: 400 });
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry || entry.estado !== "pendiente") return Response.json({ ok: false, error: "Este pendiente ya no está pendiente." }, { status: 409 });
 
     // "vendidoPendiente" solo existe para colchones (Jennifer, 2026-08-21) —
     // un gesto comercial (almohada) nunca lo incrementó al crearse, así que
@@ -3585,8 +3592,8 @@ export class InventoryStore {
   // transformación sale de la lista de colchones ABIERTOS, no del stock
   // enrollado ("cortar" un abierto más grande).
   async substituteBackorder(id, { query, mode, talla, fecha, transformar, desdeAbierto }) {
-    const backorders = await this.load("backorders", []);
-    const entry = backorders.find((b) => b.id === id);
+    let backorders = await this.load("backorders", []);
+    let entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
     if (entry.paraStock) return Response.json({ ok: false, error: "Un pedido para stock no se sustituye." }, { status: 400 });
     if (entry.estado !== "pendiente") {
@@ -3621,6 +3628,11 @@ export class InventoryStore {
       carga = await this.getOrCreateSeurCarga(fecha);
       if (!carga) return Response.json({ ok: false, error: "Fecha de carga no válida." }, { status: 400 });
     }
+    // Releer tras esperar a otros Durable Objects (ver resolveSeurBackorder):
+    // si no, se pisan cambios hechos entretanto en otros pendientes.
+    backorders = await this.load("backorders", []);
+    entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
 
     const congelado = await this.load("stockCongelado", false);
     const stock = await this.load("stock", {});
