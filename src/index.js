@@ -1557,6 +1557,7 @@ function renderPage() {
   .modal-box-wide { width: min(760px, 92vw); }
   #buscador-general { width: 230px; padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.4); font: inherit; font-size: 13px; }
   .buscador-datos { font-size: 13px; line-height: 1.5; margin: 6px 0 10px; }
+  .buscador-aviso { margin: 8px 0 10px; padding: 12px 16px; border: 2px solid #f59e0b; border-radius: 10px; background: #fef3c7; color: #92400e; font-size: 22px; font-weight: 800; text-align: center; letter-spacing: 0.5px; }
   .buscador-nota { margin-top: 4px; padding: 4px 8px; background: #fef9c3; border-radius: 6px; }
   .modal-box h4 { margin: 12px 0 4px; color: var(--brand-dark); }
   .buscador-donde { margin: 0 0 0 18px; padding: 0; font-size: 13px; line-height: 1.6; }
@@ -9018,8 +9019,33 @@ function fichaPedidoBuscador(o, d) {
   const segs = (o.seurTracking || []).filter(t => !t.anulado && t.seguimiento).map(t => '<a href="' + escapeAttr(t.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">SEUR ' + escapeAttr(t.referencia) + "</a>")
     .concat((o.furnitureTracking || []).filter(t => t.seguimiento).map(t => '<a href="' + escapeAttr(t.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Furniture ' + escapeAttr(t.albaran || "") + "</a>"));
 
+  // "TODAVÍA NO SE HA ENVIADO" bien grande (Jennifer, 2026-10-09) si no ha
+  // salido en ninguna carga ni hay seguimiento, entrega en mano o envío
+  // marcado en la tienda.
+  const cargaCerrada = id => { const c = cargaDe(id); return !!(c && c.estado === "cerrada"); };
+  // Salida real (carga cerrada, seguimiento, entregado en mano). El "enviado"
+  // de la tienda solo cuenta si no está metido en una carga abierta (Worten
+  // 83651443-A salía "Enviado" sin haber salido nunca).
+  const enviadoReal = (o.cargaId && cargaCerrada(o.cargaId)) ||
+    d.cargas.some(c => (c.envios || []).some(e => String(e.orderId) === String(o.id))) ||
+    bos.some(b => b.estado === "servido" || (b.cargaId && cargaCerrada(b.cargaId))) ||
+    // Etiqueta solo "registrada" en SEUR = subida, pero aún no recogida.
+    (o.seurTracking || []).some(t => !t.anulado && !/registrado/i.test(t.estado || "")) || (o.furnitureTracking || []).length > 0 ||
+    !!o.entregadoCliente;
+  const abiertas = [o.cargaId].concat(bos.filter(b => b.estado !== "cancelado" && b.estado !== "servido").map(b => b.cargaId)).filter(Boolean).map(cargaDe).filter(c => c && c.estado === "abierta");
+  const enviado = enviadoReal || o.shippingStatus === "fulfilled" || !!o.shopifyFulfilled;
+  const cancelado = o.cancelado || o.shopifyCancelado;
+  let aviso = "";
+  if (cancelado) aviso = '<div class="buscador-aviso" style="background:#fee2e2;color:#991b1b;border-color:#fca5a5">❌ PEDIDO CANCELADO</div>';
+  else if (!enviado || abiertas.length) {
+    aviso = '<div class="buscador-aviso">' + (enviadoReal ? "⚠ QUEDA ALGO POR ENVIAR" : "⚠ TODAVÍA NO SE HA ENVIADO") +
+      (abiertas.length ? '<div style="font-size:14px;font-weight:600;margin-top:4px">Metido en la carga de ' + escapeAttr(textoCarga(abiertas[0])) + "</div>" : '<div style="font-size:14px;font-weight:600;margin-top:4px">No está en ninguna carga</div>') +
+      "</div>";
+  }
+
   return '<div class="buscador-ficha">' +
     '<h3 style="margin:0 0 4px">' + escapeAttr(ref) + ' <span style="font-weight:400;color:var(--muted);font-size:13px">' + escapeAttr(o.platform || "Shopify") + " · " + escapeAttr(formatOrderDate(o.orderDate)) + "</span></h3>" +
+    aviso +
     '<div class="buscador-datos">' +
       "<div><strong>" + escapeAttr(o.name || "") + "</strong> · " + escapeAttr(o.phone || "") + (o.email ? " · " + escapeAttr(o.email) : "") + "</div>" +
       "<div>" + escapeAttr(o.address || "") + "</div>" +
