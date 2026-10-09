@@ -7975,6 +7975,7 @@ function renderSeurFueraCarga() {
   });
 }
 
+const busquedaCargaSeur = {};
 function renderSeurCargas() {
   renderSeurFueraCarga();
   const cargasAbiertas = allCargas.filter(c => c.tipo === "seur" && c.estado === "abierta").sort((a, b) => a.fecha.localeCompare(b.fecha));
@@ -8013,6 +8014,7 @@ function renderSeurCargas() {
           <button type="button" class="secondary listado-almacen-seur-btn" data-id="\${carga.id}">Listado almacén</button>
           <button type="button" class="secondary resumen-almacen-seur-btn" data-id="\${carga.id}" data-titulo="\${escapeAttr(formatCargaTitulo(carga))}" title="Manda al email del almacén el listado de esta carga en una etiqueta 15×10 para imprimir">📧 Enviar resumen al almacén (15×10)</button>
           <button type="button" class="cerrar-carga-seur-btn" data-id="\${carga.id}">Cerrar carga</button>
+          <input type="search" class="buscar-carga-seur" data-id="\${carga.id}" placeholder="🔎 Buscar en esta carga (pedido, nombre, producto…)" style="min-width:280px" />
         </div>
         <div class="inventario-count">\${filas.length} pedidos en esta carga</div>
         <div class="table-wrap">
@@ -8083,6 +8085,27 @@ function renderSeurCargas() {
     btn.addEventListener("click", () => descargarFicheroSeur(btn.dataset.id));
   });
   [...aLaVista, ...programadas].forEach(c => rellenarNotasCargaSeur(c.id));
+  // Buscador dentro de cada carga (Jennifer, 2026-10-09: "hay veces que las
+  // listas son muy largas"). Se recuerda lo escrito al repintar.
+  document.querySelectorAll(".buscar-carga-seur").forEach(inp => {
+    inp.value = busquedaCargaSeur[inp.dataset.id] || "";
+    const aplicar = () => {
+      busquedaCargaSeur[inp.dataset.id] = inp.value;
+      const q = inp.value.trim().toLowerCase();
+      const caja = inp.closest(".carga-abierta-box");
+      let visibles = 0;
+      caja.querySelectorAll("tbody tr").forEach(tr => {
+        const texto = (tr.textContent + " " + [...tr.querySelectorAll("textarea")].map(t => t.value).join(" ")).toLowerCase();
+        const ver = !q || texto.includes(q);
+        tr.style.display = ver ? "" : "none";
+        if (ver) visibles++;
+      });
+      const cuenta = caja.querySelector(".inventario-count");
+      if (cuenta) cuenta.textContent = q ? visibles + " de " + caja.querySelectorAll("tbody tr").length + " pedidos en esta carga" : caja.querySelectorAll("tbody tr").length + " pedidos en esta carga";
+    };
+    inp.addEventListener("input", aplicar);
+    if (inp.value) aplicar();
+  });
   document.querySelectorAll(".mover-seur-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       const fecha = btn.parentElement.querySelector(".mover-seur-fecha").value;
@@ -9033,10 +9056,13 @@ function fichaPedidoBuscador(o, d) {
     (o.seurTracking || []).some(t => !t.anulado && !/registrado/i.test(t.estado || "")) || (o.furnitureTracking || []).length > 0 ||
     !!o.entregadoCliente;
   const abiertas = [o.cargaId].concat(bos.filter(b => b.estado !== "cancelado" && b.estado !== "servido").map(b => b.cargaId)).filter(Boolean).map(cargaDe).filter(c => c && c.estado === "abierta");
-  const enviado = enviadoReal || o.shippingStatus === "fulfilled" || !!o.shopifyFulfilled;
-  const cancelado = o.cancelado || o.shopifyCancelado;
+  // Estados de marketplace: "Enviado"/"Recibido" (lo recibió el cliente)...
+  // pedidos de antes de la app que no pasaron por ninguna carga.
+  const enviado = enviadoReal || o.shippingStatus === "fulfilled" || !!o.shopifyFulfilled || !!o.gestionadoExterno ||
+    /^(enviado|recibido|cerrado|incidencia abierta)$/i.test(o.estado || "");
+  const cancelado = o.cancelado || o.shopifyCancelado || o.shippingStatus === "restocked" || /^(cancelado|rechazado|reembolsado)$/i.test(o.estado || "");
   let aviso = "";
-  if (cancelado) aviso = '<div class="buscador-aviso" style="background:#fee2e2;color:#991b1b;border-color:#fca5a5">❌ PEDIDO CANCELADO</div>';
+  if (cancelado) aviso = '<div class="buscador-aviso" style="background:#fee2e2;color:#991b1b;border-color:#fca5a5">❌ PEDIDO ' + escapeAttr(/^(rechazado|reembolsado)$/i.test(o.estado || "") ? o.estado.toUpperCase() : o.shippingStatus === "restocked" ? "DEVUELTO" : "CANCELADO") + '</div>';
   else if (!enviado || abiertas.length) {
     aviso = '<div class="buscador-aviso">' + (enviadoReal ? "⚠ QUEDA ALGO POR ENVIAR" : "⚠ TODAVÍA NO SE HA ENVIADO") +
       (abiertas.length ? '<div style="font-size:14px;font-weight:600;margin-top:4px">Metido en la carga de ' + escapeAttr(textoCarga(abiertas[0])) + "</div>" : '<div style="font-size:14px;font-weight:600;margin-top:4px">No está en ninguna carga</div>') +
