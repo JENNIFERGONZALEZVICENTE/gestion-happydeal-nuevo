@@ -9909,20 +9909,44 @@ function referenciaSeur(o, refSuffix, prefijo) {
 // mientras no se pasen los 40kg — salvo Sea Foam, que nunca comparte bulto.
 // Cada línea resultante lleva sus propias "piezas" (para construir
 // Observaciones) y su peso/bultos ya sumados.
+// Dos almohadas iguales (mismo SKU) de hasta 90 van en un mismo paquete
+// (Jennifer, 2026-10-09: copos, anti, Nordic... "así con todas"): cuentan
+// 1 bulto y en Observaciones salen como "(2UD)". Sea Foam sigue sin
+// compartir nunca.
+function empaquetarPiezasSeur(piezas) {
+  const paquetes = [];
+  const sueltaPorSku = new Map();
+  for (const p of piezas) {
+    const medida = parseFloat(String(p.talla || "").replace(",", "."));
+    const emparejable = p.tipo === "almohada" && medida > 0 && medida <= 90 && !matchesKeywordSeur(p.title, ALMOHADA_NUNCA_COMBINA_KEYWORDS_EXPORT);
+    const suelta = emparejable && sueltaPorSku.get(p.sku);
+    if (suelta) {
+      suelta.piezas.push(p);
+      suelta.kilos = Math.round((suelta.kilos + p.pesoUnidad) * 100) / 100;
+      sueltaPorSku.delete(p.sku);
+      continue;
+    }
+    const paquete = { piezas: [p], kilos: p.pesoUnidad, nuncaCombina: p.tipo === "almohada" && matchesKeywordSeur(p.title, ALMOHADA_NUNCA_COMBINA_KEYWORDS_EXPORT) };
+    paquetes.push(paquete);
+    if (emparejable) sueltaPorSku.set(p.sku, paquete);
+  }
+  return paquetes;
+}
+
 function agruparLineasSeur(piezas, esNacional) {
+  const paquetes = empaquetarPiezasSeur(piezas);
   if (!esNacional) {
-    return piezas.map((p) => ({ piezas: [p], bultos: 1, kilos: p.pesoUnidad }));
+    return paquetes.map((q) => ({ piezas: q.piezas, bultos: 1, kilos: q.kilos }));
   }
   const lineas = [];
-  for (const p of piezas) {
-    const nuncaCombina = p.tipo === "almohada" && matchesKeywordSeur(p.title, ALMOHADA_NUNCA_COMBINA_KEYWORDS_EXPORT);
+  for (const q of paquetes) {
     const ultima = lineas[lineas.length - 1];
-    if (!nuncaCombina && ultima && Math.round((ultima.kilos + p.pesoUnidad) * 100) / 100 <= 40) {
-      ultima.piezas.push(p);
+    if (!q.nuncaCombina && ultima && Math.round((ultima.kilos + q.kilos) * 100) / 100 <= 40) {
+      ultima.piezas.push(...q.piezas);
       ultima.bultos += 1;
-      ultima.kilos = Math.round((ultima.kilos + p.pesoUnidad) * 100) / 100;
+      ultima.kilos = Math.round((ultima.kilos + q.kilos) * 100) / 100;
     } else {
-      lineas.push({ piezas: [p], bultos: 1, kilos: p.pesoUnidad });
+      lineas.push({ piezas: [...q.piezas], bultos: 1, kilos: q.kilos });
     }
   }
   return lineas;
