@@ -2293,7 +2293,7 @@ function renderPage() {
     <div id="carga-abierta-count" class="inventario-count"></div>
     <div class="table-wrap">
       <table id="carga-abierta-table">
-        <thead><tr><th>Pedido</th><th>Plataforma</th><th>Nombre</th><th>Producto comprado</th><th>Servicios adicionales</th><th>Artículos / Llegada</th><th>Notas</th><th></th></tr></thead>
+        <thead><tr><th><input type="checkbox" id="sel-todos-furniture" title="Marcar / desmarcar todos" /></th><th>Pedido</th><th>Plataforma</th><th>Nombre</th><th>Producto comprado</th><th>Servicios adicionales</th><th>Artículos / Llegada</th><th>Notas</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -6363,15 +6363,20 @@ function renderFurniture() {
   document.getElementById("carga-abierta-count").textContent = (enCarga.length + reposicionesEnCarga.length) + " pedidos en esta carga";
   document.querySelector("#carga-abierta-table tbody").innerHTML = enCarga.map(o => \`
     <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
+      <td><input type="checkbox" class="sel-envio-fur" data-keys="\${escapeAttr(pedidosDelGrupo(o).map(p => "o:" + p.id).join(","))}" /></td>
       \${furnitureRowCells(o)}
       <td><button type="button" class="sacar-carga-btn" data-id="\${o.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-order-id="' + o.id + '"')}</td>
     </tr>
   \`).join("") + reposicionesEnCarga.map(b => \`
     <tr>
+      <td><input type="checkbox" class="sel-envio-fur" data-keys="\${escapeAttr("b:" + b.id)}" /></td>
       \${reposicionRowCells(b)}
       <td><button type="button" class="sacar-carga-reposicion-btn" data-repo-id="\${b.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-backorder-id="' + escapeAttr(b.id) + '"')}</td>
     </tr>
   \`).join("");
+  document.getElementById("sel-todos-furniture").checked = false;
+  etiquetaDescargaFurniture();
+  document.querySelectorAll(".sel-envio-fur").forEach(chk => chk.addEventListener("change", etiquetaDescargaFurniture));
   document.querySelectorAll(".mover-fur-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       const cargaId = btn.parentElement.querySelector(".mover-fur-destino").value;
@@ -6856,9 +6861,20 @@ document.addEventListener("click", async (e) => {
   finally { btn.disabled = false; }
 });
 
+// Descargar solo los envíos marcados (Jennifer, 2026-10-09); sin marcar
+// nada, la carga entera.
+function etiquetaDescargaFurniture() {
+  const n = document.querySelectorAll(".sel-envio-fur:checked").length;
+  document.getElementById("descargar-carga-btn").textContent = n ? "Descargar Excel Furniture (" + n + " marcado" + (n > 1 ? "s" : "") + ")" : "Descargar Excel Furniture";
+}
+document.getElementById("sel-todos-furniture").addEventListener("change", e => {
+  document.querySelectorAll("#carga-abierta-table tbody tr").forEach(tr => { if (tr.style.display !== "none") { const c = tr.querySelector(".sel-envio-fur"); if (c) c.checked = e.target.checked; } });
+  etiquetaDescargaFurniture();
+});
 document.getElementById("descargar-carga-btn").addEventListener("click", () => {
   if (!cargaAbierta) return;
-  window.location.href = "/api/cargas/export?cargaId=" + encodeURIComponent(cargaAbierta.id);
+  const sel = [...document.querySelectorAll(".sel-envio-fur:checked")].flatMap(c => c.dataset.keys.split(","));
+  window.location.href = "/api/cargas/export?cargaId=" + encodeURIComponent(cargaAbierta.id) + (sel.length ? "&sel=" + encodeURIComponent(sel.join(",")) : "");
 });
 
 document.getElementById("cerrar-carga-btn").addEventListener("click", async () => {
@@ -7998,6 +8014,7 @@ function renderSeurCargas() {
       const moverHtml = \`<div class="mover-seur"><input type="date" class="mover-seur-fecha" min="\${hoyMadrid()}" /><button type="button" class="secondary mover-seur-btn" data-order-id="\${backorderId ? "" : escapeAttr(String(o.id))}" data-backorder-id="\${backorderId ? escapeAttr(backorderId) : ""}">Mover a ese día</button></div>\`;
       return \`
       <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
+        <td><input type="checkbox" class="sel-envio-seur" data-order-id="\${escapeAttr(String(o.id))}" /></td>
         \${cells}
         <td class="seur-envio-notas" data-carga-id="\${carga.id}" data-order-id="\${escapeAttr(String(o.id))}" data-suffix="\${escapeAttr(refSuffix || "")}" data-backorder="\${backorderId ? "1" : ""}"><span style="color:var(--muted);font-size:11px">…</span></td>
         <td>\${backorderId
@@ -8019,7 +8036,7 @@ function renderSeurCargas() {
         <div class="inventario-count">\${filas.length} pedidos en esta carga</div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th><th style="min-width:260px">Ref. en SEUR · Notas</th><th></th></tr></thead>
+            <thead><tr><th><input type="checkbox" class="sel-todos-seur" title="Marcar / desmarcar todos" /></th><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th><th style="min-width:260px">Ref. en SEUR · Notas</th><th></th></tr></thead>
             <tbody>\${filasHtml}</tbody>
           </table>
         </div>
@@ -8081,8 +8098,26 @@ function renderSeurCargas() {
       loadSeur();
     });
   });
+  // Descargar solo los envíos marcados (Jennifer, 2026-10-09: "en ocasiones
+  // se modifican y no quiero tener que descargarlo todo"). Sin marcar nada
+  // baja la carga entera, como siempre.
+  const seleccionSeur = caja => [...caja.querySelectorAll(".sel-envio-seur:checked")].map(chk => {
+    const td = chk.closest("tr").querySelector(".seur-envio-notas");
+    return { orderId: chk.dataset.orderId, refs: td && td.dataset.refs ? td.dataset.refs.split("|") : [] };
+  });
+  const etiquetaDescargaSeur = caja => {
+    const n = caja.querySelectorAll(".sel-envio-seur:checked").length;
+    const btn = caja.querySelector(".descargar-seur-btn");
+    if (btn) btn.textContent = n ? "Descargar fichero SEUR (" + n + " marcado" + (n > 1 ? "s" : "") + ")" : "Descargar fichero SEUR";
+  };
+  document.querySelectorAll(".sel-envio-seur").forEach(chk => chk.addEventListener("change", () => etiquetaDescargaSeur(chk.closest(".carga-abierta-box"))));
+  document.querySelectorAll(".sel-todos-seur").forEach(chk => chk.addEventListener("change", () => {
+    const caja = chk.closest(".carga-abierta-box");
+    caja.querySelectorAll("tbody tr").forEach(tr => { if (tr.style.display !== "none") { const c = tr.querySelector(".sel-envio-seur"); if (c) c.checked = chk.checked; } });
+    etiquetaDescargaSeur(caja);
+  }));
   document.querySelectorAll(".descargar-seur-btn").forEach(btn => {
-    btn.addEventListener("click", () => descargarFicheroSeur(btn.dataset.id));
+    btn.addEventListener("click", () => descargarFicheroSeur(btn.dataset.id, seleccionSeur(btn.closest(".carga-abierta-box"))));
   });
   [...aLaVista, ...programadas].forEach(c => rellenarNotasCargaSeur(c.id));
   // Buscador dentro de cada carga (Jennifer, 2026-10-09: "hay veces que las
@@ -8131,6 +8166,7 @@ async function rellenarNotasCargaSeur(cargaId) {
   const usados = new Set();
   const pintar = (td, envs) => {
     envs.forEach(e => usados.add(e));
+    td.dataset.refs = envs.map(e => e.ref).join("|");
     td.innerHTML = envs.map(e => {
       const i = data.envios.indexOf(e);
       return '<div style="margin-bottom:6px">' +
@@ -8168,9 +8204,10 @@ async function rellenarNotasCargaSeur(cargaId) {
 // Antes de descargar avisa si algún artículo no tiene un peso conocido
 // (tabla de Pesos SEUR) — el fichero se genera igualmente con esa casilla
 // en blanco, pero mejor saberlo antes de subirlo a Seur.
-async function descargarFicheroSeur(cargaId) {
+async function descargarFicheroSeur(cargaId, seleccion) {
   const res = await fetch("/api/cargas/seur/export-avisos?cargaId=" + encodeURIComponent(cargaId));
   const data = await res.json();
+  const parcial = seleccion && seleccion.length;
   if (data.avisos && data.avisos.length) {
     const seguir = confirm(data.avisos.length + " aviso(s):\\n\\n" + data.avisos.join("\\n") + "\\n\\n¿Descargar igualmente?");
     if (!seguir) return;
@@ -8181,7 +8218,15 @@ async function descargarFicheroSeur(cargaId) {
   const r = await fetch("/api/cargas/seur/export?formato=json&cargaId=" + encodeURIComponent(cargaId));
   if (!r.ok) { alert("No se pudo generar el fichero: " + (await r.text())); return; }
   const d = await r.json();
-  const filas = d.filas.map(f => f.map((v, i) => ((i === 7 || i === 8) && v !== "" && !isNaN(Number(v)) ? Number(v) : v)));
+  let filasTodas = d.filas;
+  if (parcial) {
+    // Por referencia del envío; si aún no se había cargado, por pedido.
+    const refs = new Set(seleccion.flatMap(x => x.refs));
+    const pedidos = new Set(seleccion.filter(x => !x.refs.length).map(x => x.orderId));
+    filasTodas = d.filas.filter((f, i) => refs.has(f[0]) || pedidos.has(String((d.rowOrderIds || [])[i])));
+    if (!filasTodas.length) { alert("No se ha encontrado ninguna línea de los envíos marcados."); return; }
+  }
+  const filas = filasTodas.map(f => f.map((v, i) => ((i === 7 || i === 8) && v !== "" && !isNaN(Number(v)) ? Number(v) : v)));
   // Un fichero por código de remitente (63235 nacional, 48297
   // internacional): en SEUR se suben por separado (Jennifer, 2026-10-01).
   const porRemitente = {};
@@ -8192,7 +8237,7 @@ async function descargarFicheroSeur(cargaId) {
     const ws = XLSX.utils.aoa_to_sheet([d.cabeceras, ...porRemitente[codigos[i]]]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Hoja1");
-    XLSX.writeFile(wb, "SEUR_" + d.fecha + "_" + codigos[i] + ".xlsx");
+    XLSX.writeFile(wb, "SEUR_" + d.fecha + "_" + codigos[i] + (parcial ? "_seleccion" : "") + ".xlsx");
   }
   if (codigos.length > 1) alert("Se han descargado " + codigos.length + " ficheros, uno por remitente (" + codigos.join(" y ") + "). Súbelos a SEUR por separado.");
 }
@@ -9958,6 +10003,7 @@ async function buildFurnitureExport(env, cargaId) {
     .join("/");
 
   const rows = [];
+  const rowKeys = []; // "o:<pedido>" o "b:<pendiente>" de cada fila, para descargar solo lo marcado
   for (const o of pedidos) {
     const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
     const montaje = tieneMontajeFurniture(o.services);
@@ -9995,6 +10041,7 @@ async function buildFurnitureExport(env, cargaId) {
         montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
         envio.email || o.email || "", provinciaPorCp(envio.postalCode), "",
       ]);
+      rowKeys.push("o:" + o.id);
     }
   }
 
@@ -10057,6 +10104,7 @@ async function buildFurnitureExport(env, cargaId) {
         montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
         o.email || "", provinciaPorCp(o.postalCode), "",
       ]);
+      rowKeys.push("b:" + b.id);
     }
   }
 
@@ -10080,10 +10128,11 @@ async function buildFurnitureExport(env, cargaId) {
         montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
         envio.email || o.email || "", provinciaPorCp(envio.postalCode), "",
       ]);
+      rowKeys.push("b:" + b.id);
     }
   }
 
-  return { rows, carga };
+  return { rows, rowKeys, carga };
 }
 
 // === Listado para el almacén (Jennifer, 2026-09-29) ===
@@ -11790,8 +11839,12 @@ async function handleFetch(request, env) {
       const cargaId = url.searchParams.get("cargaId") || null;
       const result = await buildFurnitureExport(env, cargaId);
       if (result.error) return new Response(result.error, { status: 400 });
-      const csv = buildFurnitureCsv(result.rows);
-      const filename = `Furniture_${result.carga.fecha}.csv`;
+      // ?sel=o:<id>,b:<id>: solo los envíos marcados (Jennifer, 2026-10-09).
+      const sel = (url.searchParams.get("sel") || "").split(",").filter(Boolean);
+      const rows = sel.length ? result.rows.filter((r, i) => sel.includes(result.rowKeys[i])) : result.rows;
+      if (sel.length && !rows.length) return new Response("Ninguno de los envíos marcados tiene líneas en el fichero.", { status: 400 });
+      const csv = buildFurnitureCsv(rows);
+      const filename = `Furniture_${result.carga.fecha}${sel.length ? "_seleccion" : ""}.csv`;
       return new Response(csv, {
         headers: {
           "content-type": "text/csv; charset=utf-8",
@@ -11844,7 +11897,7 @@ async function handleFetch(request, env) {
       // ?formato=json: las filas para que el navegador monte el .xlsx
       // (Jennifer, 2026-10-01: el fichero de SEUR tiene que ser xlsx).
       if (url.searchParams.get("formato") === "json") {
-        return Response.json({ cabeceras: SEUR_CSV_HEADERS, filas: result.rows, fecha: result.carga.fecha });
+        return Response.json({ cabeceras: SEUR_CSV_HEADERS, filas: result.rows, rowOrderIds: result.rowOrderIds, fecha: result.carga.fecha });
       }
       const csv = buildSeurCsv(result.rows);
       const filename = `SEUR_${result.carga.fecha}.csv`;
