@@ -1559,6 +1559,12 @@ function renderPage() {
   .buscador-datos { font-size: 13px; line-height: 1.5; margin: 6px 0 10px; }
   .buscador-aviso { margin: 8px 0 10px; padding: 12px 16px; border: 2px solid #f59e0b; border-radius: 10px; background: #fef3c7; color: #92400e; font-size: 22px; font-weight: 800; text-align: center; letter-spacing: 0.5px; }
   .buscador-nota { margin-top: 4px; padding: 4px 8px; background: #fef9c3; border-radius: 6px; }
+  .buscador-seg { margin: 8px 0 10px; padding: 10px 14px; border: 2px solid #dc2626; border-radius: 10px; background: #fef2f2; font-size: 18px; font-weight: 700; }
+  .buscador-seg a { color: #dc2626; text-decoration: underline; }
+  .buscador-seg-tit { font-size: 12px; letter-spacing: 1px; color: #dc2626; margin-bottom: 2px; }
+  .buscador-seg-estado { color: #7f1d1d; font-weight: 600; font-size: 15px; }
+  .buscador-agenda { margin: 8px 0 10px; padding: 8px 14px; border: 2px solid #7c3aed; border-radius: 10px; background: #f5f3ff; }
+  .buscador-agenda ul { margin: 0; padding-left: 18px; }
   .modal-box h4 { margin: 12px 0 4px; color: var(--brand-dark); }
   .buscador-donde { margin: 0 0 0 18px; padding: 0; font-size: 13px; line-height: 1.6; }
   .buscador-historico { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -9089,8 +9095,17 @@ function fichaPedidoBuscador(o, d) {
 
   const notasSeur = Object.entries(o.enviosSeurInfo || {}).filter(([, i]) => (i.nota || "").trim() || i.refSeur)
     .map(([r, i]) => "<li><strong>" + escapeAttr(i.refSeur || r) + "</strong>" + (i.refSeur ? ' <span style="color:var(--muted)">(antes ' + escapeAttr(r) + ")</span>" : "") + (i.nota ? ": " + escapeAttr(i.nota) : "") + "</li>").join("");
-  const segs = (o.seurTracking || []).filter(t => !t.anulado && t.seguimiento).map(t => '<a href="' + escapeAttr(t.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">SEUR ' + escapeAttr(t.referencia) + "</a>")
-    .concat((o.furnitureTracking || []).filter(t => t.seguimiento).map(t => '<a href="' + escapeAttr(t.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Furniture ' + escapeAttr(t.albaran || "") + "</a>"));
+  const segLinea = (link, txt, estado) => '<div><a href="' + escapeAttr(link) + '" target="_blank" rel="noopener">' + escapeAttr(txt) + "</a>" + (estado ? ' <span class="buscador-seg-estado">' + escapeAttr(estado) + "</span>" : "") + "</div>";
+  const segs = (o.seurTracking || []).filter(t => !t.anulado && t.seguimiento).map(t => segLinea(t.seguimiento, "SEUR " + t.referencia, t.estado))
+    .concat((o.furnitureTracking || []).filter(t => t.seguimiento).map(t => segLinea(t.seguimiento, "Furniture " + (t.albaran || ""), t.estado)));
+  // Casos abiertos y tareas pendientes del pedido, a la vista (Jennifer,
+  // 2026-10-09).
+  const pendientesAgenda = casosP.filter(c => c.estado !== "cerrado").map(c => {
+    const u = ultimoSeguimiento(c);
+    return "<li><strong>📋 Caso abierto" + (c.urgente ? " URGENTE" : "") + ":</strong> " + escapeAttr(c.motivo || "") + (c.responsable ? " · " + escapeAttr(c.responsable) : "") +
+      (u && u.texto ? '<div style="color:var(--muted);font-size:12px">Último: ' + escapeAttr(u.texto) + (u.fecha ? " (" + escapeAttr(fechaHoraBusca(fechaBusca(u.fecha))) + ")" : "") + "</div>" : "") + "</li>";
+  }).concat(tareasP.filter(t => !t.hecha).map(t =>
+    "<li><strong>📝 Tarea pendiente" + (t.fecha ? " para el " + escapeAttr(fechaHoraBusca(fechaBusca(t.fecha), true)) : "") + ":</strong> " + escapeAttr(t.texto || "") + "</li>"));
 
   // "TODAVÍA NO SE HA ENVIADO" bien grande (Jennifer, 2026-10-09) si no ha
   // salido en ninguna carga ni hay seguimiento, entrega en mano o envío
@@ -9122,6 +9137,8 @@ function fichaPedidoBuscador(o, d) {
   return '<div class="buscador-ficha">' +
     '<h3 style="margin:0 0 4px">' + escapeAttr(ref) + ' <span style="font-weight:400;color:var(--muted);font-size:13px">' + escapeAttr(o.platform || "Shopify") + " · " + escapeAttr(formatOrderDate(o.orderDate)) + "</span></h3>" +
     aviso +
+    (pendientesAgenda.length ? '<div class="buscador-agenda"><ul>' + pendientesAgenda.join("") + "</ul></div>" : "") +
+    (segs.length ? '<div class="buscador-seg"><div class="buscador-seg-tit">SEGUIMIENTO</div>' + segs.join("") + "</div>" : "") +
     '<div class="buscador-datos">' +
       "<div><strong>" + escapeAttr(o.name || "") + "</strong> · " + escapeAttr(o.phone || "") + (o.email ? " · " + escapeAttr(o.email) : "") + "</div>" +
       "<div>" + escapeAttr(o.address || "") + "</div>" +
@@ -9130,7 +9147,6 @@ function fichaPedidoBuscador(o, d) {
       "<div>" + escapeAttr([o.paymentMethod, o.paymentStatus].filter(Boolean).join(" · ")) + "</div>" +
       ((o.notas || "").trim() ? '<div class="buscador-nota">📝 ' + escapeAttr(o.notas) + "</div>" : "") +
       (notasSeur ? '<div class="buscador-nota">Envíos SEUR:<ul style="margin:2px 0 0 18px;padding:0">' + notasSeur + "</ul></div>" : "") +
-      (segs.length ? "<div>Seguimiento: " + segs.join(" · ") + "</div>" : "") +
     "</div>" +
     '<h4>Dónde está ahora</h4><ul class="buscador-donde">' + donde.map(x => "<li>" + escapeAttr(x) + "</li>").join("") + "</ul>" +
     "<h4>Histórico</h4>" +
