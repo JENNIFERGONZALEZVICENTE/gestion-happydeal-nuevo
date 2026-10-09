@@ -10710,6 +10710,13 @@ async function handleFetch(request, env) {
       return proxyInventory(env, "/admin/clear-backorders", request);
     }
 
+    // Apuntar a mano una reserva al almacén que sí salió por email pero no
+    // quedó registrada (Jennifer, 2026-10-09): { id, fecha }.
+    if (url.pathname === "/api/inventario/admin/reserva-enviada" && request.method === "POST") {
+      const { id, fecha } = await request.json();
+      const res = await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(id) + "/reserva-enviada", { method: "POST", body: JSON.stringify({ fecha }) });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/inventario/admin/crear-pendiente-manual" && request.method === "POST") {
       return proxyInventory(env, "/admin/crear-pendiente-manual", request);
     }
