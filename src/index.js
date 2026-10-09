@@ -7591,7 +7591,7 @@ function renderEnviosSeur() {
       : '<span style="color:var(--muted)">Sin seguimiento</span>';
     const avisoCelda = e.aviso24h && !e.archivado ? '<br><span class="badge" style="background:' + (e.reclamado ? "#fde68a;color:#78350f" : "#fee2e2;color:#b91c1c") + '">⚠ Sin recoger ' + Math.floor(e.horasDesdeCierre / 24) + ' día(s) tras cerrar la carga' + (e.reclamado ? " (reclamado)" : " — reclamar") + '</span>' : "";
     const puntoCelda = e.enPunto && !e.archivado ? '<br><span class="badge" style="background:#dbeafe;color:#1e40af">📍 En punto de recogida — revisar</span>' : "";
-    const seguimiento = avisoCelda + puntoCelda + (e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver</a>' : "");
+    const seguimiento = avisoCelda + puntoCelda + (e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver en SEUR</a>' : "");
     const recl = e.reclamado
       ? '<span class="badge" style="background:#fde68a;color:#78350f">✔ Reclamado ' + (e.fechaReclamado ? new Date(e.fechaReclamado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Quitar</button>'
       : '<button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="1">Reclamado a SEUR</button>';
@@ -9014,7 +9014,9 @@ function fichaPedidoBuscador(o, d) {
   const textoCarga = c => c ? ((c.tipo === "seur" ? "SEUR" : "Furniture") + " del " + (c.dia ? c.dia.toLowerCase() + " " : "") + fechaHoraBusca(fechaBusca(c.fecha), true) + (c.estado === "cerrada" ? " (ya salió)" : " (abierta)")) : "";
   const bos = d.bos.filter(b => String(b.orderId) === String(o.id));
   const ev = [];
-  const add = (t, texto, quien) => { if (t) ev.push({ t, texto, quien: quien || "" }); };
+  // link: enlace de seguimiento de SEUR/Furniture para pinchar desde el
+  // histórico (Jennifer, 2026-10-09).
+  const add = (t, texto, quien, link, linkTxt) => { if (t) ev.push({ t, texto, quien: quien || "", link: link || "", linkTxt: linkTxt || "" }); };
 
   add(fechaBusca(o.orderDate), "Pedido recibido en " + (o.platform || "Shopify") + (o.price ? " · " + o.price + " " + (o.currency || "EUR") : ""));
   add(fechaBusca(o.fechaTramitacion), "Pedido tramitado en la app");
@@ -9040,13 +9042,13 @@ function fichaPedidoBuscador(o, d) {
     if (!envs.length && c.estado === "cerrada" && (o.cargaId === c.id || bos.some(b => b.cargaId === c.id))) add(fechaBusca(c.fechaCierre || c.fecha), "Salió en la carga de " + textoCarga(c));
   }
   for (const t of o.furnitureTracking || []) {
-    add(fechaBusca(t.fechaAlmacen), "Furniture: en almacén (albarán " + (t.albaran || "") + ")");
-    if (t.estado) add(fechaBusca(t.fechaPrevista) || fechaBusca(t.fechaAlmacen), "Furniture: " + t.estado);
+    add(fechaBusca(t.fechaAlmacen), "Furniture: en almacén (albarán " + (t.albaran || "") + ")", "", t.seguimiento, "Ver en Furniture");
+    if (t.estado) add(fechaBusca(t.fechaPrevista) || fechaBusca(t.fechaAlmacen), "Furniture: " + t.estado, "", t.seguimiento, "Ver en Furniture");
   }
   for (const t of o.seurTracking || []) {
     if (t.anulado) continue;
-    add(fechaBusca(t.fechaCreacion), "SEUR: envío registrado con referencia " + t.referencia + (t.numeroExpedicion ? " (expedición " + t.numeroExpedicion + ")" : ""));
-    if (t.estado && t.fechaSituacion) add(fechaBusca(t.fechaSituacion) + 1, "SEUR " + t.referencia + ": " + t.estado);
+    add(fechaBusca(t.fechaCreacion), "SEUR: envío registrado con referencia " + t.referencia + (t.numeroExpedicion ? " (expedición " + t.numeroExpedicion + ")" : ""), "", t.seguimiento, "Ver en SEUR");
+    if (t.estado && t.fechaSituacion) add(fechaBusca(t.fechaSituacion) + 1, "SEUR " + t.referencia + ": " + t.estado, "", t.seguimiento, "Ver en SEUR");
   }
   for (const [r, info] of Object.entries(o.enviosSeurInfo || {})) {
     add(fechaBusca(info.fechaReclamado), "Reclamado a SEUR (" + (info.refSeur || r) + ")");
@@ -9129,7 +9131,7 @@ function fichaPedidoBuscador(o, d) {
     "</div>" +
     '<h4>Dónde está ahora</h4><ul class="buscador-donde">' + donde.map(x => "<li>" + escapeAttr(x) + "</li>").join("") + "</ul>" +
     "<h4>Histórico</h4>" +
-    (ev.length ? '<table class="buscador-historico"><tbody>' + ev.map(e => '<tr><td style="white-space:nowrap;color:var(--muted)">' + fechaHoraBusca(e.t) + "</td><td>" + escapeAttr(e.texto) + (e.quien ? ' <span style="color:var(--muted);font-size:11px">· ' + escapeAttr(e.quien) + "</span>" : "") + "</td></tr>").join("") + "</tbody></table>" : '<p style="color:var(--muted)">Sin movimientos guardados.</p>') +
+    (ev.length ? '<table class="buscador-historico"><tbody>' + ev.map(e => '<tr><td style="white-space:nowrap;color:var(--muted)">' + fechaHoraBusca(e.t) + "</td><td>" + escapeAttr(e.texto) + (e.link ? ' <a href="' + escapeAttr(e.link) + '" target="_blank" rel="noopener" class="tracking-link">' + e.linkTxt + "</a>" : "") + (e.quien ? ' <span style="color:var(--muted);font-size:11px">· ' + escapeAttr(e.quien) + "</span>" : "") + "</td></tr>").join("") + "</tbody></table>" : '<p style="color:var(--muted)">Sin movimientos guardados.</p>') +
     "</div>";
 }
 async function buscarPedidoGeneral(q) {
