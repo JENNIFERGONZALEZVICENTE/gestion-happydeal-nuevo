@@ -5868,9 +5868,13 @@ async function checkAutoAddEnvioAparte(backorderId) {
 // Topper suelto pendiente de fábrica (Jennifer, 2026-10-13: "todos los
 // topper siempre se meten en SEUR porque se tratan como colchones"): sale
 // independiente por SEUR, como un colchón FPK — nunca bloquea ni entra en
-// la carga de Furniture del resto del pedido.
+// la carga de Furniture del resto del pedido. Salvo si va en un pack o en
+// un pedido con tapicería (Furniture): entonces sale todo junto por
+// Furniture, igual que las almohadas (Jennifer, 2026-10-13).
 function esTopperSeur(i) {
-  return i.tipo === "topper" && !i.esPack && !i.paraStock && i.estado !== "cubierto";
+  if (i.tipo !== "topper" || i.esPack || i.paraStock || i.estado === "cubierto") return false;
+  const o = allOrders.find(x => String(x.id) === String(i.orderId));
+  return !(o && o.agencia === "FURNITURE");
 }
 function soloFaltanAlmohadas(items) {
   const faltan = items.filter(i => !i.recibidoFabrica);
