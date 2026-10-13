@@ -2176,13 +2176,16 @@ function renderPage() {
   </div>
   <div class="toolbar">
     <input id="stock-model-select" type="text" list="stock-models-datalist" placeholder="Escribe o elige un modelo..." autocomplete="off" />
+    <input id="stock-talla-select" type="text" list="stock-tallas-datalist" placeholder="Medida (ej. 150x190)" autocomplete="off" style="width:170px" />
+    <datalist id="stock-tallas-datalist"></datalist>
+    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="stock-solo-con-stock" /> Solo con stock real</label>
     <datalist id="stock-models-datalist"></datalist>
     <datalist id="stock-skus-datalist"></datalist>
   </div>
   <div id="stock-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="stock-table">
-      <thead><tr><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th title="Pedidos para stock a Luso/New que aún no han llegado">Pedido para stock (en camino)</th><th title="Lo pedido para stock que todavía no tiene cliente: pasará al stock al llegar">Libre al llegar</th><th>Ajustar</th></tr></thead>
+      <thead><tr><th id="stock-modelo-head" style="display:none">Modelo</th><th>Talla</th><th>Stock real</th><th>Vendido pendiente</th><th title="Pedidos para stock a Luso/New que aún no han llegado">Pedido para stock (en camino)</th><th title="Lo pedido para stock que todavía no tiene cliente: pasará al stock al llegar">Libre al llegar</th><th>Ajustar</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -4719,26 +4722,45 @@ function compareTalla(a, b) {
   return aw - bw || ah - bh;
 }
 
+// Consulta solo por medida (Jennifer, 2026-10-13: "no me gusta no poder
+// consultar solo por medida"): con medida y sin modelo salen todos los
+// modelos de esa medida; con los dos, solo esa medida del modelo. La
+// medida vale a medias ("150" saca 150X190, 150X200...).
+function normTalla(t) {
+  return String(t || "").toUpperCase().split(" ").join("").split("*").join("X");
+}
 function renderStock() {
   const typed = document.getElementById("stock-model-select").value.trim();
+  const tallaTxt = normTalla(document.getElementById("stock-talla-select").value);
+  const soloConStock = document.getElementById("stock-solo-con-stock").checked;
   const tbody = document.querySelector("#stock-table tbody");
+  document.getElementById("stock-tallas-datalist").innerHTML = [...new Set(stockRows.map(r => normTalla(r.talla)))]
+    .sort(compareTalla).map(t => '<option value="' + escapeAttr(t) + '"></option>').join("");
 
-  if (!typed) {
+  if (!typed && !tallaTxt) {
     tbody.innerHTML = "";
-    document.getElementById("stock-count").textContent = "Escribe o elige un modelo para ver su stock.";
+    document.getElementById("stock-modelo-head").style.display = "none";
+    document.getElementById("stock-count").textContent = "Escribe o elige un modelo, una medida o las dos cosas para ver el stock.";
     return;
   }
 
-  const model = stockRows.find(r => r.stockModel === typed) ? typed
+  const model = !typed ? null : stockRows.find(r => r.stockModel === typed) ? typed
     : (stockRows.find(r => r.stockModel.toLowerCase() === typed.toLowerCase())?.stockModel || null);
 
-  if (!model) {
+  if (typed && !model) {
     tbody.innerHTML = "";
     document.getElementById("stock-count").textContent = "No hay ningún modelo que coincida exactamente con \\"" + typed + "\\".";
     return;
   }
 
-  const sorted = stockRows.filter(r => r.stockModel === model).sort((a, b) => compareTalla(a.talla, b.talla));
+  const porMedida = !model;
+  document.getElementById("stock-modelo-head").style.display = porMedida ? "" : "none";
+  const sorted = stockRows.filter(r => (!model || r.stockModel === model)
+      && (!tallaTxt || normTalla(r.talla).includes(tallaTxt))
+      && (!soloConStock || r.cantidad > 0))
+    .sort((a, b) => porMedida
+      ? (compareTalla(a.talla, b.talla) || nombreCortoModelo(a.stockModel).localeCompare(nombreCortoModelo(b.stockModel)))
+      : compareTalla(a.talla, b.talla));
   tbody.innerHTML = sorted.map(r => {
     // Pedidos para stock (Jennifer, 2026-10-02): lo en camino y lo que de
     // eso ya tiene cliente.
@@ -4747,6 +4769,7 @@ function renderStock() {
     const disponible = pedido - reservado;
     return \`
     <tr>
+      \${porMedida ? '<td title="' + escapeAttr(r.stockModel) + '">' + escapeAttr(nombreCortoModelo(r.stockModel)) + '</td>' : ""}
       <td>\${r.talla}</td>
       <td class="\${r.cantidad <= 0 ? "cantidad-baja" : ""}">\${r.cantidad}</td>
       <td class="\${r.vendidoPendiente > 0 ? "cantidad-baja" : ""}">\${r.vendidoPendiente || 0}</td>
@@ -4761,7 +4784,10 @@ function renderStock() {
     </tr>
   \`;
   }).join("");
-  document.getElementById("stock-count").textContent = sorted.length + " tallas de " + model;
+  const totalReal = sorted.reduce((n, r) => n + Math.max(0, r.cantidad || 0), 0);
+  document.getElementById("stock-count").textContent = porMedida
+    ? (sorted.length ? sorted.length + " modelos/medidas que coinciden con " + tallaTxt + " · " + totalReal + " unidades en stock real" : "No hay nada con la medida " + tallaTxt + (soloConStock ? " con stock real." : "."))
+    : sorted.length + " tallas de " + model + (tallaTxt ? " (medida " + tallaTxt + ")" : "");
 
   tbody.querySelectorAll(".stock-adjust").forEach(btn => {
     btn.addEventListener("click", () => adjustStock(btn.dataset.model, btn.dataset.talla, Number(btn.dataset.delta), btn.dataset.field));
@@ -4900,6 +4926,8 @@ document.getElementById("quick-alta").addEventListener("click", () => quickAdjus
 document.getElementById("quick-baja").addEventListener("click", () => quickAdjust(-1));
 
 document.getElementById("stock-model-select").addEventListener("input", renderStock);
+document.getElementById("stock-talla-select").addEventListener("input", renderStock);
+document.getElementById("stock-solo-con-stock").addEventListener("change", renderStock);
 
 let backorders = [];
 async function loadPendientes() {
