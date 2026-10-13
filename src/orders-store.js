@@ -1578,7 +1578,7 @@ export class OrdersStore {
         const dUTC = Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
         return Math.floor((hoyUTC - dUTC) / 86400000);
       }
-      const esEntregado = (estado) => /ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "");
+      const esEntregado = (estado) => (/ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "") && !/NO ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(estado || ""));
       const ESTADOS_INMEDIATOS = [
         "El envío está retenido. pendiente de recibir instrucciones para poder realizar la entrega.",
         "El envío se está devolviendo a origen.",
