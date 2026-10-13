@@ -3223,7 +3223,7 @@ function agenciaBadge(order) {
 // debajo del otro, etiquetados por tipo.
 const TRACKING_TIPO_LABEL = { BIS: "BIS", INC: "Incidencia", REP: "Reposición" };
 function esEstadoEntregado(estado) {
-  return /ENTREGAD/i.test(estado || "") || /retirado el envío/i.test(estado || "");
+  return /ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "");
 }
 function trackingEntryHtml(label, seguimiento, estado, title) {
   const linkHtml = seguimiento
@@ -7564,7 +7564,7 @@ function renderEnviosSeur() {
   // Entregado = "entregado" o retirado de un punto pickup (mismo criterio
   // que el antiguo "Casos a revisar").
   const ocultarEntregados = document.getElementById("envios-seur-ocultar-entregados").checked;
-  const esEntregado = e => /ENTREGAD/i.test(e.estadoSeur || "") || /retirado el envío/i.test(e.estadoSeur || "");
+  const esEntregado = e => /ENTREGAD|entrega efectuada|retirado el envío/i.test(e.estadoSeur || "");
   const ocultarArchivados = document.getElementById("envios-seur-ocultar-archivados").checked;
   const soloAvisos = document.getElementById("envios-seur-solo-avisos").checked;
   const soloPunto = document.getElementById("envios-seur-solo-punto").checked;
