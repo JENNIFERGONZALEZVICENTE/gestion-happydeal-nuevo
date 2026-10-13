@@ -2222,7 +2222,7 @@ export class InventoryStore {
     }
 
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
-      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, previsionEntrega, cantidad, enStock } = await request.json();
+      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, cuarentena, previsionEntrega, cantidad, enStock } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return new Response("not found", { status: 404 });
@@ -2238,6 +2238,10 @@ export class InventoryStore {
       // de Maison du Monde que entraron con un precio incorrecto, a la
       // espera de que el cliente pague la diferencia): { motivo } o null.
       if (revision !== undefined) entry.revision = revision ? { motivo: String(revision.motivo || ""), desde: new Date().toISOString() } : null;
+      // Cuarentena (Jennifer, 2026-10-13): el cliente avisa de que quizá
+      // cancela. Sigue en la lista del proveedor, marcado, y no se puede
+      // pedir a fábrica hasta quitarlo. { motivo, usuario } o null.
+      if (cuarentena !== undefined) entry.cuarentena = cuarentena ? { motivo: String(cuarentena.motivo || ""), usuario: cuarentena.usuario || null, desde: new Date().toISOString() } : null;
       if (referencia !== undefined) entry.referencia = referencia;
       if (mercanciaFabrica !== undefined) entry.mercanciaFabrica = mercanciaFabrica;
       // Tapa del canapé que ya está en el almacén (Jennifer, 2026-09-30,

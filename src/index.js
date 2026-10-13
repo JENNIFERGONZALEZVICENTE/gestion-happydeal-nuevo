@@ -1867,6 +1867,11 @@ function renderPage() {
   tr.fila-pedido-generado { background: #cdeed9; }
   tr.fila-pedido-generado td:first-child { box-shadow: inset 4px 0 0 #1f8a4c; }
   tr.fila-pedido-generado:hover { background: #b5e3c6; }
+  tr.fila-cuarentena, tr.fila-cuarentena.fila-pedido-generado { background: #fef3c7; }
+  tr.fila-cuarentena td:first-child { box-shadow: inset 4px 0 0 #ea580c; }
+  tr.fila-cuarentena:hover, tr.fila-cuarentena.fila-pedido-generado:hover { background: #fde68a; }
+  .cuarentena-tag { display: inline-block; margin: 2px 0; padding: 2px 6px; border-radius: 4px; background: #ea580c; color: #fff; font-size: 12px; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { tr.fila-cuarentena, tr.fila-cuarentena.fila-pedido-generado { background: #451a03; } tr.fila-cuarentena:hover, tr.fila-cuarentena.fila-pedido-generado:hover { background: #78350f; } }
   tr.fila-grupo-inicio td, tr.fila-grupo-medio td, tr.fila-grupo-fin td { border-left: 2px solid var(--brand); border-right: 2px solid var(--brand); }
   tr.fila-grupo-inicio td { border-top: 2px solid var(--brand); }
   tr.fila-grupo-fin td { border-bottom: 2px solid var(--brand); }
@@ -3752,6 +3757,7 @@ document.getElementById("descargar-excel-pendientes-btn").addEventListener("clic
       "Fecha del pedido": b.fecha || "",
       "Previsión de entrega": (b.fechaEstimadaLlegada || b.previsionEntrega) ? new Date((b.fechaEstimadaLlegada || b.previsionEntrega).slice(0, 10) + "T12:00:00").toLocaleDateString("es-ES") : "",
       "En revisión":b.revision ? (b.revision.motivo || "Sí") : "",
+      "Cuarentena": b.cuarentena ? (b.cuarentena.motivo || "Sí") : "",
       Notas: (allOrders.find(o => String(o.id) === String(b.orderId)) || {}).notas || "",
       "Pedido a fábrica": b.pedidoGenerado ? "Sí" + (b.fechaPedidoFabrica ? " (" + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") + ")" : "") : "No",
       "Recibido de fábrica": b.recibidoFabrica ? "Sí" + (b.fechaRecibido ? " (" + new Date(b.fechaRecibido).toLocaleDateString("es-ES") + ")" : "") : "No",
@@ -4883,6 +4889,28 @@ document.addEventListener("click", async (e) => {
   renderPendientes();
 });
 
+// Cuarentena (Jennifer, 2026-10-13): el cliente avisa de que quizá cancela.
+// Se queda en la lista en naranja y no se puede pedir a fábrica hasta pulsar
+// "Sigue adelante" (o cancelarlo con el botón de siempre).
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-cuarentena-pendiente]");
+  if (!btn) return;
+  const b = backorders.find(x => x.id === btn.dataset.cuarentenaPendiente);
+  if (!b) return;
+  const poner = btn.dataset.activo === "1";
+  let valor = null;
+  if (poner) {
+    const motivo = prompt("¿Por qué pasa a cuarentena " + refLabel(b) + (b.refSuffix || "") + " (" + b.stockModel + " " + b.talla + ")?", "El cliente avisa de que quizá cancela");
+    if (motivo === null) return;
+    valor = { motivo: motivo.trim() || "El cliente avisa de que quizá cancela", usuario: currentUser };
+  } else if (!confirm("¿" + refLabel(b) + (b.refSuffix || "") + " sale de cuarentena? Sigue adelante normal y se podrá pedir a fábrica.")) return;
+  const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: b.id, cuarentena: valor }) });
+  if (!res.ok) { alert("No se ha podido guardar."); return; }
+  b.cuarentena = valor ? { ...valor, desde: new Date().toISOString() } : null;
+  if (valor) pedidoFabricaSeleccion.delete(b.id);
+  renderPendientes();
+});
+
 // Pendientes de revisión antes de pedir (Jennifer, 2026-10-01: pedidos que
 // entraron con un precio incorrecto, a la espera de que el cliente pague la
 // diferencia). No salen en la lista normal ni se pueden pedir a fábrica
@@ -5094,8 +5122,9 @@ function renderPendientes() {
     // Canapé de 160 comprado en GEMELOS (Jennifer, 2026-09-28): hasta que
     // ella confirme GEMELOS o PARTIDO no se puede pedir a fábrica.
     const faltaFormato = b.necesitaFormato160 && !b.formato160;
+    const enCuarentena = !!b.cuarentena && b.estado === "pendiente";
     const checkCell = showCheckbox
-      ? \`<td><input type="checkbox" class="pendiente-check" data-id="\${b.id}"\${pedidoFabricaSeleccion.has(b.id) && !faltaFormato ? " checked" : ""}\${pedidoCancelado || faltaFormato ? " disabled" : ""}\${faltaFormato ? ' title="Falta elegir GEMELOS o PARTIDO"' : ""}></td>\`
+      ? \`<td><input type="checkbox" class="pendiente-check" data-id="\${b.id}"\${pedidoFabricaSeleccion.has(b.id) && !faltaFormato && !enCuarentena ? " checked" : ""}\${pedidoCancelado || faltaFormato || enCuarentena ? " disabled" : ""}\${faltaFormato ? ' title="Falta elegir GEMELOS o PARTIDO"' : enCuarentena ? ' title="En cuarentena: no se puede pedir a fábrica hasta que siga adelante"' : ""}></td>\`
       : "<td></td>";
     const formatoHtml = b.necesitaFormato160 || b.formato160
       ? \`<div class="formato160-box">\${faltaFormato ? '<span class="formato160-falta">⚠ Falta elegir: el cliente lo compró en GEMELOS</span><br>' : ""}<select class="formato160-select" data-id="\${escapeAttr(b.id)}"><option value="">¿Gemelos o partido?</option><option value="GEMELOS"\${b.formato160 === "GEMELOS" ? " selected" : ""}>GEMELOS</option><option value="PARTIDO"\${b.formato160 === "PARTIDO" ? " selected" : ""}>PARTIDO</option></select></div>\`
@@ -5166,13 +5195,13 @@ function renderPendientes() {
       : esColchonSeur
       ? \`<button type="button" class="recibido-seur-btn" data-id="\${b.id}" title="Recibido: entra solo en la carga de SEUR (antes de las 15:00, la de hoy; después, la de mañana)">Marcar recibido</button> <button type="button" class="secondary resolver-seur-btn" data-id="\${b.id}" title="Recibido y programado para el día que pida el cliente">📅 Otro día</button> <button type="button" class="secondary programar-seur-btn" data-id="\${b.id}" title="Todavía no ha llegado: cuando lo marques recibido irá a la carga de SEUR de este día">⏳ Programar fecha</button>\${fechaProgramadaSeurTag(b)}\${sustituirBtnHtml}\`
       : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\${reservaAlmacenHtml(b)}\${sustituirBtnHtml}\`;
-    const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button> <button type="button" class="secondary revisar-pendiente-btn" data-revisar-pendiente="\${escapeAttr(b.id)}" title="Hay algo que ver antes de pedirlo: pasa al recuadro de revisión y no se puede pedir hasta marcarlo revisado">🔍 Revisar</button>\${b.paraStock || !pedidoFila ? "" : (recoge
+    const cancelarBtnHtml = esCancelado ? "" : \`<div><button type="button" class="cancelar-pendiente-btn" data-cancelar-pendiente="\${escapeAttr(b.id)}" title="El cliente ha cancelado esta unidad: se quita del proveedor y queda cancelada en el pedido">✕ Cancelar</button> <button type="button" class="secondary revisar-pendiente-btn" data-revisar-pendiente="\${escapeAttr(b.id)}" title="Hay algo que ver antes de pedirlo: pasa al recuadro de revisión y no se puede pedir hasta marcarlo revisado">🔍 Revisar</button> \${b.cuarentena ? '<button type="button" class="secondary" data-cuarentena-pendiente="' + escapeAttr(b.id) + '" data-activo="0" title="El cliente sigue adelante: sale de cuarentena">▶ Sigue adelante</button>' : '<button type="button" class="secondary" data-cuarentena-pendiente="' + escapeAttr(b.id) + '" data-activo="1" title="El cliente avisa de que quizá cancela: se queda en la lista marcado y no se puede pedir a fábrica">⏸ Cuarentena</button>'}\${b.paraStock || !pedidoFila ? "" : (recoge
         ? ' <button type="button" class="secondary recoge-cliente-btn" data-recoge-cliente="' + escapeAttr(String(b.orderId)) + '" data-activo="0" title="El cliente ya no viene: vuelve a su agencia de antes">↩ Ya no lo recoge</button>'
         : ' <button type="button" class="secondary recoge-cliente-btn" data-recoge-cliente="' + escapeAttr(String(b.orderId)) + '" data-activo="1" title="El cliente viene a recogerlo al almacén: no va en ninguna carga de SEUR ni de Furniture">🏬 Recoge el cliente</button>')}</div>\`;
     return \`
-    <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
+    <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", enCuarentena ? "fila-cuarentena" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
-      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}\${recoge ? '<span class="recoge-cliente-tag">🏬 RECOGE EL CLIENTE</span>' : ""}</td>
+      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}\${recoge ? '<span class="recoge-cliente-tag">🏬 RECOGE EL CLIENTE</span>' : ""}\${enCuarentena ? '<br><span class="cuarentena-tag" title="' + escapeAttr(b.cuarentena.motivo || "") + '">⏸ CUARENTENA' + (b.cuarentena.desde ? " " + new Date(b.cuarentena.desde).toLocaleDateString("es-ES") : "") + '</span><br><small>' + escapeAttr(b.cuarentena.motivo || "") + (b.cuarentena.usuario ? " (" + escapeAttr(b.cuarentena.usuario) + ")" : "") + '</small>' : ""}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
@@ -5191,6 +5220,7 @@ function renderPendientes() {
   \`;
   }).join("");
   const nCancelados = pendientes.filter(b => b.estado === "cancelado").length;
+  const nCuarentena = pendientes.filter(b => b.cuarentena && b.estado === "pendiente").length;
   // Total de coste de tarifa de lo que se ve, y de lo que falta por pedir.
   let textoCoste = "";
   if (showSkuCol) {
@@ -5199,7 +5229,7 @@ function renderPendientes() {
     const porPedir = totalCostesTarifa(activos.filter(b => !b.pedidoGenerado));
     textoCoste = " · Coste tarifa: " + formatoEuros(todo.total) + " (por pedir: " + formatoEuros(porPedir.total) + ")" + (todo.sinPrecio ? " · " + todo.sinPrecio + " sin precio en tarifa" : "");
   }
-  document.getElementById("pendientes-count").textContent = (pendientes.length - nCancelados) + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)" + (nCancelados ? " · " + nCancelados + " cancelados a la vista" : "") + textoCoste;
+  document.getElementById("pendientes-count").textContent = (pendientes.length - nCancelados) + " artículos pendientes en " + PROVEEDORES_LABELS[currentProveedorFilter] + " (se cierran solos al marcarse el pedido como enviado)" + (nCuarentena ? " · ⏸ " + nCuarentena + " en cuarentena" : "") + (nCancelados ? " · " + nCancelados + " cancelados a la vista" : "") + textoCoste;
   actualizarSeleccionUI();
   sincronizarTopFilaFiltro("pendientes-table", "pendientes-filter-row");
   ajustarScrollArriba();
