@@ -5267,7 +5267,7 @@ function renderPendientes() {
     // un colchón de pack en FPK sale independiente por SEUR (Jennifer,
     // 2026-09-30, BEZEN12117: la tapicería ya salió y los colchones "cuando
     // vengan saldrán por SEUR") — antes no tenía forma de prepararse para SEUR.
-    const esColchonSeur = !b.paraStock && (((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial);
+    const esColchonSeur = !b.paraStock && ((((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") || esTopperSeur(b)) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial);
     // Sustituir por otro modelo que sí hay en stock (Jennifer, 2026-09-18):
     // vale tanto para colchón suelto como de pack, mientras siga
     // "pendiente" — una vez preparado o sustituido ya no aplica. El propio
@@ -5837,6 +5837,13 @@ async function checkAutoAddEnvioAparte(backorderId) {
 // botón "Marcar recibido" de Proveedores pendientes (Jennifer, 2026-09-18:
 // "los he marcado como recibidos pero no se ponen automáticamente en
 // Furniture para las cargas" — solo estaba conectada en un sitio).
+// Topper suelto pendiente de fábrica (Jennifer, 2026-10-13: "todos los
+// topper siempre se meten en SEUR porque se tratan como colchones"): sale
+// independiente por SEUR, como un colchón FPK — nunca bloquea ni entra en
+// la carga de Furniture del resto del pedido.
+function esTopperSeur(i) {
+  return i.tipo === "topper" && !i.esPack && !i.paraStock && i.estado !== "cubierto";
+}
 function soloFaltanAlmohadas(items) {
   const faltan = items.filter(i => !i.recibidoFabrica);
   return faltan.length > 0 && faltan.every(i => i.tipo === "almohada") && items.some(i => i.tipo !== "almohada");
@@ -5854,7 +5861,7 @@ async function checkAutoAddCarga(orderId) {
   // almohadas...) suba solo a la carga de Furniture en cuanto esté listo.
   // También el colchón SUELTO marcado FPK (Jennifer, 2026-10-08, BEZEN12219:
   // todo recibido salvo el París de Luso en FPK y no subía a la carga).
-  const esFpkPendiente = i => i.tipo === "colchon" && i.tipoEnvio === "FPK";
+  const esFpkPendiente = i => (i.tipo === "colchon" && i.tipoEnvio === "FPK") || esTopperSeur(i);
   const itemsFurniture = items.filter(i => !esFpkPendiente(i));
   const todosRecibidos = itemsFurniture.length > 0 && itemsFurniture.every(i => i.recibidoFabrica);
   const colchonFpkPendiente = items.some(i => esFpkPendiente(i) && i.estado === "pendiente");
@@ -6143,7 +6150,7 @@ function reservaAlmacenHtml(b) {
   if (!b.recibidoFabrica) return "";
   const o = allOrders.find(x => String(x.id) === String(b.orderId));
   if (!o || o.agencia !== "FURNITURE") return "";
-  const resto = backordersPorPedido(o.id).filter(x => x.id !== b.id && !(x.tipo === "colchon" && x.tipoEnvio === "FPK"));
+  const resto = backordersPorPedido(o.id).filter(x => x.id !== b.id && !(x.tipo === "colchon" && x.tipoEnvio === "FPK") && !esTopperSeur(x));
   if (!resto.some(x => !x.recibidoFabrica)) return ""; // ya está todo: sale en la carga
   return ' <button type="button" class="secondary reservar-almacen-btn" data-reservar-almacen="' + escapeAttr(b.id) + '" title="Manda al almacén el email con las etiquetas de reserva para que lo aparten para este cliente">📦 Reservar en almacén</button>';
 }
@@ -6677,7 +6684,7 @@ function retencionDe(o) {
 }
 function todoRecibidoFurniture(o) {
   const items = pedidosDelGrupo(o).filter(p => !p.cancelado).flatMap(p => backordersPorPedido(p.id))
-    .filter(i => !(i.tipo === "colchon" && i.tipoEnvio === "FPK"));
+    .filter(i => !(i.tipo === "colchon" && i.tipoEnvio === "FPK") && !esTopperSeur(i));
   return items.length > 0 && items.every(i => i.recibidoFabrica);
 }
 function fechaCortaEs(f) {
@@ -8411,7 +8418,7 @@ async function descargarFicheroSeur(cargaId, seleccion) {
 function seurEnviosDeCarga(cargaId) {
   const directos = allOrders.filter(o => o.agencia === "SEUR" && o.cargaId === cargaId)
     .map(o => ({ o, refSuffix: "", backorderId: null, backorder: null }));
-  const divididos = backorders.filter(b => (b.tipo === "colchon" || b.gestoComercial) && b.cargaId === cargaId)
+  const divididos = backorders.filter(b => (b.tipo === "colchon" || b.tipo === "topper" || b.gestoComercial) && b.cargaId === cargaId)
     .map(b => {
       const o = allOrders.find(x => x.orderNumber === b.orderNumber);
       return o ? { o, refSuffix: b.refSuffix || "", backorderId: b.id, backorder: b } : null;
@@ -10645,7 +10652,7 @@ async function buildListadoAlmacenSeur(env, cargaId) {
   const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
   const diaDe = (iso) => (iso ? new Date(iso).toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" }) : "");
   const corto = (iso) => { const d = diaDe(iso); return d ? d.slice(8, 10) + "/" + d.slice(5, 7) : ""; };
-  const producto = (b) => [b.tipo === "almohada" ? "ALMOHADA" : b.tipo === "colchon" ? "COLCHÓN" : "", nombreCortoProducto(b.stockModel), b.talla].filter(Boolean).join(" ");
+  const producto = (b) => [b.tipo === "almohada" ? "ALMOHADA" : b.tipo === "colchon" ? "COLCHÓN" : b.tipo === "topper" && !/topper/i.test(nombreCortoProducto(b.stockModel)) ? "TOPPER" : "", nombreCortoProducto(b.stockModel), b.talla].filter(Boolean).join(" ");
   const filas = [];
   for (const o of orders) {
     if (o.agencia !== "SEUR" || o.cargaId !== carga.id) continue;
