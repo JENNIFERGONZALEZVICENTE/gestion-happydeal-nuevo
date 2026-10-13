@@ -10941,6 +10941,14 @@ async function handleFetch(request, env) {
     // directas contra la API de Shopify) — para que un seguimiento
     // posterior del mismo pedido sepa que tiene que actualizar el
     // fulfillment existente en vez de intentar crear uno nuevo.
+    // Pedido de una plataforma sin conectar (Jennifer, 2026-10-13: PINK y
+    // otras con las que se trabaja de forma puntual): se graba tal cual, sin
+    // tramitar inventario, solo para meterlo en cargas y seguirlo.
+    if (url.pathname === "/api/pedidos/admin/pedido-externo" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/import-simple", { method: "POST", body: JSON.stringify([await request.json()]) });
+      return new Response(await res.text(), { status: res.status });
+    }
     if (url.pathname === "/api/pedidos/admin/set-agencia" && request.method === "POST") {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do/orders/admin/set-agencia", { method: "POST", body: await request.text() });
