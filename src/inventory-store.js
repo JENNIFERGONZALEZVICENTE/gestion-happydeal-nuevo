@@ -3199,7 +3199,7 @@ export class InventoryStore {
     return this.adjustStock({ stockModel, talla: normalizedTalla, delta, usuario });
   }
 
-  async adjustStock({ stockModel, talla, delta, field, usuario }) {
+  async adjustStock({ stockModel, talla, delta, field, usuario, origen, orderRef }) {
     // "vendidoPendiente" añadido (Jennifer, 2026-09-22) para poder corregir
     // a mano restos huérfanos de ese contador — ej. un pendiente que se
     // reprocesó con el modelo correcto pero dejó "vendido pendiente" suelto
@@ -3220,8 +3220,10 @@ export class InventoryStore {
       campo: targetField,
       delta: Number(delta),
       resultante: row[targetField],
-      origen: "manual",
+      // Colchón devuelto por SEUR que vuelve al stock (Jennifer, 2026-10-13).
+      origen: origen === "devolucion" ? "devolucion" : "manual",
       usuario,
+      orderRef: orderRef || undefined,
     });
     return Response.json(row);
   }

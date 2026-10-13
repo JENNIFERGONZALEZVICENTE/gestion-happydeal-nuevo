@@ -1937,6 +1937,7 @@ function renderPage() {
     <li><a href="#" class="nav-link sublink" data-logistica="seur">Pedidos pendientes</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas-seur">Historial de cargas</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="casos-revisar-seur">Envíos SEUR</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="devoluciones-seur">Devueltos</a></li>
   </ul>
   <button class="section-title" id="historico-toggle">
     <span>Histórico</span>
@@ -2408,6 +2409,26 @@ function renderPage() {
   <div class="table-wrap">
     <table id="envios-seur-table">
       <thead><tr><th>Fecha de carga</th><th>Referencia pedido</th><th>Nombre</th><th>País</th><th>Observaciones</th><th>Estado en SEUR</th><th>Reclamado a SEUR</th><th style="min-width:320px">Notas</th><th>Archivar</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-devoluciones-seur" style="display:none">
+  <div class="toolbar">
+    <button type="button" id="devoluciones-anadir-btn" title="Meter a mano un pedido devuelto que no ha entrado solo por el seguimiento de SEUR">+ Añadir devolución</button>
+    <input id="devoluciones-search" type="text" placeholder="Buscar por referencia, nombre o notas..." style="min-width:260px" />
+    <select id="devoluciones-filtro">
+      <option value="">Todas</option>
+      <option value="sin-llegar">Sin llegar al almacén</option>
+      <option value="sin-decidir">Llegadas, sin decidir qué se hace</option>
+      <option value="resueltas">Resueltas</option>
+    </select>
+  </div>
+  <div id="devoluciones-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="devoluciones-table">
+      <thead><tr><th>Detectado</th><th>Pedido</th><th>Nombre</th><th>Producto</th><th>Estado en SEUR</th><th>Motivo</th><th>Llegada al almacén</th><th>Estado del colchón</th><th>Qué se hace</th><th>Stock</th><th style="min-width:220px">Notas</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -3228,7 +3249,7 @@ function agenciaBadge(order) {
 // debajo del otro, etiquetados por tipo.
 const TRACKING_TIPO_LABEL = { BIS: "BIS", INC: "Incidencia", REP: "Reposición" };
 function esEstadoEntregado(estado) {
-  return (/ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "") && !/NO ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(estado || ""));
+  return (/ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "") && !/NO ENTREGAD|NO SE HA ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(estado || ""));
 }
 function trackingEntryHtml(label, seguimiento, estado, title) {
   const linkHtml = seguimiento
@@ -3868,7 +3889,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace", "view-casos", "view-tareas"];
+const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-devoluciones-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace", "view-casos", "view-tareas"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -3964,7 +3985,7 @@ function selectProveedores(id) {
   loadPendientes();
 }
 
-const LOGISTICA_LABELS = { furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR" };
+const LOGISTICA_LABELS = { furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR", "devoluciones-seur": "SEUR · Devueltos" };
 function selectLogistica(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.logistica === id));
   document.getElementById("view-title").textContent = "Logística · " + LOGISTICA_LABELS[id];
@@ -3976,6 +3997,7 @@ function selectLogistica(id) {
   if (id === "seur") loadSeur();
   if (id === "historial-cargas-seur") loadHistorialCargasSeur();
   if (id === "casos-revisar-seur") loadCasosRevisarSeur();
+  if (id === "devoluciones-seur") loadDevoluciones();
 }
 
 // Histórico de reposiciones y gestos comerciales (Jennifer, 2026-09-22):
@@ -7594,7 +7616,7 @@ function renderEnviosSeur() {
   // Entregado = "entregado" o retirado de un punto pickup (mismo criterio
   // que el antiguo "Casos a revisar").
   const ocultarEntregados = document.getElementById("envios-seur-ocultar-entregados").checked;
-  const esEntregado = e => (/ENTREGAD|entrega efectuada|retirado el envío/i.test(e.estadoSeur || "") && !/NO ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(e.estadoSeur || ""));
+  const esEntregado = e => (/ENTREGAD|entrega efectuada|retirado el envío/i.test(e.estadoSeur || "") && !/NO ENTREGAD|NO SE HA ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(e.estadoSeur || ""));
   const ocultarArchivados = document.getElementById("envios-seur-ocultar-archivados").checked;
   const soloAvisos = document.getElementById("envios-seur-solo-avisos").checked;
   const soloPunto = document.getElementById("envios-seur-solo-punto").checked;
@@ -9719,6 +9741,135 @@ document.addEventListener("click", (e) => {
   if (o) abrirModalDireccion(o);
 }, true);
 
+// Histórico de devueltos de SEUR (Jennifer, 2026-10-13): entran solos por el
+// seguimiento ("Envío devuelto" / "se está devolviendo a origen") o a mano.
+// Se apunta llegada al almacén, motivo, estado del colchón y qué se hace;
+// si está bien, "Pasar al stock" suma 1 unidad (solo cuando ella lo decide).
+let devoluciones = [];
+let devolucionesPendientes = [];
+const DEV_MOTIVOS = ["", "Ausente / no localizado", "Dirección incorrecta", "Rechazado por el cliente", "El cliente cancela", "Dañado en el transporte", "Otro"];
+const DEV_ESTADOS = ["", "Bien", "Embalaje dañado", "Colchón dañado"];
+const DEV_DESTINOS = ["", "Pendiente de decidir", "Reenviar al cliente", "Vuelve al stock", "Desechar", "Reembolsado"];
+async function loadDevoluciones() {
+  const [d, p] = await Promise.all([
+    fetch("/api/seur/devoluciones").then(r => r.json()),
+    fetch("/api/inventario/pendientes").then(r => r.json()).catch(() => []),
+  ]);
+  devoluciones = Array.isArray(d) ? d : [];
+  devolucionesPendientes = Array.isArray(p) ? p : [];
+  renderDevoluciones();
+}
+function devSelect(campo, opciones, valor, id) {
+  const v0 = valor || "";
+  const ops = opciones.includes(v0) ? opciones : opciones.concat([v0]);
+  return '<select class="dev-campo" data-id="' + escapeAttr(id) + '" data-campo="' + campo + '">'
+    + ops.map(v => '<option value="' + escapeAttr(v) + '"' + (v === v0 ? " selected" : "") + ">" + escapeAttr(v || "—") + "</option>").join("") + "</select>";
+}
+function colchonesDeDevolucion(d) {
+  const vistos = new Map();
+  for (const b of devolucionesPendientes) {
+    if (String(b.orderId) !== String(d.orderId) || b.tipo !== "colchon" || b.paraStock) continue;
+    vistos.set(b.stockModel + "|" + b.talla, { stockModel: b.stockModel, talla: b.talla });
+  }
+  return [...vistos.values()];
+}
+function devolucionResuelta(d) {
+  return !!d.fechaLlegada && !!d.destino && d.destino !== "Pendiente de decidir";
+}
+function renderDevoluciones() {
+  const q = document.getElementById("devoluciones-search").value.trim().toLowerCase();
+  const filtro = document.getElementById("devoluciones-filtro").value;
+  const filas = devoluciones.filter(d => {
+    if (q && ![refLabel(d), d.nombre, d.producto, d.notas].join(" ").toLowerCase().includes(q)) return false;
+    if (filtro === "sin-llegar" && d.fechaLlegada) return false;
+    if (filtro === "sin-decidir" && (!d.fechaLlegada || devolucionResuelta(d))) return false;
+    if (filtro === "resueltas" && !devolucionResuelta(d)) return false;
+    return true;
+  }).sort((a, b) => String(b.creado || "").localeCompare(String(a.creado || "")));
+  const sinLlegar = devoluciones.filter(d => !d.fechaLlegada).length;
+  document.getElementById("devoluciones-count").textContent = filas.length + " de " + devoluciones.length + " devoluciones" + (sinLlegar ? " · " + sinLlegar + " sin llegar al almacén" : "");
+  document.querySelector("#devoluciones-table tbody").innerHTML = filas.map(d => {
+    const idA = escapeAttr(d.id);
+    const stockHtml = d.alStock
+      ? '<span class="pedido-generado-tag">✓ Al stock ' + new Date(d.alStock.fecha).toLocaleDateString("es-ES") + "</span><br><small>" + escapeAttr(nombreCortoModelo(d.alStock.stockModel) + " " + d.alStock.talla) + (d.alStock.usuario ? " (" + escapeAttr(d.alStock.usuario) + ")" : "") + "</small>"
+      : '<button type="button" class="secondary dev-stock-btn" data-id="' + idA + '" title="El colchón ha vuelto bien: suma 1 unidad al stock">＋ Pasar al stock</button>';
+    return "<tr" + (devolucionResuelta(d) ? "" : ' class="fila-cuarentena"') + ">"
+      + "<td>" + new Date(d.creado).toLocaleDateString("es-ES") + "<br><small>" + (d.origen === "manual" ? "a mano" + (d.creadoPor ? " (" + escapeAttr(d.creadoPor) + ")" : "") : "automático") + "</small></td>"
+      + "<td>" + escapeAttr(refLabel(d)) + "<br><small>" + escapeAttr(d.platform || "Shopify") + "</small></td>"
+      + "<td>" + escapeAttr(d.nombre || "") + "</td>"
+      + "<td>" + escapeAttr(d.producto || "") + "</td>"
+      + "<td>" + (d.seguimiento ? '<a href="' + escapeAttr(d.seguimiento) + '" target="_blank" rel="noopener">' + escapeAttr(d.estadoSeur || "Ver en SEUR") + "</a>" : escapeAttr(d.estadoSeur || "")) + "</td>"
+      + "<td>" + devSelect("motivo", DEV_MOTIVOS, d.motivo, d.id) + "</td>"
+      + '<td><input type="date" class="dev-campo" data-id="' + idA + '" data-campo="fechaLlegada" value="' + escapeAttr(d.fechaLlegada || "") + '"></td>'
+      + "<td>" + devSelect("estadoColchon", DEV_ESTADOS, d.estadoColchon, d.id) + "</td>"
+      + "<td>" + devSelect("destino", DEV_DESTINOS, d.destino, d.id) + "</td>"
+      + "<td>" + stockHtml + "</td>"
+      + '<td><textarea class="dev-campo" data-id="' + idA + '" data-campo="notas" placeholder="Notas...">' + escapeAttr(d.notas || "") + "</textarea></td>"
+      + '<td><button type="button" class="secondary dev-borrar-btn" data-id="' + idA + '" title="Quitar de la lista (no se vuelve a meter sola)">✕</button></td>'
+      + "</tr>";
+  }).join("");
+}
+async function guardarDevolucion(datos) {
+  const res = await fetch("/api/seur/devoluciones/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...datos, usuario: currentUser }) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido guardar."); return null; }
+  return r.devolucion;
+}
+document.addEventListener("change", async (e) => {
+  const el = e.target.closest(".dev-campo");
+  if (!el) return;
+  const d = devoluciones.find(x => x.id === el.dataset.id);
+  if (!d) return;
+  d[el.dataset.campo] = el.value;
+  await guardarDevolucion({ id: d.id, [el.dataset.campo]: el.value });
+  renderDevoluciones();
+});
+document.addEventListener("click", async (e) => {
+  const btnStock = e.target.closest(".dev-stock-btn");
+  const btnBorrar = e.target.closest(".dev-borrar-btn");
+  if (!btnStock && !btnBorrar) return;
+  const d = devoluciones.find(x => x.id === (btnStock || btnBorrar).dataset.id);
+  if (!d) return;
+  if (btnBorrar) {
+    if (!confirm("¿Quitar " + refLabel(d) + " del histórico de devueltos?")) return;
+    if (await guardarDevolucion({ id: d.id, descartado: true })) loadDevoluciones();
+    return;
+  }
+  const NL = String.fromCharCode(10);
+  const opciones = colchonesDeDevolucion(d);
+  let elegido = null;
+  if (opciones.length === 1) {
+    if (!confirm("¿Sumar 1 unidad de " + opciones[0].stockModel + " " + opciones[0].talla + " al stock?")) return;
+    elegido = opciones[0];
+  } else if (opciones.length > 1) {
+    const n = prompt("¿Qué colchón vuelve al stock? Escribe el número:" + NL + opciones.map((o, i) => (i + 1) + ") " + o.stockModel + " " + o.talla).join(NL), "1");
+    if (n === null) return;
+    elegido = opciones[Number(n) - 1];
+    if (!elegido) { alert("Número no válido."); return; }
+  } else {
+    const filas = await (await fetch("/api/inventario/stock")).json();
+    const modelo = prompt("No sé qué colchón es. Escribe el modelo tal cual sale en Stock:");
+    if (!modelo) return;
+    const talla = prompt("Medida (ej. 150X190):");
+    if (!talla) return;
+    const t = talla.toUpperCase().split(" ").join("");
+    elegido = (Array.isArray(filas) ? filas : Object.values(filas)).find(r => String(r.stockModel).toLowerCase() === modelo.trim().toLowerCase() && r.talla === t);
+    if (!elegido) { alert("No encuentro " + modelo + " " + t + " en Stock. Revisa el nombre exacto."); return; }
+  }
+  const res = await fetch("/api/seur/devoluciones/al-stock", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: d.id, stockModel: elegido.stockModel, talla: elegido.talla, usuario: currentUser, ref: refLabel(d) }) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido pasar al stock."); return; }
+  mostrarAvisoBreve("Sumado al stock: " + nombreCortoModelo(elegido.stockModel) + " " + elegido.talla + " (ahora hay " + r.cantidad + ")");
+  loadDevoluciones();
+});
+document.getElementById("devoluciones-search").addEventListener("input", renderDevoluciones);
+document.getElementById("devoluciones-filtro").addEventListener("change", renderDevoluciones);
+document.getElementById("devoluciones-anadir-btn").addEventListener("click", async () => {
+  const ref = prompt("Referencia del pedido devuelto (ej. BEZEN12089 o 012227361-A):");
+  if (!ref || !ref.trim()) return;
+  if (await guardarDevolucion({ ref: ref.trim() })) loadDevoluciones();
+});
+
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(proto + "//" + location.host + "/pedidos/shopify/ws");
@@ -9727,6 +9878,8 @@ function connectWS() {
     loadAvisosCanceladosCount();
     loadCasos();
     loadTareas();
+    const vDev = document.getElementById("view-devoluciones-seur");
+    if (vDev.style.display !== "none" && !vDev.contains(document.activeElement)) loadDevoluciones();
   };
   ws.onclose = () => setTimeout(connectWS, 2000);
 }
@@ -11833,6 +11986,25 @@ async function handleFetch(request, env) {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do" + url.pathname.slice(4), request.method === "POST" ? { method: "POST", body: await request.text() } : {});
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
+    // Histórico de devueltos de SEUR (Jennifer, 2026-10-13).
+    if (url.pathname === "/api/seur/devoluciones" || url.pathname === "/api/seur/devoluciones/guardar") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do" + url.pathname.slice("/api/seur".length), request.method === "POST" ? { method: "POST", body: await request.text() } : {});
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname === "/api/seur/devoluciones/al-stock" && request.method === "POST") {
+      const { id, stockModel, talla, usuario, ref } = await request.json();
+      if (!id || !stockModel || !talla) return Response.json({ ok: false, error: "Falta el colchón." }, { status: 400 });
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const lista = await (await stub.fetch("https://do/devoluciones")).json();
+      const d = lista.find((x) => x.id === id);
+      if (!d) return Response.json({ ok: false, error: "Devolución no encontrada." }, { status: 404 });
+      if (d.alStock) return Response.json({ ok: false, error: "Esta devolución ya se pasó al stock." }, { status: 400 });
+      const row = await (await inventoryStub(env).fetch("https://do/stock/adjust", { method: "POST", body: JSON.stringify({ stockModel, talla, delta: 1, field: "cantidad", usuario, origen: "devolucion", orderRef: ref }) })).json();
+      await stub.fetch("https://do/devoluciones/guardar", { method: "POST", body: JSON.stringify({ id, alStock: { fecha: new Date().toISOString(), usuario: usuario || null, stockModel, talla }, destino: d.destino || "Vuelve al stock", usuario }) });
+      return Response.json({ ok: true, cantidad: row.cantidad });
     }
 
     if (url.pathname === "/api/seur/envios/info" && request.method === "POST") {

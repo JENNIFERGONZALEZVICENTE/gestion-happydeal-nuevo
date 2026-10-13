@@ -1347,6 +1347,57 @@ export class OrdersStore {
     // y Sergio siguen a diario. Cada caso: pedido, cliente, teléfono,
     // motivo, responsable, estado y un historial de notas (cada nota es un
     // seguimiento, con fecha y autor).
+    // Histórico de pedidos devueltos por SEUR (Jennifer, 2026-10-13). Entran
+    // solos cuando el seguimiento dice "Envío devuelto" o "se está devolviendo
+    // a origen", o a mano. Es un histórico: "quitar" solo los oculta
+    // (descartado), para que los automáticos no vuelvan a entrar.
+    if (url.pathname === "/devoluciones" && request.method === "GET") {
+      const orders = (await this.state.storage.get("orders")) || {};
+      const devoluciones = (await this.state.storage.get("devoluciones")) || [];
+      let nuevas = 0;
+      for (const o of Object.values(orders)) {
+        for (const t of o.seurTracking || []) {
+          if (!/envío devuelto|devolviendo a origen/i.test(t.estado || "")) continue;
+          const id = String(o.id) + "|" + (t.localizador || t.referencia || "");
+          // Una sola fila por pedido aunque SEUR tenga varios seguimientos.
+          if (devoluciones.some((d) => d.id === id || (d.origen === "auto" && String(d.orderId) === String(o.id)))) continue;
+          devoluciones.push({ id, orderId: o.id, origen: "auto", estadoDetectado: t.estado || "", localizador: t.localizador || t.referencia || "", creado: new Date().toISOString() });
+          nuevas++;
+        }
+      }
+      if (nuevas) await this.state.storage.put("devoluciones", devoluciones);
+      return Response.json(devoluciones.filter((d) => !d.descartado).map((d) => {
+        const o = orders[d.orderId] || {};
+        const tr = o.seurTracking || [];
+        const t = tr.find((x) => (x.localizador || x.referencia || "") === d.localizador) || tr[tr.length - 1] || null;
+        return { ...d, orderNumber: o.orderNumber, orderRef: o.orderRef, platform: o.platform, nombre: o.name || "", producto: o.product || "", estadoSeur: t ? t.estado || "" : "", seguimiento: t ? t.seguimiento || "" : "" };
+      }));
+    }
+    if (url.pathname === "/devoluciones/guardar" && request.method === "POST") {
+      const body = await request.json();
+      const devoluciones = (await this.state.storage.get("devoluciones")) || [];
+      const ahora = new Date().toISOString();
+      let d = body.id ? devoluciones.find((x) => x.id === body.id) : null;
+      if (body.id && !d) return Response.json({ ok: false, error: "Devolución no encontrada." }, { status: 404 });
+      if (!d) {
+        const orders = Object.values((await this.state.storage.get("orders")) || {});
+        const q = String(body.ref || "").trim().toUpperCase();
+        const o = orders.find((x) => x.orderRef && String(x.orderRef).toUpperCase() === q)
+          || orders.find((x) => (!x.platform || x.platform === "Shopify") && ("BEZEN" + x.orderNumber === q || String(x.orderNumber) === q));
+        if (!o) return Response.json({ ok: false, error: "No encuentro el pedido " + q + "." }, { status: 404 });
+        d = { id: String(o.id) + "|manual-" + Date.now(), orderId: o.id, origen: "manual", creado: ahora, creadoPor: body.usuario || null };
+        devoluciones.push(d);
+      }
+      for (const k of ["motivo", "estadoColchon", "destino", "fechaLlegada", "notas"]) if (body[k] !== undefined) d[k] = String(body[k] || "");
+      if (body.alStock !== undefined) d.alStock = body.alStock || null;
+      if (body.descartado !== undefined) d.descartado = !!body.descartado;
+      d.actualizado = ahora;
+      d.actualizadoPor = body.usuario || null;
+      await this.state.storage.put("devoluciones", devoluciones);
+      this.broadcast();
+      return Response.json({ ok: true, devolucion: d });
+    }
+
     if (url.pathname === "/casos" && request.method === "GET") {
       return Response.json((await this.state.storage.get("casos")) || []);
     }
@@ -1578,7 +1629,7 @@ export class OrdersStore {
         const dUTC = Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
         return Math.floor((hoyUTC - dUTC) / 86400000);
       }
-      const esEntregado = (estado) => (/ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "") && !/NO ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(estado || ""));
+      const esEntregado = (estado) => (/ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "") && !/NO ENTREGAD|NO SE HA ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(estado || ""));
       const ESTADOS_INMEDIATOS = [
         "El envío está retenido. pendiente de recibir instrucciones para poder realizar la entrega.",
         "El envío se está devolviendo a origen.",
