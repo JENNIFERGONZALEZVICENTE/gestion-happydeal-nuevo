@@ -5869,6 +5869,32 @@ async function checkAutoAddCarga(orderId) {
     }
     return;
   }
+  // Pedido que va por SEUR (Jennifer, 2026-10-13, topper N079 de BEZEN12283:
+  // "lo he marcado como recibido y no me sale en ningún sitio de las cargas
+  // de Seur" — se metía en la carga de Furniture del viernes). Va a la carga
+  // de SEUR: antes de las 15:00 la de hoy, después la de mañana; si está
+  // retenido con fecha, la de ese día cuando ya esté a la vista.
+  if (grupo.every(o => o.agencia === "SEUR")) {
+    const ret = retencionDe(order);
+    let fecha = "auto";
+    if (ret) {
+      if (!ret.hasta || ret.hasta > finVentanaSeur()) return;
+      if (ret.hasta > hoyMadrid()) fecha = ret.hasta;
+      await guardarRetencion([order.id], null);
+    }
+    const notaSeur = grupo.map(o => (o.notas || "").trim()).filter(Boolean).join(" / ");
+    if (notaSeur && !confirm(grupo.map(refLabel).join(" + ") + ' tiene una nota: "' + notaSeur + '". ¿Añadirlo a la carga de SEUR igualmente?')) return;
+    const rs = await fetch("/api/cargas/seur/add", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ orderIds: grupo.map(o => o.id), fecha }),
+    });
+    const ds = await rs.json().catch(() => ({}));
+    if (!rs.ok || !ds.ok) { alert(refLabel(order) + ": todo recibido, pero no se ha podido meter en la carga de SEUR. Mételo tú desde SEUR, por favor."); return; }
+    grupo.forEach(o => { o.cargaId = ds.carga.id; });
+    if (!allCargas.some(c => c.id === ds.carga.id)) allCargas.push(ds.carga);
+    mostrarAvisoBreve(grupo.map(refLabel).join(" + ") + ": todo recibido — sale en la " + formatSeurCargaTitulo(ds.carga) + ".");
+    return;
+  }
   // Retenido por el cliente (Jennifer, 2026-09-30): no sube solo salvo que
   // ya le toque por fecha.
   if (retencionDe(order) && !retencionCumplida(order)) return;
