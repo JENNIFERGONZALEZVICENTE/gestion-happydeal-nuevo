@@ -4774,7 +4774,85 @@ async function adjustStock(stockModel, talla, delta, field) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ stockModel, talla, delta, field, usuario: currentUser }),
   });
+  if (delta > 0 && (!field || field === "cantidad")) await asignarAltaAPendientes(stockModel, talla, delta);
   loadStock();
+}
+
+// "Marcar recibido" de un pendiente de SEUR (mismo comportamiento que el
+// botón de Proveedores): a la carga de hoy/mañana, o a la fecha programada
+// con email de reserva al almacén.
+async function marcarRecibidoSeur(bo) {
+  const programada = bo.orderId !== undefined ? fechaProgramadaSeur(bo) : null;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/resolver-seur", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha: programada || "auto" }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) return { ok: false, error: data.error };
+  if (programada) {
+    // La fecha programada solo se quita cuando ya no queda nada más de
+    // ese pedido por llegar (Jennifer, 2026-10-09, BEZEN12279: al marcar
+    // GC-003 se borró y GC-002, marcado justo después, se fue a la carga
+    // de hoy sin email de reserva).
+    const idsGrupo = new Set(pedidosDelGrupo(allOrders.find(o => o.id === bo.orderId) || { id: bo.orderId }).map(p => p.id));
+    const quedan = backorders.some(x => idsGrupo.has(x.orderId) && x.id !== bo.id && x.estado === "pendiente" && !x.recibidoFabrica);
+    if (!quedan) await guardarRetencion([bo.orderId], null);
+    // Aviso al almacén para que lo aparte hasta esa carga (Jennifer, 2026-10-06).
+    const rr = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/reservar-almacen?forzar=1", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agencia: "SEUR", fechaSalida: programada }),
+    });
+    const dr = await rr.json().catch(() => ({}));
+    return { ok: true, programada, emailOk: !!dr.ok };
+  }
+  return { ok: true, carga: data.carga };
+}
+
+// Alta en Stock con pedidos esperando ese colchón (Jennifer, 2026-10-13: "si
+// doy algo de alta en el stock y hay algún colchón pendiente de salir como
+// ese, lo suyo es que me avisaras de que lo has metido en la carga de
+// SEUR"). Del más antiguo al más nuevo: cada pendiente de SEUR que quepa en
+// las unidades dadas de alta se marca recibido (como el botón) y esa unidad
+// no se queda en el stock. Los que no van por SEUR (Furniture, recogida,
+// cuarentena, revisión...) no se tocan, solo se avisa.
+async function asignarAltaAPendientes(stockModel, talla, unidades) {
+  if (!(unidades > 0)) return;
+  try { backorders = await (await fetch("/api/inventario/pendientes")).json(); } catch (e) { return; }
+  const tallaU = String(talla).toUpperCase();
+  const todos = backorders.filter(b => b.estado === "pendiente" && !b.recibidoFabrica && !b.paraStock && b.tipo === "colchon"
+    && b.stockModel === stockModel && String(b.talla).toUpperCase() === tallaU)
+    .sort((a, b) => parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha));
+  if (!todos.length) return;
+  const recoge = b => { const o = allOrders.find(x => String(x.id) === String(b.orderId)); return !!(o && o.recogeCliente); };
+  const motivoNoSeur = b => b.cuarentena ? "en cuarentena" : b.revision ? "en revisión" : recoge(b) ? "lo recoge el cliente"
+    : (b.transformadoDesde || b.tipoEnvio === "FUR" || (b.reposicion && b.agenciaReposicion === "FURNITURE")) ? "va por Furniture"
+    : b.stockPedidoId ? "esperando un pedido para stock" : "";
+  let restante = unidades;
+  const metidos = [];
+  const otros = [];
+  for (const b of todos) {
+    const ref = refLabel(b) + (b.refSuffix || "");
+    const motivo = motivoNoSeur(b);
+    if (!motivo && restante >= b.cantidad) {
+      const r = await marcarRecibidoSeur(b);
+      if (r.ok) {
+        await fetch("/api/inventario/stock", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ stockModel, talla, delta: -b.cantidad, field: "cantidad", usuario: currentUser, origen: "alta-a-pendiente", orderRef: ref }) });
+        restante -= b.cantidad;
+        metidos.push(ref + " → " + (r.programada
+          ? "carga de SEUR del " + r.programada.slice(8, 10) + "/" + r.programada.slice(5, 7) + (r.emailOk ? " (email de reserva enviado al almacén)" : " (¡NO se pudo mandar el email de reserva, avisa tú al almacén!)")
+          : r.carga ? formatSeurCargaTitulo(r.carga) : "carga de SEUR"));
+        continue;
+      }
+      otros.push(ref + " (no se ha podido meter en SEUR: " + (r.error || "error") + ")");
+      continue;
+    }
+    otros.push(ref + (motivo ? " (" + motivo + ")" : b.cantidad > 1 ? " (necesita " + b.cantidad + " unidades)" : ""));
+  }
+  const NL = String.fromCharCode(10);
+  let txt = "";
+  if (metidos.length) txt += "Había " + (metidos.length === 1 ? "un pedido esperando" : "pedidos esperando") + " " + nombreCortoModelo(stockModel) + " " + talla
+    + ", así que " + (metidos.length === 1 ? "lo he metido" : "los he metido") + " en la carga de SEUR (esa unidad no se queda en el stock):" + NL + metidos.map(m => "• " + m).join(NL);
+  if (otros.length) txt += (txt ? NL + NL : "") + "Ojo: " + (otros.length === 1 ? "hay otro pendiente" : "hay otros pendientes") + " de este colchón que no he tocado:" + NL + otros.map(m => "• " + m).join(NL);
+  if (txt) alert(txt);
 }
 
 function updateQuickModeUI() {
@@ -4810,6 +4888,7 @@ async function quickAdjust(sign) {
   }
 
   resultEl.textContent = "Actualizado: " + body.stockModel + " " + body.talla + " → " + body.cantidad + " unidades.";
+  if (sign > 0) await asignarAltaAPendientes(body.stockModel, body.talla, qty);
   document.getElementById("quick-query").value = "";
   document.getElementById("quick-talla").value = "";
   document.getElementById("quick-qty").value = "1";
@@ -5303,31 +5382,12 @@ function renderPendientes() {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       const bo = backorders.find(x => x.id === btn.dataset.id);
-      const programada = bo ? fechaProgramadaSeur(bo) : null;
-      const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(btn.dataset.id) + "/resolver-seur", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha: programada || "auto" }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) { alert(data.error || "No se pudo preparar para SEUR."); btn.disabled = false; return; }
-      if (programada && bo) {
-        // La fecha programada solo se quita cuando ya no queda nada más de
-        // ese pedido por llegar (Jennifer, 2026-10-09, BEZEN12279: al marcar
-        // GC-003 se borró y GC-002, marcado justo después, se fue a la carga
-        // de hoy sin email de reserva).
-        const idsGrupo = new Set(pedidosDelGrupo(allOrders.find(o => o.id === bo.orderId) || { id: bo.orderId }).map(p => p.id));
-        const quedan = backorders.some(x => idsGrupo.has(x.orderId) && x.id !== bo.id && x.estado === "pendiente" && !x.recibidoFabrica);
-        if (!quedan) await guardarRetencion([bo.orderId], null);
-        // Aviso al almacén para que lo aparte hasta esa carga (Jennifer, 2026-10-06).
-        const rr = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/reservar-almacen?forzar=1", {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agencia: "SEUR", fechaSalida: programada }),
-        });
-        const dr = await rr.json().catch(() => ({}));
-        if (!dr.ok) alert("Recibido y programado para la carga del " + programada.slice(8, 10) + "/" + programada.slice(5, 7) + ", pero NO se ha podido mandar el email de reserva al almacén. Avísales tú, por favor.");
-        else mostrarAvisoBreve("Recibido: sale en la carga de SEUR del " + programada.slice(8, 10) + "/" + programada.slice(5, 7) + ". Email de reserva enviado al almacén.");
-        loadPendientes();
-        return;
-      }
-      if (data.carga) mostrarAvisoBreve("Recibido. Sale en la " + formatSeurCargaTitulo(data.carga) + " (se puede mover de día en SEUR).");
+      const r = await marcarRecibidoSeur(bo || { id: btn.dataset.id });
+      if (!r.ok) { alert(r.error || "No se pudo preparar para SEUR."); btn.disabled = false; return; }
+      if (r.programada) {
+        if (!r.emailOk) alert("Recibido y programado para la carga del " + r.programada.slice(8, 10) + "/" + r.programada.slice(5, 7) + ", pero NO se ha podido mandar el email de reserva al almacén. Avísales tú, por favor.");
+        else mostrarAvisoBreve("Recibido: sale en la carga de SEUR del " + r.programada.slice(8, 10) + "/" + r.programada.slice(5, 7) + ". Email de reserva enviado al almacén.");
+      } else if (r.carga) mostrarAvisoBreve("Recibido. Sale en la " + formatSeurCargaTitulo(r.carga) + " (se puede mover de día en SEUR).");
       loadPendientes();
     });
   });
@@ -9870,6 +9930,7 @@ document.addEventListener("click", async (e) => {
   const r = await res.json().catch(() => ({}));
   if (!res.ok || !r.ok) { alert(r.error || "No se ha podido pasar al stock."); return; }
   mostrarAvisoBreve("Sumado al stock: " + nombreCortoModelo(elegido.stockModel) + " " + elegido.talla + " (ahora hay " + r.cantidad + ")");
+  await asignarAltaAPendientes(elegido.stockModel, elegido.talla, 1);
   loadDevoluciones();
 });
 document.getElementById("devoluciones-search").addEventListener("input", renderDevoluciones);

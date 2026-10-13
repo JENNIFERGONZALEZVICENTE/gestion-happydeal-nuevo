@@ -3221,7 +3221,9 @@ export class InventoryStore {
       delta: Number(delta),
       resultante: row[targetField],
       // Colchón devuelto por SEUR que vuelve al stock (Jennifer, 2026-10-13).
-      origen: origen === "devolucion" ? "devolucion" : "manual",
+      // "alta-a-pendiente": la unidad dada de alta se fue directa a un
+      // pedido que la esperaba (Jennifer, 2026-10-13).
+      origen: ["devolucion", "alta-a-pendiente"].includes(origen) ? origen : "manual",
       usuario,
       orderRef: orderRef || undefined,
     });
