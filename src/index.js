@@ -2400,6 +2400,7 @@ function renderPage() {
     </select>
     <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;color:#b91c1c;font-weight:600"><input type="checkbox" id="envios-seur-solo-avisos" /> ⚠ Solo para reclamar (registrado +24 h)</label>
     <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;color:#1e40af;font-weight:600"><input type="checkbox" id="envios-seur-solo-punto" /> 📍 Solo en punto de recogida</label>
+    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;color:#c2410c;font-weight:600"><input type="checkbox" id="envios-seur-solo-ausencia" /> 📞 Solo ausencia o cierre (avisar al cliente)</label>
     <select id="envios-seur-pais"><option value="">Todos los países</option></select>
     <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="envios-seur-ocultar-entregados" checked /> Ocultar entregados</label>
     <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="envios-seur-ocultar-archivados" checked /> Ocultar archivados</label>
@@ -7620,8 +7621,13 @@ function renderEnviosSeur() {
   const ocultarArchivados = document.getElementById("envios-seur-ocultar-archivados").checked;
   const soloAvisos = document.getElementById("envios-seur-solo-avisos").checked;
   const soloPunto = document.getElementById("envios-seur-solo-punto").checked;
+  // Ausencia o cierre (Jennifer, 2026-10-13): "hay que estar muy pendientes
+  // porque hay que avisar al cliente de la situación".
+  const soloAusencia = document.getElementById("envios-seur-solo-ausencia").checked;
+  const esAusencia = e => /ausencia o cierre/i.test(e.estadoSeur || "") && !e.archivado;
   const filas = enviosSeur.filter(e =>
     (!soloAvisos || (e.aviso24h && !e.reclamado && !e.archivado)) &&
+    (!soloAusencia || esAusencia(e)) &&
     (!soloPunto || (e.enPunto && !e.archivado)) &&
     (!ocultarEntregados || !esEntregado(e)) &&
     (!ocultarArchivados || !e.archivado) &&
@@ -7635,6 +7641,8 @@ function renderEnviosSeur() {
   const enPunto = enviosSeur.filter(e => e.enPunto && !e.archivado).length;
   const avisos = [];
   if (pendientesReclamar) avisos.push("⚠ " + pendientesReclamar + (pendientesReclamar === 1 ? " envío sigue" : " envíos siguen") + " como «El envío ha sido registrado» más de 24 h después de cerrar la carga — hay que reclamarlos a SEUR. Marca «⚠ Solo para reclamar» para verlos.");
+  const nAusencia = enviosSeur.filter(esAusencia).length;
+  if (nAusencia) avisos.push("📞 " + nAusencia + (nAusencia === 1 ? " envío no se ha entregado" : " envíos no se han entregado") + " por ausencia o cierre — hay que avisar al cliente. Marca «📞 Solo ausencia o cierre» para verlos.");
   if (enPunto) avisos.push("📍 " + enPunto + (enPunto === 1 ? " envío se ha quedado" : " envíos se han quedado") + " en un punto de recogida de SEUR sin retirar — revísalos. Marca «📍 Solo en punto de recogida» para verlos.");
   avisoEl.style.display = avisos.length ? "" : "none";
   avisoEl.innerHTML = avisos.map(escapeAttr).join("<br>");
@@ -7648,8 +7656,9 @@ function renderEnviosSeur() {
       ? escapeAttr(e.estadoSeur) + (e.fechaSituacion ? '<br><span style="color:var(--muted);font-size:11px">' + escapeAttr(e.fechaSituacion) + '</span>' : "")
       : '<span style="color:var(--muted)">Sin seguimiento</span>';
     const avisoCelda = e.aviso24h && !e.archivado ? '<br><span class="badge" style="background:' + (e.reclamado ? "#fde68a;color:#78350f" : "#fee2e2;color:#b91c1c") + '">⚠ Sin recoger ' + Math.floor(e.horasDesdeCierre / 24) + ' día(s) tras cerrar la carga' + (e.reclamado ? " (reclamado)" : " — reclamar") + '</span>' : "";
+    const ausenciaCelda = esAusencia(e) ? '<br><span class="badge" style="background:#ffedd5;color:#c2410c">📞 Ausencia o cierre — avisar al cliente</span>' : "";
     const puntoCelda = e.enPunto && !e.archivado ? '<br><span class="badge" style="background:#dbeafe;color:#1e40af">📍 En punto de recogida — revisar</span>' : "";
-    const seguimiento = avisoCelda + puntoCelda + (e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver en SEUR</a>' : "");
+    const seguimiento = avisoCelda + ausenciaCelda + puntoCelda + (e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver en SEUR</a>' : "");
     const recl = e.reclamado
       ? '<span class="badge" style="background:#fde68a;color:#78350f">✔ Reclamado ' + (e.fechaReclamado ? new Date(e.fechaReclamado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Quitar</button>'
       : '<button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="1">Reclamado a SEUR</button>';
@@ -7657,7 +7666,7 @@ function renderEnviosSeur() {
     const nMsg = e.correo && e.correo.mensajes ? e.correo.mensajes.length : 0;
     const correoBtn = '<br><button type="button" class="secondary envio-seur-correo" data-i="' + i + '" style="margin-top:4px;padding:2px 8px;font-size:11px' + (e.correoNoLeidos ? ';background:#dc2626;color:#fff;border-color:#dc2626' : '') + '">' +
       (e.correoNoLeidos ? "💬 SEUR ha respondido (" + e.correoNoLeidos + ")" : nMsg ? "💬 Ver conversación (" + nMsg + ")" : "✉ Escribir a SEUR") + '</button>';
-    return '<tr' + (e.reclamado ? ' style="background:rgba(253,230,138,.25)"' : '') + '>' +
+    return '<tr' + (esAusencia(e) ? ' style="background:rgba(251,146,60,.18)"' : e.reclamado ? ' style="background:rgba(253,230,138,.25)"' : '') + '>' +
       '<td style="white-space:nowrap">' + (e.sinCarga ? "" : '<span style="font-size:11px;color:var(--muted)">' + escapeAttr(e.diaCarga || diaSemana(e.fechaCarga)) + '</span><br>') + '<strong>' + escapeAttr(fechaCorta(e.fechaCarga)) + '</strong>' + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío anterior a las cargas del sistema: sale aquí porque tiene conversación con SEUR">anterior a las cargas</span>' : '') + '</td>' +
       '<td>' + (e.refSeur && e.refSeur !== e.ref
         ? '<strong>' + escapeAttr(e.refSeur) + '</strong><br><span style="color:var(--muted);font-size:11px">antes ' + escapeAttr(e.ref) + '</span>'
@@ -7788,6 +7797,7 @@ try {
 document.getElementById("envios-seur-ocultar-archivados").addEventListener("change", renderEnviosSeur);
 document.getElementById("envios-seur-solo-avisos").addEventListener("change", renderEnviosSeur);
 document.getElementById("envios-seur-solo-punto").addEventListener("change", renderEnviosSeur);
+document.getElementById("envios-seur-solo-ausencia").addEventListener("change", renderEnviosSeur);
 document.getElementById("envios-seur-anadir-btn").addEventListener("click", async () => {
   const txt = prompt("Referencia del pedido que quieres añadir a Envíos SEUR (ej. 002-26208L28658-A o BEZEN12276):");
   if (!txt) return;
