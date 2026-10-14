@@ -2334,6 +2334,7 @@ function renderPage() {
       <input type="file" id="tracking-upload-input" accept=".xls,.htm,.html" style="display:none" />
       <span id="tracking-upload-status" class="inventario-count" style="padding:0"></span>
       <button type="button" id="tracking-report-btn" class="secondary" style="display:none">Descargar reporte de esta subida</button>
+      <input type="search" id="buscar-carga-furniture" placeholder="🔎 Buscar en esta carga (pedido, nombre, producto, ref. de fábrica…)" style="min-width:300px" />
     </div>
     <div id="carga-abierta-count" class="inventario-count"></div>
     <div class="table-wrap">
@@ -6279,6 +6280,7 @@ function renderPestanasFurniture() {
     + (c.fecha < hoyMadrid() ? "⚠ " : "") + formatCargaTitulo(c) + ' · ' + pedidosEnCargaFurniture(c.id) + ' pedidos</button>').join("");
   cont.querySelectorAll("[data-carga-tab]").forEach(btn => btn.addEventListener("click", () => {
     cargaFurnitureElegidaId = btn.dataset.cargaTab;
+    document.getElementById("buscar-carga-furniture").value = "";
     elegirCargaFurniture();
     renderFurniture();
   }));
@@ -6722,6 +6724,7 @@ function renderFurniture() {
       <td><button type="button" class="sacar-carga-reposicion-btn" data-repo-id="\${b.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-backorder-id="' + escapeAttr(b.id) + '"')}</td>
     </tr>
   \`).join("");
+  filtrarCargaFurniture();
   document.getElementById("sel-todos-furniture").checked = false;
   etiquetaDescargaFurniture();
   document.querySelectorAll(".sel-envio-fur").forEach(chk => chk.addEventListener("change", etiquetaDescargaFurniture));
@@ -6868,6 +6871,22 @@ function renderFurniture() {
   });
 }
 
+// Buscador dentro de la carga de Furniture (Jennifer, 2026-10-14), igual
+// que el de cada carga de SEUR: oculta las filas que no coinciden.
+function filtrarCargaFurniture() {
+  const q = document.getElementById("buscar-carga-furniture").value.trim().toLowerCase();
+  const filas = [...document.querySelectorAll("#carga-abierta-table tbody tr")];
+  let visibles = 0;
+  filas.forEach(tr => {
+    const texto = (tr.textContent + " " + [...tr.querySelectorAll("textarea, input[type=text]")].map(t => t.value).join(" ")).toLowerCase();
+    const ver = !q || texto.includes(q);
+    tr.style.display = ver ? "" : "none";
+    if (ver) visibles++;
+  });
+  document.getElementById("carga-abierta-count").textContent = (q ? visibles + " de " : "") + filas.length + " pedidos en esta carga";
+}
+document.getElementById("buscar-carga-furniture").addEventListener("input", filtrarCargaFurniture);
+
 function quedaPorFurniture(o) {
   return parseFechaGenerica(o.orderDate) >= new Date("2026-10-01T00:00:00").getTime() && !(o.furnitureTracking || []).length && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "pendiente" && !b.reposicion && !b.gestoComercial && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
 }
@@ -6982,6 +7001,7 @@ async function irALogistica(ir) {
   if (!ir) return;
   if (ir.cargaId) cargaFurnitureElegidaId = ir.cargaId;
   if (ir.vista === "furniture") {
+    document.getElementById("buscar-carga-furniture").value = "";
     document.getElementById("furniture-pedido-search").value = "";
     document.getElementById("furniture-referencia-search").value = "";
   }
