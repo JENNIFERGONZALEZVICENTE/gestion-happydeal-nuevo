@@ -9357,6 +9357,9 @@ function pedidosQueCoinciden(q, d) {
     // Referencias de SEUR ("…2", "GCBEZEN…", la cambiada a mano).
     const seur = (o.seurTracking || []).map(t => t.referencia).concat(Object.keys(o.enviosSeurInfo || {}), Object.values(o.enviosSeurInfo || {}).map(i => i.refSeur)).map(normBusca).filter(Boolean);
     if (seur.some(r => r === n)) return true;
+    // Referencia de fábrica de sus artículos (Jennifer, 2026-10-14: buscaba
+    // N053FUR y N060FUR y no salía nada).
+    if (n.length >= 4 && (d.bos || []).some(b => String(b.orderId) === String(o.id) && normBusca(b.referencia) === n)) return true;
     if (sinPrefijo.length >= 5 && refs.some(r => r.includes(sinPrefijo))) return true;
     if (texto.length >= 4 && /[a-z]/.test(texto) && (o.name || "").toLowerCase().includes(texto)) return true;
     const tel = n.replace(/^34/, "");
