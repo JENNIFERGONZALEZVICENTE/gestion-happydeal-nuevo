@@ -3187,6 +3187,25 @@ export class InventoryStore {
       resultante: quedan, origen: "abierto",
       usuario: usuario || null, orderNumber: entry.orderNumber, platform: entry.platform, orderRef: entry.orderRef,
     });
+    // Reposición (Jennifer, 2026-10-14, REPBEZEN12262): no sumó "vendido
+    // pendiente", así que no se descuenta; queda recibida (ya está en el
+    // almacén) y pendiente de meter en su carga de Furniture, como cualquier
+    // reposición, y ya no se pide a fábrica.
+    if (entry.reposicion) {
+      entry.desdeAbierto = true;
+      entry.fechaAbierto = new Date().toISOString();
+      entry.recibidoFabrica = true;
+      entry.fechaRecibido = entry.fechaAbierto;
+      entry.pedidoGenerado = true;
+      entry.fechaPedidoFabrica = null;
+      entry.tipoEnvio = "FUR";
+      // Un abierto solo sale por Furniture (Jennifer, 2026-09-28).
+      entry.agenciaReposicion = "FURNITURE";
+      entry.mercanciaFabrica = "REPOSICIÓN — sale de un colchón ABIERTO del almacén, no se pide a fábrica";
+      entry.reservaEnviada = null;
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, entry });
+    }
     const key = stockKey(entry.stockModel, entry.talla);
     const stock = await this.load("stock", {});
     const row = stock[key] || { stockModel: entry.stockModel, talla: entry.talla, cantidad: 0, vendidoPendiente: 0 };

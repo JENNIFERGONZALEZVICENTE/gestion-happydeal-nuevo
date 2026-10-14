@@ -4631,7 +4631,12 @@ function esTallaMayor(grande, pequena) {
 // se puede devolver para SEUR). Nunca uno ya sacado de un abierto,
 // transformado, de reposición o de gesto comercial.
 function colchonCandidatoAbierto(b) {
-  if (b.tipo !== "colchon" || b.reposicion || b.gestoComercial || b.desdeAbierto || b.transformadoDesde) return false;
+  if (b.tipo !== "colchon" || b.gestoComercial || b.desdeAbierto || b.transformadoDesde) return false;
+  // Reposición de colchón por Furniture sin recibir (Jennifer, 2026-10-14,
+  // REPBEZEN12262: "tengo uno abierto y no me has dicho nada"). Siempre, sea
+  // cual sea la agencia: "prefiero que siempre me avises y yo decido" — si
+  // iba por SEUR y se usa el abierto, pasa a Furniture.
+  if (b.reposicion) return b.estado === "pendiente" && !b.recibidoFabrica && !b.piezaManual;
   const conEnrollado = b.estado === "cubierto" && String(b.id).endsWith("-cubierto");
   if (b.estado !== "pendiente" && !conEnrollado) return false;
   const o = allOrders.find(x => x.id === b.orderId);
@@ -4647,7 +4652,7 @@ function abiertosParaBackorder(b) {
   const mismo = delModelo.find(a => a.talla === b.talla) || null;
   // Cortar solo aplica a lo que sigue pendiente (lo cubierto con enrollado
   // ya tiene la medida exacta: ahí solo tiene sentido "usar el abierto").
-  const cortar = b.estado === "pendiente" ? delModelo.filter(a => esTallaMayor(a.talla, b.talla)) : [];
+  const cortar = b.estado === "pendiente" && !b.reposicion ? delModelo.filter(a => esTallaMayor(a.talla, b.talla)) : [];
   return mismo || cortar.length ? { mismo, cortar } : null;
 }
 function oportunidadesAbiertos() {
@@ -4689,9 +4694,10 @@ async function usarAbierto(id) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) { alert(data.error || "No se ha podido usar el abierto."); return; }
-  alert(data.avisoReserva && data.avisoReserva.ok
+  alert((data.avisoReserva && data.avisoReserva.ok
     ? "Hecho: sale del abierto. Se ha enviado la reserva al almacén."
-    : "Hecho: sale del abierto, pero NO se ha podido enviar la reserva al almacén (" + ((data.avisoReserva && data.avisoReserva.reason) || "error") + "). Avísales tú, por favor.");
+    : "Hecho: sale del abierto, pero NO se ha podido enviar la reserva al almacén (" + ((data.avisoReserva && data.avisoReserva.reason) || "error") + "). Avísales tú, por favor.")
+    + (data.cargaFurniture ? " Metida en la carga de Furniture del " + (data.cargaFurniture.dia || "").toLowerCase() + " " + data.cargaFurniture.fecha.split("-").reverse().join("/") + "." : ""));
   await recargarTrasAbierto(b.orderId);
 }
 async function cortarAbierto(id, tallaAbierto) {
@@ -11552,6 +11558,17 @@ async function handleFetch(request, env) {
         });
         if (data.avisoReserva.ok) {
           await inventoryStub(env).fetch("https://do/backorders/" + usarAbiertoMatch[1] + "/reserva-enviada", { method: "POST", body: "{}" });
+        }
+        // Reposición con un abierto (Jennifer, 2026-10-14): ya está en el
+        // almacén, así que entra sola en la próxima carga de Furniture.
+        if (entry.reposicion && !entry.cargaId) {
+          const cargas = await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/cargas").then((r) => r.json());
+          const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+          const proxima = cargas.filter((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta" && c.fecha > hoy).sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
+          if (proxima) {
+            const add = await inventoryStub(env).fetch("https://do/admin/reposicion/carga-add", { method: "POST", body: JSON.stringify({ id: entry.id, cargaId: proxima.id }) });
+            if (add.ok) data.cargaFurniture = { fecha: proxima.fecha, dia: proxima.dia };
+          }
         }
       }
       return Response.json(data, { status: res.status });
