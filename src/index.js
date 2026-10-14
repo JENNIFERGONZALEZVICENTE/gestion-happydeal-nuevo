@@ -1873,6 +1873,10 @@ function renderPage() {
   #pendientes-filter-row th, #furniture-filter-row th { padding: 8px; background: #eef2f0; position: sticky; top: 34px; z-index: 2; border-top: 1px solid var(--border) !important; border-bottom: 3px solid var(--brand) !important; }
   #pendientes-filter-row input, #furniture-filter-row input { width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12.5px; font-weight: 400; text-transform: none; border: 1px solid var(--border); border-radius: 4px; }
   .pedido-generado-tag { display: block; font-size: 13px; font-weight: 600; color: #146138; margin-top: 4px; }
+  .nacex-tag { display: inline-block; margin: 4px 0 0 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 800; background: #ede9fe; color: #5b21b6; }
+  .nacex-box { margin: 8px 0; padding: 10px 14px; border: 2px solid #8b5cf6; border-radius: 10px; background: #f5f3ff; color: #4c1d95; }
+  .nacex-box ul { margin: 6px 0 0 18px; padding: 0; }
+  .nacex-listo { font-weight: 800; color: #166534; }
   .reposicion-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #fef3c7; color: #92400e; }
   .recoge-cliente-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #e0e7ff; color: #3730a3; }
   .gesto-comercial-tag { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; background: #f3e8ff; color: #6b21a8; }
@@ -2262,6 +2266,7 @@ function renderPage() {
     <button type="button" id="pedido-stock-btn" class="secondary" style="display:none" title="Pedir colchones a este proveedor para tener en stock, sin pedido de cliente detrás">📦 Pedido para stock</button>
     <span id="seleccion-count" class="inventario-count" style="padding:0"></span>
   </div>
+  <div id="nacex-aviso"></div>
   <div id="pendientes-count" class="inventario-count"></div>
   <div class="scroll-arriba" id="pendientes-scroll-arriba"><div></div></div>
   <div class="table-wrap" id="pendientes-wrap">
@@ -2626,6 +2631,18 @@ function renderPage() {
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Pieza exacta a reponer:</label>
     <select id="reposicion-pieza-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px"></select>
     <div id="reposicion-piezas-checks" style="display:none;border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow:auto"></div>
+    <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">¿Es otra cosa? Escríbela aquí (pletinas de unión, juego de hidráulicos, bisagras…):</label>
+    <input id="reposicion-pieza-otra" type="text" list="reposicion-otras-piezas" placeholder="Vacío si es una de las piezas de arriba" autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
+    <datalist id="reposicion-otras-piezas"><option value="PLETINAS DE UNIÓN"><option value="JUEGO DE HIDRÁULICOS"><option value="BISAGRAS"><option value="TORNILLERÍA"><option value="PATAS"><option value="TIRADOR"></datalist>
+    <div id="reposicion-otra-agencia-block" style="display:none">
+      <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Es otra cosa — ¿por dónde sale?</label>
+      <select id="reposicion-otra-agencia" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px">
+        <option value="">Elige una opción...</option>
+        <option value="FURNITURE">FURNITURE</option>
+        <option value="SEUR">SEUR</option>
+        <option value="NACEX">NACEX (no va en ninguna carga: aviso al recibirlo)</option>
+      </select>
+    </div>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Unidades:</label>
     <input id="reposicion-unidades" type="number" min="1" max="20" step="1" value="1" style="width:100px;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
     <div id="reposicion-colchon-agencia-block" style="display:none">
@@ -5178,7 +5195,31 @@ function mostrarAvisoBreve(texto) {
 }
 
 let pedidoFabricaSeleccion = new Set();
+// Envíos por NACEX (Jennifer, 2026-10-14): no hay cargas de NACEX, así que
+// se ven aquí, en cualquier pestaña de Proveedores, hasta marcarlos enviados.
+function renderNacexAviso() {
+  const cont = document.getElementById("nacex-aviso");
+  if (!cont) return;
+  const lista = backorders.filter(b => b.agenciaReposicion === "NACEX" && b.estado === "pendiente");
+  if (!lista.length) { cont.innerHTML = ""; return; }
+  cont.innerHTML = '<div class="nacex-box"><strong>📦 NACEX — ' + lista.length + ' envío(s) que salen por NACEX (no van en ninguna carga)</strong><ul>'
+    + lista.map(b => {
+      const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+      return '<li><strong>' + escapeAttr(refLabel(b)) + '</strong> · ' + escapeAttr(o.name || "") + ' · ' + escapeAttr(b.cantidad + "x " + b.stockModel + " " + (b.talla || "")) + ' (' + escapeAttr(b.proveedor || "") + ') — '
+        + (b.recibidoFabrica
+          ? '<span class="nacex-listo">✅ RECIBIDO: prepáralo por NACEX</span> <button type="button" class="secondary nacex-enviado-btn" data-id="' + escapeAttr(b.id) + '">✔ Enviado por NACEX</button>'
+          : 'esperando a que llegue de fábrica')
+        + '</li>';
+    }).join("") + '</ul></div>';
+  cont.querySelectorAll(".nacex-enviado-btn").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm("¿Ya ha salido por NACEX?")) return;
+    const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: btn.dataset.id, estado: "servido" }) });
+    if (!res.ok) { alert("No se ha podido marcar."); return; }
+    loadPendientes();
+  }));
+}
 function renderPendientes() {
+  renderNacexAviso();
   const busquedaReferencia = document.getElementById("pendientes-referencia-search").value.trim().toLowerCase();
   const busquedaPedido = document.getElementById("pendientes-pedido-search").value.trim().toLowerCase();
   // Filtro por SKU en Luso/New (Jennifer, 2026-09-22): cuando llega la
@@ -5378,7 +5419,7 @@ function renderPendientes() {
     // un colchón de pack en FPK sale independiente por SEUR (Jennifer,
     // 2026-09-30, BEZEN12117: la tapicería ya salió y los colchones "cuando
     // vengan saldrán por SEUR") — antes no tenía forma de prepararse para SEUR.
-    const esColchonSeur = !b.paraStock && ((((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") || esTopperSeur(b)) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial);
+    const esColchonSeur = !b.paraStock && ((((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") || esTopperSeur(b)) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial || (b.piezaManual && b.agenciaReposicion === "SEUR"));
     // Sustituir por otro modelo que sí hay en stock (Jennifer, 2026-09-18):
     // vale tanto para colchón suelto como de pack, mientras siga
     // "pendiente" — una vez preparado o sustituido ya no aplica. El propio
@@ -5414,7 +5455,7 @@ function renderPendientes() {
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", enCuarentena ? "fila-cuarentena" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
-      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}\${recoge ? '<span class="recoge-cliente-tag">🏬 RECOGE EL CLIENTE</span>' : ""}\${enCuarentena ? '<br><span class="cuarentena-tag" title="' + escapeAttr(b.cuarentena.motivo || "") + '">⏸ CUARENTENA' + (b.cuarentena.desde ? " " + new Date(b.cuarentena.desde).toLocaleDateString("es-ES") : "") + '</span><br><small>' + escapeAttr(b.cuarentena.motivo || "") + (b.cuarentena.usuario ? " (" + escapeAttr(b.cuarentena.usuario) + ")" : "") + '</small>' : ""}</td>
+      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.agenciaReposicion === "NACEX" ? '<span class="nacex-tag">📦 SALE POR NACEX</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}\${recoge ? '<span class="recoge-cliente-tag">🏬 RECOGE EL CLIENTE</span>' : ""}\${enCuarentena ? '<br><span class="cuarentena-tag" title="' + escapeAttr(b.cuarentena.motivo || "") + '">⏸ CUARENTENA' + (b.cuarentena.desde ? " " + new Date(b.cuarentena.desde).toLocaleDateString("es-ES") : "") + '</span><br><small>' + escapeAttr(b.cuarentena.motivo || "") + (b.cuarentena.usuario ? " (" + escapeAttr(b.cuarentena.usuario) + ")" : "") + '</small>' : ""}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
@@ -5919,6 +5960,11 @@ async function resolverPendiente(id) {
   const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST" });
   const entry = await res.json();
   avisarReservaAutomatica(entry);
+  // NACEX no está en las cargas (Jennifer, 2026-10-14: "cuando venga, tú me
+  // tienes que avisar").
+  if (entry && entry.recibidoFabrica && entry.agenciaReposicion === "NACEX" && !(before && before.recibidoFabrica)) {
+    alert("⚠ OJO: " + refLabel(entry) + " (" + entry.stockModel + ") SALE POR NACEX. No entra en ninguna carga: prepáralo para NACEX. Cuando salga, márcalo en el recuadro NACEX de Proveedores.");
+  }
   await loadPendientes();
   if (orderId != null && entry && entry.recibidoFabrica) await checkAutoAddCarga(orderId);
   if (entry && entry.recibidoFabrica) await checkAutoAddEnvioAparte(id);
@@ -6613,10 +6659,10 @@ function renderFurniture() {
   // pedido original, esté o no ya enviado. Una reposición de COLCHÓN por
   // SEUR (Jennifer, 2026-09-22) NO entra aquí — esa va por Luso/New +
   // "Preparar para SEUR", nunca por esta línea de Furniture.
-  const esRepoColchonSeur = b => b.tipo === "colchon" && b.agenciaReposicion === "SEUR";
+  const esRepoColchonSeur = b => (b.tipo === "colchon" || b.piezaManual) && b.agenciaReposicion === "SEUR";
   // Los artículos "enviados aparte" (Jennifer, 2026-09-29) van por este
   // mismo camino que las reposiciones: línea propia, su propia carga.
-  const esLineaPropia = b => (b.reposicion && b.estado === "pendiente" && !esRepoColchonSeur(b))
+  const esLineaPropia = b => (b.reposicion && b.estado === "pendiente" && !esRepoColchonSeur(b) && b.agenciaReposicion !== "NACEX")
     || (b.envioAparte && (b.estado === "pendiente" || b.estado === "cubierto"));
   const reposicionesEnCarga = cargaAbierta ? backorders.filter(b => esLineaPropia(b) && b.cargaId === cargaAbierta.id) : [];
   const reposicionesPendientes = backorders.filter(b => esLineaPropia(b) && !b.cargaId).filter(b => {
@@ -8724,6 +8770,9 @@ function abrirReposicionDesdePedido(orderId) {
     return \`<option value="\${i}">\${escapeAttr(label)}</option>\`;
   }).join("");
   document.getElementById("reposicion-motivo").value = "";
+  document.getElementById("reposicion-pieza-otra").value = "";
+  document.getElementById("reposicion-otra-agencia").value = "";
+  document.getElementById("reposicion-otra-agencia-block").style.display = "none";
   document.getElementById("reposicion-unidades").value = "1";
   document.getElementById("reposicion-modal-result").textContent = "";
   document.getElementById("reposicion-agencia-select").value = "";
@@ -8859,6 +8908,17 @@ document.getElementById("reposicion-piezas-checks").addEventListener("change", (
   }
 });
 document.getElementById("reposicion-item-select").addEventListener("change", cargarPiezasReposicion);
+// Otra cosa escrita a mano (Jennifer, 2026-10-14): se pregunta por dónde
+// sale (FURNITURE, SEUR o NACEX) en lugar de las preguntas del colchón.
+document.getElementById("reposicion-pieza-otra").addEventListener("input", (e) => {
+  const hay = !!e.target.value.trim();
+  document.getElementById("reposicion-otra-agencia-block").style.display = hay ? "" : "none";
+  document.getElementById("reposicion-colchon-agencia-block").style.display = !hay && ultimoTipoReposicion === "colchon" ? "" : "none";
+  if (hay) {
+    document.getElementById("reposicion-colchon-recogida-block").style.display = "none";
+    document.getElementById("reposicion-colchon-destino-block").style.display = "none";
+  }
+});
 // SEUR nunca hace recogidas (Jennifer, 2026-09-22) — la pregunta de
 // recogida solo tiene sentido si se eligió FURNITURE; y la pregunta de
 // destino solo si además se contestó "Sí" a la recogida.
@@ -8897,20 +8957,29 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
     ? [...document.querySelectorAll(".reposicion-pieza-check:checked")].map(c => Number(c.value))
     : (document.getElementById("reposicion-pieza-select").value !== "" ? [Number(document.getElementById("reposicion-pieza-select").value)] : []);
   if (canapeCompleto) piezasIdx = ultimasPiezasReposicion.map((p, i) => i);
-  if (conCasillas && !piezasIdx.length) {
+  // Pieza escrita a mano (Jennifer, 2026-10-14): pletinas, hidráulicos,
+  // bisagras... Manda sobre las piezas del desglose.
+  const piezaManual = document.getElementById("reposicion-pieza-otra").value.trim().toUpperCase();
+  if (piezaManual) piezasIdx = [];
+  if (conCasillas && !piezasIdx.length && !piezaManual) {
     resultEl.textContent = "Marca las piezas a reponer (o CANAPÉ COMPLETO).";
     return;
   }
   const piezasElegidas = piezasIdx.map(i => ultimasPiezasReposicion[i]).filter(Boolean);
   const piezaElegida = piezasElegidas.length === 1 ? piezasElegidas[0] : null;
   const nota = document.getElementById("reposicion-motivo").value.trim();
-  const textoPiezas = canapeCompleto ? "CANAPÉ COMPLETO" : piezasElegidas.map(p => p.texto).join(" + ");
+  const textoPiezas = piezaManual || (canapeCompleto ? "CANAPÉ COMPLETO" : piezasElegidas.map(p => p.texto).join(" + "));
   const piezaTexto = [textoPiezas, nota].filter(Boolean).join(" · ");
   // Validación específica de colchón (Jennifer, 2026-09-22): sin esto no se
   // sabe si va por SEUR o Furniture, ni si hace falta recogida.
   const agenciaReposicion = document.getElementById("reposicion-agencia-select").value;
   const recogidaValue = document.getElementById("reposicion-recogida-select").value;
   const recogidaDestino = document.getElementById("reposicion-destino-select").value;
+  const otraAgencia = document.getElementById("reposicion-otra-agencia").value;
+  if (piezaManual && !otraAgencia) {
+    resultEl.textContent = "Indica por dónde sale: FURNITURE, SEUR o NACEX.";
+    return;
+  }
   const cambio = datosCambioReposicion();
   if (cambio && (!cambio.productId || !cambio.talla)) {
     resultEl.textContent = "Para un cambio, elige el modelo y la medida nuevos.";
@@ -8921,7 +8990,7 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
     resultEl.textContent = "Indica cuántas unidades (de 1 a 20).";
     return;
   }
-  if (ultimoTipoReposicion === "colchon") {
+  if (ultimoTipoReposicion === "colchon" && !piezaManual) {
     if (!agenciaReposicion) {
       resultEl.textContent = "Indica si el colchón sale por SEUR o por FURNITURE.";
       return;
@@ -8947,18 +9016,19 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
       // del nombre completo del canapé (Jennifer, 2026-09-21) — las demás
       // características (medida, color) se conservan igual, vienen del
       // propio artículo resuelto en el servidor.
-      parte: piezaElegida?.parte || null,
+      parte: piezaManual || piezaElegida?.parte || null,
       // Varias piezas / canapé completo (Jennifer, 2026-10-07).
-      piezas: conCasillas ? piezasElegidas.map(p => p.parte) : null,
-      piezasIdx: conCasillas ? piezasIdx : null,
-      canapeCompleto,
+      piezas: conCasillas && !piezaManual ? piezasElegidas.map(p => p.parte) : null,
+      piezasIdx: conCasillas && !piezaManual ? piezasIdx : null,
+      canapeCompleto: canapeCompleto && !piezaManual,
+      piezaManual: piezaManual || null,
       // Para pedir el canapé completo con la receta normal (tapa partida o
       // reforzada, color desde el texto si el pedido no lo trae).
       services: reposicionOrderActual.services || "",
       productoTexto: reposicionOrderActual.product || "",
-      agenciaReposicion: ultimoTipoReposicion === "colchon" ? agenciaReposicion : null,
-      recogida: recogidaValue === "si",
-      recogidaDestino: recogidaValue === "si" ? recogidaDestino : null,
+      agenciaReposicion: piezaManual ? otraAgencia : ultimoTipoReposicion === "colchon" ? agenciaReposicion : null,
+      recogida: !piezaManual && recogidaValue === "si",
+      recogidaDestino: !piezaManual && recogidaValue === "si" ? recogidaDestino : null,
       cambio,
       unidades,
     }),
@@ -9423,7 +9493,7 @@ function fichaPedidoBuscador(o, d) {
       else lineas.push(b.pedidoGenerado || b.fechaPedidoFabrica
         ? "Pedido a fábrica" + (b.fechaPedidoFabrica ? " el " + diaBusca(b.fechaPedidoFabrica) : "") + (b.previsionEntrega ? " · llega aprox. el " + diaBusca(b.previsionEntrega) : "")
         : "SIN PEDIR a fábrica todavía");
-      lineas.push(c && c.estado === "abierta" ? "Metido en la carga de " + textoCarga(c) : "PENDIENTE DE ENVÍO");
+      lineas.push(c && c.estado === "abierta" ? "Metido en la carga de " + textoCarga(c) : "PENDIENTE DE ENVÍO" + (b.agenciaReposicion === "NACEX" ? " · SALE POR NACEX" : ""));
     } else if (b.estado === "servido") {
       cab = "YA ENVIADO";
       lineas.push("Referencia " + refEnvio);
@@ -10364,6 +10434,9 @@ function piezasBackorder(b, productoTexto, tapaPartida, servicios) {
   // - Beige") — en las etiquetas de Furniture solo se pone el color limpio
   // (Jennifer, 2026-08-27).
   const color = (b.color || "").replace(/^(tela|polipiel)\s*-\s*/i, "");
+  // Reposición de una pieza escrita a mano (Jennifer, 2026-10-14: pletinas,
+  // hidráulicos, bisagras...): un solo bulto con ese nombre.
+  if (b.piezaManual) return [{ parte: b.piezaManual, texto: [referencia, b.piezaManual, b.talla, color].filter(Boolean).join(" ") }];
 
   if (t.includes("canap")) {
     const medida = parseMedidaFurniture(b.talla);
@@ -10522,7 +10595,7 @@ async function buildFurnitureExport(env, cargaId) {
   // Una reposición de COLCHÓN por SEUR no entra aquí (Jennifer, 2026-09-22)
   // — esa va por Luso/New + "Preparar para SEUR", con su propia línea en el
   // fichero de exportación a SEUR (ver más abajo), no en Furniture.
-  const reposicionesEnCarga = backorders.filter((b) => b.reposicion && b.estado === "pendiente" && b.cargaId === carga.id && !(b.tipo === "colchon" && b.agenciaReposicion === "SEUR"));
+  const reposicionesEnCarga = backorders.filter((b) => b.reposicion && b.estado === "pendiente" && b.cargaId === carga.id && !((b.tipo === "colchon" || b.piezaManual) && b.agenciaReposicion === "SEUR") && b.agenciaReposicion !== "NACEX");
   for (const b of reposicionesEnCarga) {
     const o = orders.find((x) => x.id === b.orderId);
     if (!o) continue;
@@ -10653,7 +10726,7 @@ async function buildListadoAlmacen(env, cargaId) {
     if (!lineas.length) { fila(referenciaPedido(envio), o, "", o.product || "", 1); continue; }
     for (const b of lineas) fila(referenciaPedido(envio), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad, b);
   }
-  for (const b of backorders.filter((b) => b.reposicion && b.estado === "pendiente" && b.cargaId === carga.id && !(b.tipo === "colchon" && b.agenciaReposicion === "SEUR"))) {
+  for (const b of backorders.filter((b) => b.reposicion && b.estado === "pendiente" && b.cargaId === carga.id && !((b.tipo === "colchon" || b.piezaManual) && b.agenciaReposicion === "SEUR") && b.agenciaReposicion !== "NACEX")) {
     const o = orders.find((x) => x.id === b.orderId);
     if (o) fila("REP" + referenciaPedido(o), o, b.referencia, "REPOSICIÓN: " + [b.stockModel, b.talla, b.color].filter(Boolean).join(" "), b.cantidad);
   }

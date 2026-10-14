@@ -4046,7 +4046,12 @@ export class InventoryStore {
   // aparece: SEUR usa el mismo botón "Preparar para SEUR" que un colchón
   // suelto normal (ver esColchonSeur en index.js); FURNITURE usa la línea
   // independiente de Furniture, igual que una reposición de tapicería.
-  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades, piezas, piezasIdx, canapeCompleto, services, productoTexto }) {
+  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades, piezas, piezasIdx, canapeCompleto, services, productoTexto, piezaManual }) {
+    // Pieza escrita a mano (Jennifer, 2026-10-14): pletinas de unión, juego
+    // de hidráulicos, bisagras... Es el "modelo" de la reposición, nunca se
+    // descuenta stock de colchón por ella y no lleva desglose de piezas.
+    piezaManual = String(piezaManual || "").trim().toUpperCase() || null;
+    if (piezaManual) { canapeCompleto = false; piezas = null; piezasIdx = null; }
     const products = await this.load("products", {});
     const resolved = resolverItemReposicion(item, cambio, products);
     // Número de unidades (Jennifer, 2026-10-07: "tengo que poder elegir el
@@ -4061,7 +4066,10 @@ export class InventoryStore {
     if (!proveedor) {
       return Response.json({ ok: false, error: "Este artículo no tiene proveedor asignado en el Catálogo." }, { status: 400 });
     }
-    if (tipo === "colchon" && agenciaReposicion !== "SEUR" && agenciaReposicion !== "FURNITURE") {
+    if (piezaManual && !["FURNITURE", "SEUR", "NACEX"].includes(agenciaReposicion)) {
+      return Response.json({ ok: false, error: "Indica por dónde sale: FURNITURE, SEUR o NACEX." }, { status: 400 });
+    }
+    if (tipo === "colchon" && !piezaManual && agenciaReposicion !== "SEUR" && agenciaReposicion !== "FURNITURE") {
       return Response.json({ ok: false, error: "Falta indicar si el colchón sale por SEUR o por FURNITURE." }, { status: 400 });
     }
 
@@ -4108,7 +4116,7 @@ export class InventoryStore {
     // salen juntas por SEUR): `enStock` = unidades ya descontadas del stock;
     // al pedido a fábrica solo va cantidad - enStock.
     let enStock = 0;
-    if (tipo === "colchon") {
+    if (tipo === "colchon" && !piezaManual) {
       const congelado = await this.load("stockCongelado", false);
       const stock = await this.load("stock", {});
       const key = stockKey(product.stockModel, talla);
@@ -4148,7 +4156,8 @@ export class InventoryStore {
     // sola reposición (misma referencia, mismo pedido a fábrica y mismo
     // envío). El modelo es "TAPA + CAJÓN…" o el canapé completo.
     const variasPiezas = tieneDesglosePiezas && Array.isArray(piezas) && piezas.length > 1;
-    const stockModelFinal = !tieneDesglosePiezas || canapeCompleto ? product.stockModel
+    const stockModelFinal = piezaManual ? piezaManual
+      : !tieneDesglosePiezas || canapeCompleto ? product.stockModel
       : variasPiezas ? piezas.join(" + ")
       : (parte || product.stockModel);
 
@@ -4169,12 +4178,13 @@ export class InventoryStore {
       esPack: false, proveedor, needsDecision: false, referencia, mercanciaFabrica,
       platform, orderRef, reposicion: true, piezaTexto: piezaTexto || "",
       recibidoFabrica,
-      agenciaReposicion: tipo === "colchon" ? agenciaReposicion : null,
-      recogida: tipo === "colchon" && agenciaReposicion === "FURNITURE" ? !!recogida : false,
-      recogidaDestino: tipo === "colchon" && agenciaReposicion === "FURNITURE" && recogida ? (recogidaDestino || null) : null,
+      agenciaReposicion: piezaManual || tipo === "colchon" ? agenciaReposicion : null,
+      recogida: tipo === "colchon" && !piezaManual && agenciaReposicion === "FURNITURE" ? !!recogida : false,
+      recogidaDestino: tipo === "colchon" && !piezaManual && agenciaReposicion === "FURNITURE" && recogida ? (recogidaDestino || null) : null,
     });
     const nuevo = backorders.find((b) => b.id === id);
     if (enStock > 0) nuevo.enStock = enStock;
+    if (piezaManual) { nuevo.piezaManual = piezaManual; nuevo.stockModelArticulo = product.stockModel; }
     // Para sacar en Furniture un bulto por pieza elegida (ver
     // buildFurnitureExport): el modelo real del artículo y qué piezas son.
     if (tieneDesglosePiezas && Array.isArray(piezasIdx) && piezasIdx.length) {
