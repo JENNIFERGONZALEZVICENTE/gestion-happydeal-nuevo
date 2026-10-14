@@ -35,7 +35,7 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal", "recogeCliente", "agenciaAntesDeRecogida", "entregadoCliente"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal", "recogeCliente", "agenciaAntesDeRecogida", "entregadoCliente", "sinAvisoSeguimiento", "motivoFueraCarga"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -676,6 +676,33 @@ export class OrdersStore {
       if (carga && carga.tipo === "seur") order.cargaId = null;
       for (const t of order.seurTracking || []) t.anulado = true;
       order.noSalioSeur = new Date().toISOString();
+      // Cuando salga de verdad, Shopify solo actualiza el seguimiento sin
+      // avisar al cliente (Jennifer, 2026-10-14: "para no dar confusión").
+      order.sinAvisoSeguimiento = true;
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+
+    // Sacar de la carga de SEUR preguntando el motivo (Jennifer, 2026-10-14,
+    // BEZEN12311): el cliente lo quiere otro día (cargaId = la carga de esa
+    // fecha) u otro motivo (cargaId null, queda en "fuera de carga" con la
+    // nota). Las etiquetas ya registradas dejan de valer (habrá que hacer una
+    // nueva) y, si ya constaba enviado en Shopify, al salir de verdad solo se
+    // actualiza el seguimiento, sin avisar al cliente.
+    if (url.pathname === "/orders/fuera-carga-seur" && request.method === "POST") {
+      const { orderId, cargaId, motivo } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      if (cargaId && !cargas.some((c) => c.id === cargaId && c.tipo === "seur" && c.estado === "abierta")) {
+        return Response.json({ ok: false, error: "La carga de destino no está abierta." }, { status: 409 });
+      }
+      order.cargaId = cargaId || null;
+      for (const t of order.seurTracking || []) t.anulado = true;
+      order.sinAvisoSeguimiento = true;
+      order.motivoFueraCarga = cargaId ? null : { texto: String(motivo || "").trim(), fecha: new Date().toISOString() };
       await this.state.storage.put("orders", orders);
       this.broadcast();
       return Response.json({ ok: true });
@@ -1262,6 +1289,7 @@ export class OrdersStore {
           paraShopify.push({
             orderId: order.id, orderNumber: e.orderNumber, trackingNumber: numero, trackingUrl: e.seguimiento, company: "SEUR",
             primerEnvio: !order.shopifyFulfilled, fulfillmentId: order.shopifyFulfillmentId || null,
+            avisarCliente: !order.sinAvisoSeguimiento,
           });
         }
       }

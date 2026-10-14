@@ -1986,13 +1986,27 @@ export class InventoryStore {
     // `seleccion` opcional (Jennifer, 2026-09-29): [{ id, unidades }] — solo
     // esas unidades no han salido; el resto sigue en la carga. Sin
     // selección, todos los colchones del pedido.
+    // Sacar de la carga de SEUR para otro día u otro motivo (Jennifer,
+    // 2026-10-14): lo cubierto con stock que ya se había dado por servido
+    // al subir la etiqueta vuelve a "cubierto" (sigue en el almacén). El
+    // stock no se toca.
+    if (url.pathname === "/backorders/volver-a-cubierto" && method === "POST") {
+      const { orderId } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const tocados = backorders.filter((b) => String(b.orderId) === String(orderId) && b.estado === "servido" && String(b.id).endsWith("-cubierto") && !b.envioAparte);
+      for (const b of tocados) b.estado = "cubierto";
+      if (tocados.length) await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, ids: tocados.map((b) => b.id) });
+    }
     if (url.pathname === "/backorders/no-salio" && method === "POST") {
       const { orderId, seleccion } = await request.json();
       const backorders = await this.load("backorders", []);
       const stock = await this.load("stock", {});
-      const esDeSeur = (b) => String(b.orderId) === String(orderId) && b.tipo === "colchon"
-        && !b.reposicion && !b.gestoComercial
-        && (b.estado === "listo-seur" || (b.estado === "cubierto" && String(b.id).endsWith("-cubierto")));
+      // También lo ya dado por "servido" al subir la etiqueta (Jennifer,
+      // 2026-10-14, BEZEN12311: se subió la etiqueta y no había mercancía).
+      const esDeSeur = (b) => String(b.orderId) === String(orderId) && (b.tipo === "colchon" || b.tipo === "topper")
+        && !b.reposicion && !b.gestoComercial && !b.envioAparte
+        && (b.estado === "listo-seur" || b.estado === "servido" || (b.estado === "cubierto" && String(b.id).endsWith("-cubierto")));
       let afectados;
       if (Array.isArray(seleccion) && seleccion.length) {
         afectados = [];

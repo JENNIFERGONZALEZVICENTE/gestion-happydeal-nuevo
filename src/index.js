@@ -460,14 +460,17 @@ async function seleccionarLineasReales(env, realLineItems, lineItemsInfo, compan
   return seleccion.length ? seleccion : realLineItems;
 }
 
-async function shopifyFulfillOrder(env, { orderId, trackingNumber, trackingUrl, company, primerEnvio, fulfillmentId }) {
+// avisarCliente:false (Jennifer, 2026-10-14): el pedido ya constaba enviado
+// pero no salió (o se reprogramó); al salir de verdad se cambia el
+// seguimiento sin mandar otro aviso al cliente.
+async function shopifyFulfillOrder(env, { orderId, trackingNumber, trackingUrl, company, primerEnvio, fulfillmentId, avisarCliente }) {
   if (!primerEnvio) {
     if (!fulfillmentId) return { ok: false, orderId, reason: "sin_fulfillment_previo_guardado" };
     const res = await fetch(`https://${env.SHOPIFY_SHOP_DOMAIN}/admin/api/2026-07/fulfillments/${fulfillmentId}/update_tracking.json`, {
       method: "POST",
       headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN, "content-type": "application/json" },
       body: JSON.stringify({
-        fulfillment: { tracking_info: { number: trackingNumber, url: trackingUrl, company }, notify_customer: true },
+        fulfillment: { tracking_info: { number: trackingNumber, url: trackingUrl, company }, notify_customer: avisarCliente !== false },
       }),
     });
     if (!res.ok) return { ok: false, orderId, reason: "update_tracking_error", detail: await res.text() };
@@ -1530,6 +1533,10 @@ function renderPage() {
     z-index: 1000;
   }
   .modal-overlay.open { display: flex; }
+  .sacar-seur-opcion { display: block; border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 8px 10px; margin: 8px 0; cursor: pointer; }
+  .sacar-seur-opcion input[type=date], .sacar-seur-opcion textarea { display: block; margin-top: 6px; width: 100%; box-sizing: border-box; font: inherit; }
+  .sacar-seur-desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .sacar-seur-aviso { background: #fff7ed; border: 1px solid #fdba74; border-radius: 6px; padding: 6px 8px; font-size: 12px; }
   .caso-campo { display: block; font-size: 13px; margin: 8px 0; }
   .caso-campo input, .caso-campo textarea, .caso-campo select { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; }
   .caso-pedido-info { font-size: 12px; color: var(--muted); margin: -2px 0 6px; }
@@ -3102,6 +3109,76 @@ function elegirUnidades({ titulo, texto, filas, boton, peligro }) {
       if (!elegidas.length) { alert("Marca al menos una."); return; }
       cerrar(elegidas);
     });
+  });
+}
+
+// Sacar de la carga de SEUR preguntando el motivo (Jennifer, 2026-10-14,
+// BEZEN12311: se sacó porque no había mercancía y se quedó sin volver a
+// Luso). Tres casos: no hay mercancía (como "No ha salido"), el cliente lo
+// quiere otro día y sí está en stock (a la carga de esa fecha + reserva al
+// almacén) u otro motivo (queda fuera de carga con una nota).
+function colchonesParaSacarSeur(order) {
+  return backorders.filter(b => String(b.orderId) === String(order.id) && (b.tipo === "colchon" || b.tipo === "topper")
+    && !b.reposicion && !b.gestoComercial && !b.envioAparte
+    && (b.estado === "listo-seur" || b.estado === "servido" || (b.estado === "cubierto" && String(b.id).endsWith("-cubierto"))));
+}
+function preguntarSacarSeur(order) {
+  const etiquetaViva = (order.seurTracking || []).some(t => !t.anulado);
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay open";
+  overlay.innerHTML = '<div class="modal-box">'
+    + '<h3>¿Por qué sacas ' + escapeAttr(refLabel(order)) + ' de la carga?</h3>'
+    + '<label class="sacar-seur-opcion"><input type="radio" name="sacar-seur" value="no-hay"> <strong>No hay mercancía / no ha llegado</strong>'
+    + '<div class="sacar-seur-desc">Vuelve a pendiente en su proveedor (Luso/New) para pedirlo de nuevo, con la referencia siguiente (…2).</div></label>'
+    + '<label class="sacar-seur-opcion"><input type="radio" name="sacar-seur" value="otro-dia"> <strong>El cliente lo quiere para otro día (sí está en stock)</strong>'
+    + '<div class="sacar-seur-desc">Pasa a la carga de ese día y se manda al almacén el correo de reserva para que lo aparten hasta entonces.</div>'
+    + '<input type="date" class="sacar-seur-fecha" min="' + hoyMadrid() + '" value="' + primerDiaSeur() + '"></label>'
+    + '<label class="sacar-seur-opcion"><input type="radio" name="sacar-seur" value="otro"> <strong>Otro motivo</strong>'
+    + '<div class="sacar-seur-desc">Queda en "Pedidos de SEUR fuera de carga" con esta nota, para decidir más adelante.</div>'
+    + '<textarea class="sacar-seur-nota" rows="2" placeholder="¿Por qué?"></textarea></label>'
+    + (etiquetaViva ? '<p class="sacar-seur-aviso">⚠ Este pedido ya tiene etiqueta registrada en SEUR: queda anulada aquí, pero anúlala también en la web de SEUR.' + (order.shopifyFulfilled ? ' En Shopify ya consta enviado: cuando salga de verdad se cambiará el seguimiento sin avisar al cliente.' : '') + '</p>' : '')
+    + '<div class="modal-actions"><button type="button" class="secondary" data-accion="cancelar">Volver</button>'
+    + '<button type="button" data-accion="ok">Sacar de la carga</button></div></div>';
+  document.body.appendChild(overlay);
+  const cerrar = () => overlay.remove();
+  overlay.addEventListener("click", async (ev) => {
+    if (ev.target === overlay || ev.target.dataset.accion === "cancelar") return cerrar();
+    if (ev.target.dataset.accion !== "ok") return;
+    const elegido = overlay.querySelector('input[name="sacar-seur"]:checked');
+    if (!elegido) { alert("Elige por qué lo sacas."); return; }
+    const motivo = elegido.value;
+    const fecha = overlay.querySelector(".sacar-seur-fecha").value;
+    let res;
+    if (motivo === "no-hay") {
+      const colchones = colchonesParaSacarSeur(order);
+      if (!colchones.length) { alert("Este pedido no tiene ningún colchón o topper de SEUR que devolver a su proveedor."); return; }
+      res = await fetch("/api/pedidos/no-salio", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderId: order.id, seleccion: colchones.map(b => ({ id: b.id, unidades: b.cantidad || 1 })) }),
+      });
+    } else {
+      const nota = overlay.querySelector(".sacar-seur-nota").value.trim();
+      if (motivo === "otro-dia") { const error = errorFechaSeur(fecha); if (error) { alert(error); return; } }
+      if (motivo === "otro" && !nota) { alert("Escribe el motivo en la nota."); return; }
+      res = await fetch("/api/pedidos/seur/fuera-carga", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderId: order.id, motivo, fecha, nota }),
+      });
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) { alert(data.error || "No se ha podido sacar de la carga."); return; }
+    cerrar();
+    if (motivo === "no-hay") {
+      alert("Hecho: " + data.afectados.map(b => b.cantidad + "x " + nombreCortoModelo(b.stockModel) + " " + b.talla).join(", ")
+        + " vuelve a pendiente en " + [...new Set(data.afectados.map(b => b.proveedor))].join("/") + " con la referencia " + refLabel(order) + data.afectados[0].refSuffix + ".");
+    } else if (motivo === "otro-dia") {
+      const reservas = data.reservas || [];
+      alert("Hecho: pasa a la carga del " + new Date(fecha + "T00:00:00").toLocaleDateString("es-ES") + ". "
+        + (!reservas.length ? "No había nada cubierto con stock para reservar en el almacén." : reservas.some(x => !x.ok) ? "⚠ No se ha podido mandar el correo de reserva al almacén: mándalo a mano." : "Correo de reserva enviado al almacén."));
+    }
+    backorders = await (await fetch("/api/inventario/pendientes")).json();
+    await loadOrders();
+    loadSeur();
   });
 }
 
@@ -8110,7 +8187,7 @@ function renderSeurDecisionBox() {
 // que en Furniture, se quedan aquí para volver a meterlos en la carga de
 // hoy o de mañana, o marcar que no han salido (↩, vuelven al proveedor).
 function pedidosSeurFueraDeCarga() {
-  return allOrders.filter(o => o.agencia === "SEUR" && !o.cargaId && !o.cancelado && o.shippingStatus !== "fulfilled"
+  return allOrders.filter(o => o.agencia === "SEUR" && !o.cargaId && !o.cancelado && (o.shippingStatus !== "fulfilled" || o.motivoFueraCarga)
     && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "cubierto" && String(b.id).endsWith("-cubierto")));
 }
 // Ventana de cargas de SEUR a la vista (Jennifer, 2026-09-30): los 5
@@ -8163,6 +8240,7 @@ function renderSeurFueraCarga() {
           <tbody>\${pedidos.map(o => \`<tr>
             \${seurOrderRowCells(o, "")}
             <td>
+              \${o.motivoFueraCarga && o.motivoFueraCarga.texto ? '<div class="sacar-seur-desc">📝 ' + escapeAttr(o.motivoFueraCarga.texto) + '</div>' : ""}
               <input type="date" class="seur-readd-fecha" data-order-id="\${escapeAttr(String(o.id))}" min="\${hoyMadrid()}" value="\${diaPorDefecto}" />
               <button type="button" class="seur-readd-btn" data-order-id="\${escapeAttr(String(o.id))}">A la carga</button>
               \${noSalioButton(o)}
@@ -8270,12 +8348,7 @@ function renderSeurCargas() {
   document.querySelectorAll(".sacar-carga-seur-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       const order = allOrders.find(o => String(o.id) === btn.dataset.orderId);
-      if (!confirm("¿Sacar " + (order ? refLabel(order) : "este pedido") + " de la carga de SEUR?\\n\\nQuedará en \\"Pedidos de SEUR fuera de carga\\", abajo, para volver a meterlo en otra carga cuando quieras.")) return;
-      await fetch("/api/cargas/remove", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: order ? order.id : btn.dataset.orderId }),
-      });
-      if (order) order.cargaId = null;
-      loadSeur();
+      if (order) preguntarSacarSeur(order);
     });
   });
   document.querySelectorAll(".quitar-seur-btn").forEach(btn => {
@@ -12248,6 +12321,39 @@ async function handleFetch(request, env) {
     // Cualquier día laborable futuro (Jennifer: "el cliente solicita que se
     // mande mucho más adelante, por ejemplo en 15 días"): si la carga de ese
     // día aún no existe, se crea.
+    // Sacar de la carga de SEUR preguntando el motivo (Jennifer, 2026-10-14).
+    // "No hay mercancía" va por /api/pedidos/no-salio. Aquí:
+    // - "otro-dia": el cliente lo quiere otro día y SÍ está en stock → a la
+    //   carga de esa fecha + email de reserva al almacén ("sale el …, NO antes").
+    // - "otro": queda en "Pedidos de SEUR fuera de carga" con la nota.
+    if (url.pathname === "/api/pedidos/seur/fuera-carga" && request.method === "POST") {
+      const { orderId, motivo, fecha, nota } = await request.json();
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      let cargaId = null;
+      if (motivo === "otro-dia") {
+        const error = errorFechaCargaSeur(fecha);
+        if (error) return Response.json({ ok: false, error }, { status: 400 });
+        cargaId = (await stub.fetch("https://do/cargas/seur/get-or-create", { method: "POST", body: JSON.stringify({ fecha }) }).then((r) => r.json())).id;
+      } else if (motivo !== "otro") {
+        return Response.json({ ok: false, error: "Motivo no válido." }, { status: 400 });
+      }
+      await inventoryStub(env).fetch("https://do/backorders/volver-a-cubierto", { method: "POST", body: JSON.stringify({ orderId }) });
+      const r = await stub.fetch("https://do/orders/fuera-carga-seur", { method: "POST", body: JSON.stringify({ orderId, cargaId, motivo: nota }) });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.ok) return Response.json(data, { status: r.status || 500 });
+      const reservas = [];
+      if (cargaId) {
+        const backorders = await inventoryStub(env).fetch("https://do/backorders").then((x) => x.json());
+        const cubiertos = backorders.filter((b) => String(b.orderId) === String(orderId) && b.estado === "cubierto" && String(b.id).endsWith("-cubierto"));
+        for (const b of cubiertos) {
+          const aviso = await reservarStockManual(env, b, { agencia: "SEUR", fechaSalida: fecha });
+          if (aviso.ok) await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(b.id) + "/reserva-enviada", { method: "POST", body: "{}" });
+          reservas.push({ id: b.id, ok: !!aviso.ok });
+        }
+      }
+      return Response.json({ ok: true, cargaId, reservas });
+    }
+
     if (url.pathname === "/api/cargas/seur/mover" && request.method === "POST") {
       const { orderId, backorderId, fecha } = await request.json();
       const error = errorFechaCargaSeur(fecha);
