@@ -6619,7 +6619,10 @@ function renderFurniture() {
   document.getElementById("descargar-carga-btn").disabled = !cargaAbierta;
   document.getElementById("listado-almacen-btn").disabled = !cargaAbierta;
 
-  const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && o.shippingStatus !== "fulfilled" && !o.gestionadoExterno && !esMiembroSecundario(o));
+  // Ya enviado en Shopify pero con lo de Furniture aún sin salir (Jennifer,
+  // 2026-10-14, BEZEN12259: el colchón del pack salió antes por SEUR).
+  const quedaPorFurniture = o => !(o.furnitureTracking || []).length && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "pendiente" && !b.reposicion && !b.gestoComercial && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
+  const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && (o.shippingStatus !== "fulfilled" || quedaPorFurniture(o)) && !o.gestionadoExterno && !esMiembroSecundario(o));
   // Todo lo que está en la carga abierta se ve en ella, aunque en Shopify ya
   // figure como enviado (Jennifer, 2026-09-29, caso BEZEN12194: marcado como
   // enviado en el sistema antiguo pero sale en esta carga).
