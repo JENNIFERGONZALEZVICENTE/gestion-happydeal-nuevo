@@ -1564,6 +1564,12 @@ function renderPage() {
   .modal-box-wide { width: min(760px, 92vw); }
   #buscador-general { width: 230px; padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.4); font: inherit; font-size: 13px; }
   .buscador-datos { font-size: 13px; line-height: 1.5; margin: 6px 0 10px; }
+  .buscador-estado { display: grid; gap: 8px; margin: 8px 0 10px; }
+  .buscador-estado-art { border: 2px solid; border-radius: 10px; padding: 10px 14px; font-size: 14px; }
+  .buscador-estado-art.no { border-color: #fca5a5; background: #fee2e2; color: #991b1b; }
+  .buscador-estado-art.ok { border-color: #86efac; background: #dcfce7; color: #166534; }
+  .buscador-estado-cab { font-size: 20px; font-weight: 800; letter-spacing: 0.5px; }
+  .buscador-estado-nom { font-weight: 600; margin-bottom: 4px; }
   .buscador-aviso { margin: 8px 0 10px; padding: 12px 16px; border: 2px solid #f59e0b; border-radius: 10px; background: #fef3c7; color: #92400e; font-size: 22px; font-weight: 800; text-align: center; letter-spacing: 0.5px; }
   .buscador-nota { margin-top: 4px; padding: 4px 8px; background: #fef9c3; border-radius: 6px; }
   .buscador-seg { margin: 8px 0 10px; padding: 10px 14px; border: 2px solid #dc2626; border-radius: 10px; background: #fef2f2; font-size: 18px; font-weight: 700; }
@@ -9303,7 +9309,10 @@ function fichaPedidoBuscador(o, d) {
     add(fechaBusca(b.fechaTransformacion), "Transformado: " + art);
   }
   const movs = d.movs.filter(m => m.orderNumber && String(m.orderNumber) === String(o.orderNumber) && (m.platform || "Shopify") === (o.platform || "Shopify") && (!o.orderRef || !m.orderRef || m.orderRef === o.orderRef));
-  for (const m of movs) add(fechaBusca(m.fecha), "Stock " + (m.delta > 0 ? "+" : "") + m.delta + " " + (m.campo === "vendidoPendiente" ? "vendido pendiente" : "unidades") + ": " + nombreCortoModelo(m.stockModel) + " " + (m.talla || "") + (m.origen ? " (" + m.origen + ")" : ""), m.usuario);
+  // Textos claros (Jennifer, 2026-10-14: "Stock +1 vendido pendiente"
+  // parecía un alta de stock).
+  const ORIGEN_MOV = { venta: "venta: se usa del stock", envio: "enviado", "no-salio": "no había stock: se pide al proveedor", manual: "a mano", devolucion: "devolución", "alta-a-pendiente": "alta asignada a este pedido" };
+  for (const m of movs) add(fechaBusca(m.fecha), (m.campo === "vendidoPendiente" ? "Pendiente de recibir del proveedor " : "Stock en almacén ") + (m.delta > 0 ? "+" : "") + m.delta + ": " + nombreCortoModelo(m.stockModel) + " " + (m.talla || "") + (m.origen ? " (" + (ORIGEN_MOV[m.origen] || m.origen) + ")" : ""), m.usuario);
   // Cargas en las que ha salido (las cerradas guardan sus envíos).
   for (const c of d.cargas) {
     const envs = (c.envios || []).filter(e => String(e.orderId) === String(o.id));
@@ -9336,7 +9345,8 @@ function fichaPedidoBuscador(o, d) {
   // Dónde está ahora.
   const donde = [];
   if (o.cancelado || o.shopifyCancelado) donde.push("❌ Pedido CANCELADO");
-  donde.push("📦 Pedidos · " + (o.platform || "Shopify") + (o.agencia ? " — agencia " + o.agencia : "") + (o.shippingStatus === "fulfilled" || o.shopifyFulfilled ? " — enviado" : ""));
+  const lineaPedidos = "📦 Pedidos · " + (o.platform || "Shopify") + (o.agencia ? " — agencia " + o.agencia : "") + (o.shippingStatus === "fulfilled" || o.shopifyFulfilled ? " — enviado" : "");
+  donde.push(lineaPedidos);
   if (o.cargaId) donde.push("🚚 En la carga de " + textoCarga(cargaDe(o.cargaId)));
   if (o.retenido) donde.push("⏸ Retenido" + (o.retenido.hasta ? " hasta el " + fechaHoraBusca(fechaBusca(o.retenido.hasta), true) : ""));
   if (o.recogeCliente) donde.push("🙋 Lo recoge el cliente" + (o.entregadoCliente ? " (ya entregado)" : ""));
@@ -9386,9 +9396,48 @@ function fichaPedidoBuscador(o, d) {
   const enviado = enviadoReal || o.shippingStatus === "fulfilled" || !!o.shopifyFulfilled || !!o.gestionadoExterno ||
     /^(enviado|recibido|cerrado|incidencia abierta)$/i.test(o.estado || "");
   const cancelado = o.cancelado || o.shopifyCancelado || o.shippingStatus === "restocked" || /^(cancelado|rechazado|reembolsado)$/i.test(o.estado || "");
+  // Estado de cada artículo, claro y arriba (Jennifer, 2026-10-14): si hay o
+  // no hay stock, en qué carga va, si ya salió y con qué referencia se pide.
+  const TIPOS_DE_STOCK = ["colchon", "topper", "almohada", "protector"];
+  const cargaDeArt = b => cargaDe(b.cargaId) || (b.estado !== "pendiente" ? cargaDe(o.cargaId) : null);
+  const diaBusca = x => fechaHoraBusca(fechaBusca(x), true);
+  const articulosVivos = bos.filter(b => b.estado !== "cancelado" && !b.paraStock);
+  const faltaPorSalir = articulosVivos.some(b => {
+    const c = cargaDeArt(b);
+    return (b.estado === "pendiente" || b.estado === "cubierto" || b.estado === "listo-seur") && !(c && c.estado === "cerrada");
+  });
+  const estadoArt = articulosVivos.map(b => {
+    // Reposiciones y gestos comerciales llevan su propio prefijo (REP/GC).
+    const refEnvio = b.reposicion || b.gestoComercial ? refLabel(b) : ref + (b.refSuffix || "");
+    const c = cargaDeArt(b);
+    const lineas = [];
+    let cab, color = "ok";
+    if (c && c.estado === "cerrada") {
+      cab = "SALIÓ EL " + diaBusca(c.fecha);
+      lineas.push("Carga de " + textoCarga(c) + " · referencia " + refEnvio);
+    } else if (b.estado === "pendiente") {
+      cab = b.recibidoFabrica ? "RECIBIDO DE FÁBRICA" : TIPOS_DE_STOCK.includes(b.tipo) ? "NO HAY STOCK" : "PENDIENTE DEL PROVEEDOR";
+      if (!b.recibidoFabrica) color = "no";
+      lineas.push("Pendiente en " + (b.proveedor || "sin proveedor") + " con referencia " + refEnvio + (b.referencia ? " (ref. fábrica " + b.referencia + ")" : ""));
+      if (b.recibidoFabrica) lineas.push("Recibido el " + diaBusca(b.fechaRecibido));
+      else lineas.push(b.pedidoGenerado || b.fechaPedidoFabrica
+        ? "Pedido a fábrica" + (b.fechaPedidoFabrica ? " el " + diaBusca(b.fechaPedidoFabrica) : "") + (b.previsionEntrega ? " · llega aprox. el " + diaBusca(b.previsionEntrega) : "")
+        : "SIN PEDIR a fábrica todavía");
+      lineas.push(c && c.estado === "abierta" ? "Metido en la carga de " + textoCarga(c) : "PENDIENTE DE ENVÍO");
+    } else if (b.estado === "servido") {
+      cab = "YA ENVIADO";
+      lineas.push("Referencia " + refEnvio);
+    } else {
+      cab = b.estado === "cubierto" ? "HAY STOCK" : "RECIBIDO, PREPARADO PARA SALIR";
+      lineas.push(c ? "Metido en la carga de " + textoCarga(c) : "Todavía no está en ninguna carga · PENDIENTE DE ENVÍO");
+      lineas.push("Referencia " + refEnvio + (b.reservaEnviada ? " · reservado en el almacén" : ""));
+    }
+    return '<div class="buscador-estado-art ' + color + '"><div class="buscador-estado-cab">' + escapeAttr(cab) + '</div><div class="buscador-estado-nom">' + escapeAttr(nombreArticuloBusca(b)) + "</div>" + lineas.map(l => "<div>" + escapeAttr(l) + "</div>").join("") + "</div>";
+  });
+  if (!enviadoReal && lineaPedidos.endsWith(" — enviado")) donde[donde.indexOf(lineaPedidos)] = lineaPedidos.replace(" — enviado", " — la tienda lo da por enviado, pero NO ha salido");
   let aviso = "";
   if (cancelado) aviso = '<div class="buscador-aviso" style="background:#fee2e2;color:#991b1b;border-color:#fca5a5">❌ PEDIDO ' + escapeAttr(/^(rechazado|reembolsado)$/i.test(o.estado || "") ? o.estado.toUpperCase() : o.shippingStatus === "restocked" ? "DEVUELTO" : "CANCELADO") + '</div>';
-  else if (!enviado || abiertas.length) {
+  else if (!enviado || abiertas.length || faltaPorSalir) {
     aviso = '<div class="buscador-aviso">' + (enviadoReal ? "⚠ QUEDA ALGO POR ENVIAR" : "⚠ TODAVÍA NO SE HA ENVIADO") +
       (abiertas.length ? '<div style="font-size:14px;font-weight:600;margin-top:4px">Metido en la carga de ' + escapeAttr(textoCarga(abiertas[0])) + "</div>" : '<div style="font-size:14px;font-weight:600;margin-top:4px">No está en ninguna carga</div>') +
       "</div>";
@@ -9397,6 +9446,7 @@ function fichaPedidoBuscador(o, d) {
   return '<div class="buscador-ficha">' +
     '<h3 style="margin:0 0 4px">' + escapeAttr(ref) + ' <span style="font-weight:400;color:var(--muted);font-size:13px">' + escapeAttr(o.platform || "Shopify") + " · " + escapeAttr(formatOrderDate(o.orderDate)) + "</span></h3>" +
     aviso +
+    (estadoArt.length && !cancelado ? '<div class="buscador-estado">' + estadoArt.join("") + "</div>" : "") +
     (pendientesAgenda.length ? '<div class="buscador-agenda"><ul>' + pendientesAgenda.join("") + "</ul></div>" : "") +
     (segs.length ? '<div class="buscador-seg"><div class="buscador-seg-tit">SEGUIMIENTO</div>' + segs.join("") + "</div>" : "") +
     '<div class="buscador-datos">' +
