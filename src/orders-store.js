@@ -1213,6 +1213,13 @@ export class OrdersStore {
         }
       }
       await this.state.storage.put("orders", orders);
+      // Pedido que Shopify ya daba por enviado (p. ej. el colchón del pack
+      // salió antes por SEUR): con el seguimiento de Furniture ya sale lo
+      // que faltaba (Jennifer, 2026-10-14, BEZEN12259).
+      for (const { e, order } of destinos) {
+        const nuevo = actualizadosDetalle.some((x) => x.orderNumber === e.orderNumber && x.albaran === e.albaran && x.nuevo);
+        if (nuevo && order.shippingStatus === "fulfilled") await this.settleShipment(order.id);
+      }
       this.broadcast();
       return Response.json({ ok: true, actualizados: pedidosTocados.size, sinPedido, sinPedidoDetalle, actualizadosDetalle, paraShopify });
     }
@@ -1837,12 +1844,26 @@ export class OrdersStore {
     });
   }
 
+  // furniturePendiente (Jennifer, 2026-10-14, BEZEN12259): pack con el
+  // colchón por SEUR y el resto por Furniture. La etiqueta de SEUR marca el
+  // pack entero como enviado en Shopify (es una sola línea), pero lo que va
+  // por Furniture no ha salido hasta que hay seguimiento de Furniture o su
+  // carga se cierra — eso no se puede dar por servido todavía.
   async settleShipment(orderId) {
+    const orders = (await this.state.storage.get("orders")) || {};
+    const o = orders[orderId];
+    let furniturePendiente = false;
+    if (o && o.agencia === "FURNITURE" && !o.entregadoCliente) {
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const carga = o.cargaId && cargas.find((c) => c.id === o.cargaId);
+      const salioPorFurniture = (o.furnitureTracking || []).length > 0 || !!(carga && (carga.tipo || "furniture") === "furniture" && carga.estado === "cerrada");
+      furniturePendiente = !salioPorFurniture;
+    }
     const id = this.env.INVENTORY_STORE.idFromName("main");
     const stub = this.env.INVENTORY_STORE.get(id);
     await stub.fetch("https://do/settle-shipment", {
       method: "POST",
-      body: JSON.stringify({ orderId }),
+      body: JSON.stringify({ orderId, furniturePendiente }),
     });
   }
 
