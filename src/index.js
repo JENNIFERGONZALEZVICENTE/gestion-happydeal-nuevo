@@ -1796,6 +1796,13 @@ function renderPage() {
   .notas-pendiente-input { width: 100%; min-width: 150px; min-height: 22px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; font: inherit; font-size: 12px; resize: vertical; }
   .revisar-pendiente-btn { padding: 2px 6px; font-size: 11px; }
   .ocultar-recibidos-label { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--brand-dark); cursor: pointer; }
+  .buscador-logistica { margin: 0.75rem 2rem 1rem; }
+  .buscador-logistica .bl-input { width: 100%; max-width: 640px; padding: 9px 12px; border-radius: 8px; border: 2px solid var(--brand); font: inherit; font-size: 14px; background: var(--panel); color: var(--text); }
+  .bl-card { margin-top: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); font-size: 13px; }
+  .bl-card ul { margin: 4px 0 0 18px; padding: 0; }
+  .bl-card li { margin: 3px 0; }
+  .bl-card button { margin-left: 8px; padding: 2px 10px; font-size: 12px; }
+  tr.fila-resaltada td, .seur-decision-card.fila-resaltada { background: #fde68a !important; color: #1f2933; transition: background 0.3s; }
   .carga-abierta-box { margin: 0 2rem 1.5rem; border: 2px solid var(--brand); border-radius: 12px; overflow: hidden; background: var(--brand-light); }
   .carga-abierta-box.tener-en-cuenta-box { border-color: #b45309; background: #fef3c7; }
   .carga-abierta-box.tener-en-cuenta-box h3 { color: #92400e; }
@@ -1946,6 +1953,7 @@ function renderPage() {
     <span class="chevron">▶</span>
   </button>
   <ul id="logistica-list">
+    <li><a href="#" class="nav-link" data-logistica="buscar-logistica">🔎 Buscar pedido en cargas</a></li>
     <li class="sublista-header">FURNITURE</li>
     <li><a href="#" class="nav-link sublink" data-logistica="furniture">Pedidos pendientes</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas">Historial de cargas</a></li>
@@ -2311,6 +2319,10 @@ function renderPage() {
 </div>
 
 <div id="view-furniture" style="display:none">
+  <div class="buscador-logistica" id="bl-furniture">
+    <input type="search" class="bl-input" placeholder="🔎 ¿Dónde está un pedido? (nº, referencia, nombre, teléfono, ref. de fábrica…)" />
+    <div class="bl-resultado"></div>
+  </div>
   <div class="carga-abierta-box">
     <div id="furniture-cargas-tabs" class="cargas-tabs"></div>
     <div class="toolbar">
@@ -2591,6 +2603,10 @@ function renderPage() {
 </div>
 
 <div id="view-seur" style="display:none">
+  <div class="buscador-logistica" id="bl-seur">
+    <input type="search" class="bl-input" placeholder="🔎 ¿Dónde está un pedido? (nº, referencia, nombre, teléfono, ref. de fábrica…)" />
+    <div class="bl-resultado"></div>
+  </div>
   <div id="seur-decision-box"class="carga-abierta-box" style="display:none">
     <div class="toolbar">
       <h3 style="margin:0">Pedidos con disponibilidad mixta — pendientes de decidir</h3>
@@ -2601,6 +2617,14 @@ function renderPage() {
 
   <div id="seur-cargas-list"></div>
   <div id="seur-fuera-carga"></div>
+</div>
+
+<div id="view-buscar-logistica" style="display:none">
+  <p style="margin:0.75rem 2rem 0;color:var(--muted);font-size:13px">Busca un pedido y te digo dónde está en Furniture o SEUR: en qué carga, en «tener en cuenta», retenido, pendiente, fuera de carga o esperando al proveedor. Pulsa «Ir →» para ir a su línea.</p>
+  <div class="buscador-logistica" id="bl-general">
+    <input type="search" class="bl-input" placeholder="🔎 ¿Dónde está un pedido? (nº, referencia, nombre, teléfono, ref. de fábrica…)" />
+    <div class="bl-resultado"></div>
+  </div>
 </div>
 
 <div id="view-historial-cargas-seur" style="display:none">
@@ -3993,7 +4017,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-casos-revisar-seur", "view-devoluciones-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace", "view-casos", "view-tareas"];
+const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-casos-revisar-seur", "view-devoluciones-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace", "view-casos", "view-tareas"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -4089,19 +4113,20 @@ function selectProveedores(id) {
   loadPendientes();
 }
 
-const LOGISTICA_LABELS = { furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR", "devoluciones-seur": "SEUR · Devueltos" };
+const LOGISTICA_LABELS = { "buscar-logistica": "Buscar pedido en cargas", furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR", "devoluciones-seur": "SEUR · Devueltos" };
 function selectLogistica(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.logistica === id));
   document.getElementById("view-title").textContent = "Logística · " + LOGISTICA_LABELS[id];
   hideAllViews();
   document.getElementById("view-" + id).style.display = "block";
-  if (id === "furniture") loadFurniture();
-  if (id === "historial-cargas") loadHistorialCargas();
-  if (id === "casos-revisar") loadCasosRevisar();
-  if (id === "seur") loadSeur();
-  if (id === "historial-cargas-seur") loadHistorialCargasSeur();
-  if (id === "casos-revisar-seur") loadCasosRevisarSeur();
-  if (id === "devoluciones-seur") loadDevoluciones();
+  if (id === "furniture") return loadFurniture();
+  if (id === "historial-cargas") return loadHistorialCargas();
+  if (id === "casos-revisar") return loadCasosRevisar();
+  if (id === "seur") return loadSeur();
+  if (id === "historial-cargas-seur") return loadHistorialCargasSeur();
+  if (id === "casos-revisar-seur") return loadCasosRevisarSeur();
+  if (id === "devoluciones-seur") return loadDevoluciones();
+  if (id === "buscar-logistica") return cargarDatosLogistica();
 }
 
 // Histórico de reposiciones y gestos comerciales (Jennifer, 2026-09-22):
@@ -6629,7 +6654,6 @@ function renderFurniture() {
   // 2026-10-14, BEZEN12259: el colchón del pack salió antes por SEUR).
   // Solo pedidos desde el 01/10/2026 (Jennifer: "para que no se metan
   // pedidos antiguos que no haya que meter").
-  const quedaPorFurniture = o => parseFechaGenerica(o.orderDate) >= new Date("2026-10-01T00:00:00").getTime() && !(o.furnitureTracking || []).length && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "pendiente" && !b.reposicion && !b.gestoComercial && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
   const todasFurniture = allOrders.filter(o => o.agencia === "FURNITURE" && (o.shippingStatus !== "fulfilled" || quedaPorFurniture(o)) && !o.gestionadoExterno && !esMiembroSecundario(o));
   // Todo lo que está en la carga abierta se ve en ella, aunque en Shopify ya
   // figure como enviado (Jennifer, 2026-09-29, caso BEZEN12194: marcado como
@@ -6843,6 +6867,145 @@ function renderFurniture() {
     });
   });
 }
+
+function quedaPorFurniture(o) {
+  return parseFechaGenerica(o.orderDate) >= new Date("2026-10-01T00:00:00").getTime() && !(o.furnitureTracking || []).length && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "pendiente" && !b.reposicion && !b.gestoComercial && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
+}
+
+// Buscador de logística (Jennifer, 2026-10-14): "en ocasiones quiero buscar
+// un pedido y no sé si está metido en una carga, retenido, a falta de tener
+// en cuenta...". Dice en qué sitio de Furniture/SEUR está y lleva a su
+// línea. El mismo buscador sale arriba en Furniture, en SEUR y en
+// Logística · Buscar pedido en cargas.
+function ubicacionesLogistica(o) {
+  const u = [];
+  const add = (texto, ir) => u.push({ texto, ir: ir || null });
+  const ref = refLabel(o);
+  const cargaDe = id => allCargas.find(c => c.id === id);
+  const fechaCarga = c => (c.dia ? c.dia.toLowerCase() + " " : "") + fechaCortaEs(c.fecha);
+  const bos = backorders.filter(b => String(b.orderId) === String(o.id));
+  if (o.cancelado || o.shopifyCancelado) add("❌ Pedido CANCELADO");
+  if (o.agencia === "FURNITURE") {
+    const principal = esMiembroSecundario(o) ? allOrders.find(x => x.id === o.grupoEnvio) : null;
+    const refFila = principal ? refLabel(principal) : ref;
+    if (principal) add("🔗 Va en la misma línea que " + refFila + " (envío conjunto)");
+    const c = o.cargaId && cargaDe(o.cargaId);
+    if (c && c.estado === "abierta") add("🚚 En la carga de Furniture del " + fechaCarga(c), { vista: "furniture", cargaId: c.id, cont: "carga-abierta-table", ref: refFila });
+    else if (c) add("✔ Salió en la carga de Furniture del " + fechaCarga(c), { vista: "historial-cargas" });
+    if (o.paraTenerEnCuenta) add("👀 En «Pedidos para tener en cuenta»", { vista: "furniture", cont: "tener-en-cuenta-table", ref });
+    if (o.gestionadoExterno) add("↪ Gestionado por otra vía (no sale en las listas de Furniture)");
+    else if (!o.cargaId && (o.shippingStatus !== "fulfilled" || quedaPorFurniture(o))) {
+      const items = pedidosDelGrupo(o).filter(p => !p.cancelado).flatMap(p => backordersPorPedido(p.id))
+        .filter(i => !(i.tipo === "colchon" && i.tipoEnvio === "FPK") && !esTopperSeur(i));
+      const faltan = items.filter(i => !i.recibidoFabrica);
+      const estadoArt = !items.length ? "" : (faltan.length ? " — falta por llegar: " + faltan.map(nombreArticuloBusca).join(", ") : " — todo recibido, listo para cargar");
+      const r = retencionDe(o);
+      if (r) add("⏸ Retenido a la espera del cliente" + (r.hasta ? " hasta el " + fechaCortaEs(r.hasta) : "") + estadoArt, { vista: "furniture", cont: "retenidos-table", ref: refFila });
+      else add("⏳ En «Pedidos pendientes de envío por Furniture», sin carga" + estadoArt, { vista: "furniture", cont: "furniture-pendientes-table", ref: refFila });
+    }
+  }
+  if (o.agencia === "SEUR") {
+    const c = o.cargaId && cargaDe(o.cargaId);
+    if (c && c.estado === "abierta") add("🚚 En la carga de SEUR del " + fechaCarga(c), { vista: "seur", cont: "seur-cargas-list", ref });
+    else if (c) add("✔ Salió en la carga de SEUR del " + fechaCarga(c), { vista: "historial-cargas-seur" });
+    if (o.seurMixedPending) add("⚖ En SEUR «pendientes de decidir» (solo hay stock de parte)", { vista: "seur", cont: "seur-decision-box", ref });
+    if (pedidosSeurFueraDeCarga().some(x => x.id === o.id)) add("📤 En «Pedidos de SEUR fuera de carga»" + (o.motivoFueraCarga && o.motivoFueraCarga.texto ? " — " + o.motivoFueraCarga.texto : ""), { vista: "seur", cont: "seur-fuera-carga", ref });
+  }
+  for (const b of bos) {
+    if (b.estado === "cancelado" || b.estado === "servido") continue;
+    const art = nombreArticuloBusca(b) + (b.referencia ? " [" + b.referencia + "]" : "");
+    const que = b.reposicion ? "Reposición " + refLabel(b) + ": " : b.gestoComercial ? "Gesto comercial " + refLabel(b) + ": " : b.envioAparte ? "Envío aparte: " : "";
+    const c = b.cargaId && b.cargaId !== o.cargaId && cargaDe(b.cargaId);
+    if (c) {
+      const seur = c.tipo === "seur";
+      const refB = seur ? (b.reposicion || b.gestoComercial ? refLabel(b) : ref + (b.refSuffix || "")) : refLabel(b);
+      if (c.estado === "abierta") add("🚚 " + que + art + " — en la carga de " + (seur ? "SEUR" : "Furniture") + " del " + fechaCarga(c), seur ? { vista: "seur", cont: "seur-cargas-list", ref: refB } : { vista: "furniture", cargaId: c.id, cont: "carga-abierta-table", ref: refB });
+      else add("✔ " + que + art + " — salió en la carga de " + (seur ? "SEUR" : "Furniture") + " del " + fechaCarga(c), { vista: seur ? "historial-cargas-seur" : "historial-cargas" });
+      continue;
+    }
+    if (b.agenciaReposicion === "NACEX" && b.estado === "pendiente") { add("🟣 " + que + art + " — va por NACEX (fuera de las cargas)" + (b.recibidoFabrica ? ", ya recibido" : ", esperando al proveedor")); continue; }
+    const lineaFur = (b.reposicion && b.estado === "pendiente" && !((b.tipo === "colchon" || b.piezaManual) && b.agenciaReposicion === "SEUR")) || (b.envioAparte && (b.estado === "pendiente" || b.estado === "cubierto"));
+    if (lineaFur) { add("⏳ " + que + art + " — en «Pedidos pendientes de envío por Furniture», sin carga" + (b.recibidoFabrica ? " (ya recibido)" : " (esperando al proveedor)"), { vista: "furniture", cont: "furniture-pendientes-table", ref: refLabel(b) }); continue; }
+    // Los artículos de la línea de Furniture ya salen arriba en "falta por llegar".
+    if (o.agencia === "FURNITURE" && !que) continue;
+    if (b.estado === "pendiente" && !b.recibidoFabrica) add("🏭 " + que + art + " — esperando al proveedor" + (b.proveedor ? " (" + b.proveedor + ")" : "") + ": " + (b.pedidoGenerado ? "pedido a fábrica" : "SIN PEDIR a fábrica"));
+  }
+  if (o.shippingStatus === "fulfilled" && !u.some(x => x.ir)) {
+    const tf = (o.furnitureTracking || []).slice(-1)[0];
+    const ts = (o.seurTracking || []).filter(t => !t.anulado).slice(-1)[0];
+    add((u.length ? "ℹ En la tienda figura como enviado" : "✔ Enviado") + (tf ? " por Furniture (albarán " + (tf.albaran || "") + (tf.estado ? ", " + tf.estado : "") + ")" : ts ? " por SEUR (" + ts.referencia + (ts.estado ? ", " + ts.estado : "") + ")" : ""));
+  }
+  if (!u.length) add("ℹ No está en ninguna carga ni lista de logística" + (o.agencia ? " (agencia " + o.agencia + ")" : " — no tiene agencia asignada"));
+  return u;
+}
+async function cargarDatosLogistica() {
+  const [pendRes, cargasRes] = await Promise.all([fetch("/api/inventario/pendientes"), fetch("/api/cargas")]);
+  backorders = await pendRes.json();
+  allCargas = await cargasRes.json();
+  const box = document.getElementById("bl-general");
+  if (box.querySelector(".bl-input").value.trim()) pintarBuscadorLogistica(box);
+}
+function pintarBuscadorLogistica(box) {
+  const q = box.querySelector(".bl-input").value.trim();
+  const res = box.querySelector(".bl-resultado");
+  box._ir = [];
+  if (!q) { res.innerHTML = ""; return; }
+  const encontrados = pedidosQueCoinciden(q, { orders: allOrders, bos: backorders })
+    .sort((a, b) => parseFechaGenerica(b.orderDate) - parseFechaGenerica(a.orderDate));
+  if (!encontrados.length) { res.innerHTML = '<p style="color:var(--muted);margin:6px 0">No encuentro ningún pedido con «' + escapeAttr(q) + '».</p>'; return; }
+  res.innerHTML = (encontrados.length > 15 ? '<p style="color:var(--muted);margin:6px 0">' + encontrados.length + " pedidos coinciden; te enseño los 15 más recientes. Afina la búsqueda.</p>" : "")
+    + encontrados.slice(0, 15).map(o => '<div class="bl-card"><div><strong>' + escapeAttr(refLabel(o)) + "</strong> · " + escapeAttr(o.name || "") + " · " + escapeAttr(formatOrderDate(o.orderDate))
+      + ' <span style="color:var(--muted)">' + escapeAttr(o.product || "") + '</span> <button type="button" class="secondary bl-ficha" data-ref="' + escapeAttr(refLabel(o)) + '">Ficha completa</button></div><ul>'
+      + ubicacionesLogistica(o).map(x => "<li>" + escapeAttr(x.texto) + (x.ir ? ' <button type="button" class="bl-ir" data-ir="' + (box._ir.push(x.ir) - 1) + '">Ir →</button>' : "") + "</li>").join("")
+      + "</ul></div>").join("");
+  res.querySelectorAll(".bl-ir").forEach(btn => btn.addEventListener("click", () => irALogistica(box._ir[Number(btn.dataset.ir)])));
+  res.querySelectorAll(".bl-ficha").forEach(btn => btn.addEventListener("click", () => buscarPedidoGeneral(btn.dataset.ref)));
+}
+// Fila con esa referencia exacta (no vale BEZEN1231 para BEZEN12311, ni
+// BEZEN12262 para REPBEZEN12262).
+function buscarFilaLogistica(contId, ref) {
+  const cont = document.getElementById(contId);
+  if (!cont) return null;
+  const R = ref.toUpperCase();
+  const alfa = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  return [...cont.querySelectorAll("tbody tr, .seur-decision-card")].find(tr => {
+    const t = tr.textContent.toUpperCase();
+    for (let i = t.indexOf(R); i >= 0; i = t.indexOf(R, i + 1)) {
+      const antes = i > 0 ? t.charAt(i - 1) : "";
+      const despues = t.charAt(i + R.length);
+      if ((!antes || !alfa.includes(antes)) && (!despues || !"0123456789".includes(despues))) return true;
+    }
+    return false;
+  }) || null;
+}
+async function irALogistica(ir) {
+  if (!ir) return;
+  if (ir.cargaId) cargaFurnitureElegidaId = ir.cargaId;
+  if (ir.vista === "furniture") {
+    document.getElementById("furniture-pedido-search").value = "";
+    document.getElementById("furniture-referencia-search").value = "";
+  }
+  await selectLogistica(ir.vista);
+  if (!ir.cont || !ir.ref) return;
+  for (let i = 0; i < 10; i++) {
+    const fila = buscarFilaLogistica(ir.cont, ir.ref);
+    if (fila) {
+      const det = fila.closest("details");
+      if (det) det.open = true;
+      fila.scrollIntoView({ behavior: "smooth", block: "center" });
+      fila.classList.add("fila-resaltada");
+      setTimeout(() => fila.classList.remove("fila-resaltada"), 5000);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 200));
+  }
+}
+document.querySelectorAll(".buscador-logistica").forEach(box => {
+  const inp = box.querySelector(".bl-input");
+  let t = null;
+  inp.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => pintarBuscadorLogistica(box), 300); });
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") { clearTimeout(t); pintarBuscadorLogistica(box); } });
+});
 
 // Pedidos retenidos a petición del cliente (Jennifer, 2026-09-30): "habría
 // que habilitar una casilla donde pongamos RETENIDO A FALTA DE QUE EL
