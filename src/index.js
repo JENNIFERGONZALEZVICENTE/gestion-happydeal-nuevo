@@ -10386,9 +10386,14 @@ function bultosCanapeMagnum(modelo, medida, color, referencia, tapaPartida, geme
 function bultosCanapeInitial(modelo, medida, color, referencia, tapaPartida, gemelo) {
   const linea = (parte) => ({ parte, texto: [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ") });
   if (gemelo) return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2"), linea("JUEGO DE PATAS")];
+  // El INITIAL de 105 lleva un solo cajón, sin cabecero/piecero (Jennifer,
+  // 2026-10-14).
+  const cajones = modelo === "CANAPÉ INITIAL" && medida.ancho === 105
+    ? [linea("CAJÓN")]
+    : [linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
   const rows = tapaPartida
-    ? [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")]
-    : [linea("TAPA"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+    ? [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), ...cajones]
+    : [linea("TAPA"), ...cajones];
   if (medida.ancho >= 135) rows.push(linea("FONDO"));
   rows.push(linea("JUEGO DE PATAS"));
   return rows;
