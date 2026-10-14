@@ -10521,15 +10521,19 @@ function csvEscapeFurniture(value) {
 // Furniture da error al subir tildes (Jennifer, 2026-09-30) en DESCRIP.
 // (productos con referencia) y OBSERVACIONES — igual que en PROVINCIA. La Ñ
 // se mantiene; "½" pasa a "1/2" y la raya "—" a guion.
-const FURNITURE_COLUMNAS_SIN_TILDES = [7, 12];
+// Desde el 2026-10-14 en TODAS las columnas (Jennifer: "lo sigues sacando
+// con acentos, tildes… si no se corta la información en Furniture"): nombre,
+// dirección, población… También º/ª y cualquier otro símbolo fuera de ASCII.
 function sinTildesFurniture(texto) {
-  return String(texto ?? "").replace(/½/g, "1/2").replace(/[—–]/g, "-").replace(/Ñ/g, "\u0000").replace(/ñ/g, "\u0001")
-    .normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\u0000/g, "Ñ").replace(/\u0001/g, "ñ");
+  return String(texto ?? "").replace(/½/g, "1/2").replace(/[—–]/g, "-").replace(/º/g, "o").replace(/ª/g, "a")
+    .replace(/[“”«»]/g, '"').replace(/[‘’´`]/g, "'").replace(/Ñ/g, "\u0000").replace(/ñ/g, "\u0001")
+    .normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\x20-\x7E\u0000\u0001]/g, "")
+    .replace(/\u0000/g, "Ñ").replace(/\u0001/g, "ñ");
 }
 function buildFurnitureCsv(rows) {
   const lines = [FURNITURE_CSV_HEADERS.map(csvEscapeFurniture).join(";")];
   for (const row of rows) {
-    const limpia = row.map((v, i) => (FURNITURE_COLUMNAS_SIN_TILDES.includes(i) ? sinTildesFurniture(v) : v));
+    const limpia = row.map((v) => sinTildesFurniture(v));
     lines.push(limpia.map(csvEscapeFurniture).join(";"));
   }
   return "﻿" + lines.join("\r\n");
