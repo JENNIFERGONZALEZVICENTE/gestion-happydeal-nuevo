@@ -35,7 +35,19 @@ function esNotaSergio(order) {
 // Shopify: hay que conservarlos cuando un sync/webhook reemplaza los campos
 // de la tienda con datos frescos. La agencia se fija con el stock que había
 // en el momento de la venta, no se recalcula en resyncs posteriores.
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal", "recogeCliente", "agenciaAntesDeRecogida", "entregadoCliente", "sinAvisoSeguimiento", "motivoFueraCarga"];
+// Si se cambió la medida del pedido antes de tramitarlo (Jennifer,
+// 2026-10-14), se tramita ya con la medida nueva.
+function itemsConCambioMedida(order) {
+  const items = order.items || [];
+  const cm = order.cambioMedida;
+  if (!cm || !cm.de || !cm.a) return items;
+  const [dw, dl] = cm.de.split("X");
+  const [w, l] = cm.a.split("X");
+  const re = new RegExp(dw + "\\s*[xX×]\\s*" + dl, "g");
+  return items.map((it) => ({ ...it, variantTitle: String(it.variantTitle || "").replace(re, w + "x" + l), sku: String(it.sku || "").replace(re, w + "X" + l) }));
+}
+
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal", "recogeCliente", "agenciaAntesDeRecogida", "entregadoCliente", "sinAvisoSeguimiento", "motivoFueraCarga", "cambioMedida"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -643,6 +655,19 @@ export class OrdersStore {
     // `lineasCanceladas` (se ven tachadas en el pedido). Si se cancelan
     // desde el pedido TODAS las unidades de todas sus líneas, el pedido
     // entero queda cancelado.
+    // Cambio de medida del pedido entero (Jennifer, 2026-10-14). Shopify
+    // sigue con la medida comprada; aquí se apunta la nueva.
+    if (url.pathname === "/orders/cambio-medida" && request.method === "POST") {
+      const { orderId, de, a, usuario } = await request.json();
+      const orders = (await this.state.storage.get("orders")) || {};
+      const order = orders[orderId];
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      order.cambioMedida = { de: (order.cambioMedida && order.cambioMedida.de) || de, a, fecha: new Date().toISOString(), usuario: usuario || null };
+      await this.state.storage.put("orders", orders);
+      this.broadcast();
+      return Response.json({ ok: true, cambioMedida: order.cambioMedida });
+    }
+
     if (url.pathname === "/orders/cancelar-linea" && request.method === "POST") {
       const { orderId, itemIndex, unidades, texto, desde, usuario } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
@@ -1770,7 +1795,7 @@ export class OrdersStore {
     const stub = this.env.INVENTORY_STORE.get(id);
     const res = await stub.fetch("https://do/process-sale", {
       method: "POST",
-      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, items: order.items || [], force, orderDate: fechaParaTramitar, services: order.services || "", paymentStatus: pagado ? "PAGADO" : order.paymentStatus, seurSplitDecision }),
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, items: itemsConCambioMedida(order), force, orderDate: fechaParaTramitar, services: order.services || "", paymentStatus: pagado ? "PAGADO" : order.paymentStatus, seurSplitDecision }),
     });
     const { agencia, pendingManufacture, needsReview, reviewReasons, paused, seurMixedPending, seurMixedInfo, seurReady } = await res.json();
     // Pedido de 2+ colchones SEUR con disponibilidad mixta (Jennifer,

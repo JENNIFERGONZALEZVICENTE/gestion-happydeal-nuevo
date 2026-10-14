@@ -2280,6 +2280,10 @@ export class InventoryStore {
     }
 
     // Cambiar de carga de SEUR un colchón ya preparado (Jennifer, 2026-09-30).
+    if (url.pathname === "/backorders/cambiar-medida" && method === "POST") {
+      return this.cambiarMedidaPedido(await request.json());
+    }
+
     if (url.pathname === "/backorders/set-carga" && method === "POST") {
       const { id, cargaId } = await request.json();
       const backorders = await this.load("backorders", []);
@@ -3786,6 +3790,122 @@ export class InventoryStore {
     await this.state.storage.put("stock", stock);
     await this.state.storage.put("backorders", backorders);
     return Response.json({ ok: true, entry, carga, viaSeur });
+  }
+
+  // Cambiar la medida del pedido entero (Jennifer, 2026-10-14): el cliente
+  // compró un pack en una medida y luego lo quiere en otra. No es una
+  // sustitución desde el stock: los artículos elegidos pasan a la medida
+  // nueva, se recalcula lo que se pide a fábrica (texto de Polival, formato
+  // de 160...) y los contadores de stock se mueven de una medida a otra.
+  // Lo que ya estaba pedido a fábrica vuelve a "sin pedir" (con aviso para
+  // llamar al proveedor) y en Polival lleva referencia nueva.
+  async cambiarMedidaPedido({ orderId, ids, tallaNueva, services, variantTitle, usuario }) {
+    const a = normalizeTalla(tallaNueva) || String(tallaNueva || "").trim().toUpperCase();
+    if (!/^\d{2,3}X\d{2,3}$/.test(a)) return Response.json({ ok: false, error: "Medida no válida: escríbela como 160X200." }, { status: 400 });
+    const products = await this.load("products", {});
+    const activos = activeProducts(products);
+    const backorders = await this.load("backorders", []);
+    const stock = await this.load("stock", {});
+    const congelado = await this.load("stockCongelado", false);
+    const prodDe = (b) => activos.find((p) => p.stockModel === b.stockModel) || null;
+    const delPedido = backorders.filter((b) => String(b.orderId) === String(orderId) && !b.reposicion && !b.gestoComercial);
+    const conInitial = delPedido.some((b) => { const p = prodDe(b); return p && p.product_type === "Canapé" && matchCanapeRecipeKey(p.title) === "initial"; });
+    const fecha = new Date().toISOString();
+    const cambios = [];
+    const avisos = [];
+    const mover = async (b, talla, campo, delta) => {
+      if (!delta) return;
+      const key = stockKey(b.stockModel, talla);
+      const row = stock[key] || { stockModel: b.stockModel, talla, cantidad: 0, vendidoPendiente: 0 };
+      const antes = row[campo] || 0;
+      row[campo] = Math.max(0, antes + delta);
+      stock[key] = row;
+      await this.logMovement({ stockModel: b.stockModel, talla, campo, delta: row[campo] - antes, resultante: row[campo], origen: "cambio-medida", usuario, orderNumber: b.orderNumber, platform: b.platform, orderRef: b.orderRef });
+    };
+    for (const id of ids || []) {
+      const b = delPedido.find((x) => x.id === id);
+      if (!b) continue;
+      const nombre = b.cantidad + "x " + b.stockModel;
+      if (b.estado !== "pendiente" && b.estado !== "cubierto") { avisos.push(nombre + " (" + b.talla + "): ya " + (b.estado === "servido" ? "ha salido" : b.estado === "listo-seur" ? "está preparado para SEUR" : "está " + b.estado) + ", no se ha cambiado."); continue; }
+      const de = b.talla;
+      if (de === a) continue;
+      const deStock = b.estado === "cubierto" && String(b.id).endsWith("-cubierto");
+      if (deStock) {
+        // Salía del stock: la unidad vuelve al stock de su medida y se coge
+        // de la nueva si hay; si no, queda pendiente de pedir.
+        if (!congelado) await mover(b, de, "cantidad", b.cantidad);
+        const nueva = stock[stockKey(b.stockModel, a)];
+        if (nueva && nueva.cantidad >= b.cantidad) {
+          if (!congelado) await mover(b, a, "cantidad", -b.cantidad);
+          avisos.push(nombre + ": salía del stock en " + de + " (vuelve al stock) y sale del stock en " + a + ".");
+        } else {
+          b.estado = "pendiente";
+          b.recibidoFabrica = false;
+          b.reservaEnviada = null;
+          await mover(b, a, "vendidoPendiente", b.cantidad);
+          avisos.push(nombre + ": salía del stock en " + de + " (vuelve al stock). En " + a + " NO hay stock: queda pendiente de pedir a " + (b.proveedor || "su proveedor") + ".");
+        }
+      } else {
+        const viejo = stock[stockKey(b.stockModel, de)];
+        const vp = viejo ? Math.min(viejo.vendidoPendiente || 0, b.cantidad) : 0;
+        if (vp) { await mover(b, de, "vendidoPendiente", -vp); await mover(b, a, "vendidoPendiente", vp); }
+        if (b.recibidoFabrica) {
+          if ((b.tipo === "colchon" || b.tipo === "topper") && !congelado) {
+            await mover(b, de, "cantidad", b.cantidad);
+            avisos.push(nombre + " " + de + " ya estaba recibido: pasa al stock.");
+          } else {
+            avisos.push(nombre + " " + de + " ya estaba recibido en el almacén: queda sin pedido, decide qué hacer con esa pieza.");
+          }
+          b.recibidoFabrica = false;
+          b.fechaRecibido = null;
+          b.reservaEnviada = null;
+        }
+        if (b.pedidoGenerado) {
+          avisos.push("⚠ " + nombre + " ya estaba PEDIDO a " + (b.proveedor || "fábrica") + (b.fechaPedidoFabrica ? " el " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : "") + " en " + de + ": llama para cambiarlo o anularlo. Vuelve a salir para pedir en " + a + ".");
+          b.pedidoAnterior = { talla: de, fecha: b.fechaPedidoFabrica || null, referencia: b.referencia || null };
+          b.pedidoGenerado = false;
+          b.fechaPedidoFabrica = null;
+          // Referencia nueva en Polival, para no confundirla con la ya pedida.
+          const p = prodDe(b);
+          if (b.proveedor === "POLIVAL" && b.referencia && p) {
+            const built = buildReferencia(await nextReferenciaNumero(this.state), p.referenciaTipo, b.color, /FUR$/.test(b.referencia));
+            if (built.referencia) b.referencia = built.referencia;
+          }
+        }
+      }
+      b.talla = a;
+      // Texto para fábrica con la medida nueva (mismas recetas que al
+      // tramitar el pedido).
+      const p = prodDe(b);
+      if (b.proveedor === "POLIVAL" && p) {
+        let built = null;
+        if (p.product_type === "Canapé") built = buildCanapeMercancia(p.title, b.color, a, services || "");
+        else if (p.product_type === "Cabecero") built = buildCabeceroMercancia(p.title, b.color, a, variantTitle || "", conInitial);
+        else if (p.product_type === "Canapé fijo") built = buildCanapeFijoMercancia(b.color, a);
+        else if (p.product_type === "Colchones") built = buildColchonMercancia(p.stockModel, a);
+        if (built && built.texto) {
+          b.mercanciaFabrica = built.texto;
+          if (built.needsReview && built.reason) avisos.push(built.reason);
+        } else if (b.mercanciaFabrica) {
+          b.mercanciaFabrica = b.mercanciaFabrica.replace(/MEDIDA:\s*[^·]+/i, "MEDIDA: " + a + " ");
+        }
+        // El FORMATO de 160 se vuelve a poner solo si sigue haciendo falta.
+        b.mercanciaFabrica = String(b.mercanciaFabrica || "").replace(/(^|\s*·\s*)FORMATO:\s*(GEMELOS|PARTIDO)\s*$/i, "") || null;
+        if (necesitaFormato160({ product: p, talla: a })) {
+          if (b.formato160) b.mercanciaFabrica = textoConFormato160(b.mercanciaFabrica, b.formato160);
+          else if (/gemelo/i.test(variantTitle || "")) { b.necesitaFormato160 = true; avisos.push("Elige GEMELOS o PARTIDO del canapé en Proveedores · Polival antes de pedirlo."); }
+          else { b.formato160 = "PARTIDO"; b.mercanciaFabrica = textoConFormato160(b.mercanciaFabrica, "PARTIDO"); }
+        } else {
+          b.formato160 = null;
+          b.necesitaFormato160 = false;
+        }
+      }
+      b.cambioMedida = { de: (b.cambioMedida && b.cambioMedida.de) || de, a, fecha, usuario: usuario || null };
+      cambios.push({ id: b.id, stockModel: b.stockModel, de, a });
+    }
+    await this.state.storage.put("stock", stock);
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, cambios, avisos });
   }
 
   // El albarán decía que venía, pero al descargar el camión falta ese

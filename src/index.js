@@ -1797,6 +1797,10 @@ function renderPage() {
   .revisar-pendiente-btn { padding: 2px 6px; font-size: 11px; }
   .ocultar-recibidos-label { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--brand-dark); cursor: pointer; }
   .buscador-logistica { margin: 0.75rem 2rem 1rem; }
+  .cambio-medida-tag { display: inline-block; margin: 3px 0; padding: 2px 8px; border-radius: 6px; background: #ede9fe; color: #5b21b6; font-size: 11.5px; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { .cambio-medida-tag { background: #3b0764; color: #e9d5ff; } }
+  .cambiar-medida-btn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: #fff; font-size: 13px; cursor: pointer; }
+  .cambiar-medida-btn:hover { border-color: #7c3aed; }
   .buscador-logistica .bl-input { width: 100%; max-width: 640px; padding: 9px 12px; border-radius: 8px; border: 2px solid var(--brand); font: inherit; font-size: 14px; background: var(--panel); color: var(--text); }
   .bl-card { margin-top: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); font-size: 13px; }
   .bl-card ul { margin: 4px 0 0 18px; padding: 0; }
@@ -3263,6 +3267,84 @@ document.addEventListener("click", async (e) => {
   }
 }, true);
 
+// Cambiar la medida del pedido entero (Jennifer, 2026-10-14): "los
+// clientes compran un pack pero luego lo quieren en otra medida". Los
+// artículos pasan a la medida nueva y se piden bien a fábrica. No es una
+// sustitución desde el stock.
+function cambioMedidaHtml(x) {
+  const cm = x && x.cambioMedida;
+  if (!cm) return "";
+  return '<div class="cambio-medida-tag" title="Cambiado el ' + new Date(cm.fecha).toLocaleDateString("es-ES") + (cm.usuario ? " por " + escapeAttr(cm.usuario) : "") + '">📏 MEDIDA CAMBIADA: ' + escapeAttr(cm.de || "?") + " → " + escapeAttr(cm.a) + "</div>";
+}
+function cambiarMedidaButton(order) {
+  if (!order || order.cancelado) return "";
+  return '<button type="button" class="cambiar-medida-btn" data-cambiar-medida-id="' + escapeAttr(String(order.id)) + '" title="Cambiar la medida del pedido (el cliente lo quiere en otra medida)">📏</button>';
+}
+function articulosParaCambioMedida(order) {
+  return backorders.filter(b => String(b.orderId) === String(order.id) && !b.reposicion && !b.gestoComercial && b.estado !== "cancelado");
+}
+function medidaPrincipal(arts) {
+  const cuenta = {};
+  arts.filter(b => b.tipo !== "almohada").forEach(b => { cuenta[b.talla] = (cuenta[b.talla] || 0) + 1; });
+  return Object.keys(cuenta).sort((x, y) => cuenta[y] - cuenta[x])[0] || "";
+}
+function normalizarMedidaTexto(t) {
+  return String(t || "").toUpperCase().split("CM").join("").split(" ").join("").split("×").join("X").split("*").join("X");
+}
+async function abrirCambioMedida(order) {
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  const arts = articulosParaCambioMedida(order);
+  let de = medidaPrincipal(arts);
+  if (!de) {
+    const m = normalizarMedidaTexto(order.product).match(/([0-9]{2,3})X([0-9]{2,3})/);
+    de = m ? m[1] + "X" + m[2] : "";
+  }
+  const ov = document.createElement("div");
+  ov.className = "modal-overlay open";
+  const filas = arts.map(b => {
+    const cambiable = b.estado === "pendiente" || b.estado === "cubierto";
+    const estado = b.estado === "servido" ? "ya salió" : b.estado === "listo-seur" ? "preparado para SEUR" : b.estado === "cubierto" ? "sale del stock" : b.pedidoGenerado ? "PEDIDO a fábrica" + (b.fechaPedidoFabrica ? " el " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : "") : "sin pedir";
+    return '<label style="display:block;margin:4px 0"><input type="checkbox" class="cm-art" value="' + escapeAttr(b.id) + '"' + (cambiable && b.talla === de ? " checked" : "") + (cambiable ? "" : " disabled") + "> "
+      + escapeAttr(b.cantidad + "x " + nombreCortoModelo(b.stockModel) + " " + b.talla + (b.color ? " " + b.color : "")) + (b.referencia ? " [" + escapeAttr(b.referencia) + "]" : "")
+      + ' <span style="color:' + (b.pedidoGenerado ? "#b45309" : "var(--muted)") + ';font-size:12px">· ' + escapeAttr(estado) + (b.proveedor ? " · " + escapeAttr(b.proveedor) : "") + "</span></label>";
+  }).join("");
+  ov.innerHTML = '<div class="modal-box"><h3>📏 Cambiar medida · ' + escapeAttr(refLabel(order)) + "</h3>"
+    + '<p style="color:var(--muted);font-size:13px;margin:0 0 8px">' + escapeAttr(order.product || "") + "</p>"
+    + (arts.length
+      ? '<p style="font-size:13px;margin:6px 0">Artículos que cambian de medida (las almohadas no se marcan solas):</p>' + filas
+      : '<p style="font-size:13px">Este pedido aún no está tramitado: se tramitará ya con la medida nueva.</p>')
+    + '<div style="margin:12px 0 4px;font-size:13px">Medida actual: <strong>' + escapeAttr(de || "?") + '</strong> → nueva medida: <input type="text" class="cm-nueva" placeholder="160X200" style="width:110px"></div>'
+    + '<p style="font-size:12px;color:var(--muted);margin:6px 0 0">Lo ya pedido a fábrica vuelve a salir para pedir con la medida nueva (y te aviso para que llames al proveedor). En Shopify el pedido sigue con la medida comprada.</p>'
+    + '<div class="modal-actions"><button type="button" class="secondary cm-cancelar">Cancelar</button><button type="button" class="cm-ok">Cambiar medida</button></div></div>';
+  document.body.appendChild(ov);
+  const cerrar = () => ov.remove();
+  ov.querySelector(".cm-cancelar").addEventListener("click", cerrar);
+  ov.addEventListener("click", e => { if (e.target === ov) cerrar(); });
+  ov.querySelector(".cm-ok").addEventListener("click", async () => {
+    const nueva = normalizarMedidaTexto(ov.querySelector(".cm-nueva").value);
+    if (!/^[0-9]{2,3}X[0-9]{2,3}$/.test(nueva)) { alert("Escribe la medida nueva como 160X200."); return; }
+    if (de && nueva === de) { alert("Es la misma medida que ya tiene."); return; }
+    const ids = [...ov.querySelectorAll(".cm-art:checked")].map(c => c.value);
+    if (arts.length && !ids.length) { alert("Marca qué artículos cambian de medida."); return; }
+    const yaPedidos = arts.filter(b => ids.includes(b.id) && b.pedidoGenerado);
+    if (!confirm("¿Cambiar " + refLabel(order) + " de " + (de || "?") + " a " + nueva + "?" + (yaPedidos.length ? "\\n\\nOJO: " + yaPedidos.length + " artículo(s) YA estaban pedidos a fábrica en " + de + ". Tendrás que llamar al proveedor." : ""))) return;
+    const res = await fetch("/api/pedidos/cambiar-medida", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: order.id, ids, de, tallaNueva: nueva, usuario: currentUser }) });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok || !r.ok) { alert(r.error || "No se ha podido cambiar la medida."); return; }
+    cerrar();
+    alert("Medida cambiada a " + r.a + (r.cambios.length ? ": " + r.cambios.length + " artículo(s)." : ".") + (r.avisos.length ? "\\n\\n" + r.avisos.join("\\n") : ""));
+    await recargarTrasCancelar();
+  });
+}
+document.addEventListener("click", e => {
+  const btn = e.target.closest("[data-cambiar-medida-id]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const order = allOrders.find(o => String(o.id) === btn.dataset.cambiarMedidaId);
+  if (order) abrirCambioMedida(order);
+}, true);
+
 // Cancelar unidades (Jennifer, 2026-09-29): desde el pedido (⊘, eligiendo
 // qué artículo y cuántas unidades) o desde el pendiente del proveedor
 // ("Cancelar"). Se anotan en el pedido y se ven tachadas.
@@ -3479,13 +3561,13 @@ function render(orders) {
   const tbody = document.querySelector("#orders tbody");
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
-      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}</div></td>
+      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}\${cambiarMedidaButton(o)}</div></td>
       <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}\${casoTag(o)}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
       <td>\${o.address}\${direccionButton(o)}</td>
       <td>\${o.phone}</td>
-      <td>\${o.product}\${lineasCanceladasHtml(o)}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
+      <td>\${o.product}\${cambioMedidaHtml(o)}\${lineasCanceladasHtml(o)}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
       <td class="services">\${o.services}</td>
       <td>\${o.paymentMethod}</td>
       <td>\${pagoManualCell(o)}</td>
@@ -5418,9 +5500,9 @@ function renderPendientes() {
     // Sin fecha a propósito (Jennifer, 2026-09-23): pendientes marcados
     // "pedido a fábrica" a mano por fuera del PDF normal, para distinguir
     // de los que sí llevan fecha real (ver markOrdered/sinFecha).
-    const pedidoTag = b.pedidoGenerado
+    const pedidoTag = cambioMedidaHtml(b) + (b.pedidoGenerado
       ? \`<span class="pedido-generado-tag">✓ Pedido a fábrica\${b.fechaPedidoFabrica ? " " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : ""}</span>\`
-      : "";
+      : "");
     const refPolivalCell = showRefPolivalCol
       ? \`<td><input type="text" class="referencia-input" data-id="\${b.id}" value="\${escapeAttr(b.referencia || "")}" placeholder="ref.">\${avisoRefDuplicada(b)}</td>\`
       : "";
@@ -6548,8 +6630,8 @@ function furnitureRowCells(o) {
   const enviados = grupo.flatMap(p => backorders.filter(b => b.orderId === p.id && b.estado === "servido" && !b.reposicion && !b.gestoComercial && !b.envioAparte));
   const refDeOtroPedido = b => b.orderId !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(allOrders.find(p => p.id === b.orderId) || {}) + '</span> ' : "";
   const productoGrupo = grupo.length > 1
-    ? grupo.map(p => (p.id !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(p) + '</span> ' : "") + p.product).join("<br>")
-    : o.product;
+    ? grupo.map(p => (p.id !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(p) + '</span> ' : "") + p.product + cambioMedidaHtml(p)).join("<br>")
+    : o.product + cambioMedidaHtml(o);
   const serviciosGrupo = grupo.map(p => p.services).filter(Boolean).join(" · ");
   const todoJunto = pedidoQuiereTodoJunto(o);
   const itemsHtml = items.length
@@ -7925,7 +8007,7 @@ function renderMarketplace(platformId) {
   }
   document.querySelector("#" + platformId + "-table tbody").innerHTML = filtered.map(o => \`
     <tr\${(o.cancelado || estadoSeguimientoEspecial(o.estado) === "CANCELADO") ? ' class="fila-cancelada"' : ""}>
-      <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}</div></td>
+      <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}\${cambiarMedidaButton(o)}</div></td>
       <td>\${o.orderRef}\${casoTag(o)}</td>
       <td>\${o.orderDate || ""}</td>
       <td>\${plazoEnvioCell(o)}</td>
@@ -7936,7 +8018,7 @@ function renderMarketplace(platformId) {
       <td>\${o.province || ""}</td>
       <td>\${o.countryCode || ""}</td>
       <td>\${o.phone || ""}</td>
-      <td>\${o.product || ""}\${lineasCanceladasHtml(o)}</td>
+      <td>\${o.product || ""}\${cambioMedidaHtml(o)}\${lineasCanceladasHtml(o)}</td>
       <td>\${o.qty || 1}</td>
       <td\${o.skuMatched ? "" : ' style="color:#991b1b;font-weight:600"'}>\${o.sku || ""}\${o.skuMatched ? "" : " ⚠"}</td>
       <td>\${o.price || ""}</td>
@@ -9605,7 +9687,7 @@ function fichaPedidoBuscador(o, d) {
   const movs = d.movs.filter(m => m.orderNumber && String(m.orderNumber) === String(o.orderNumber) && (m.platform || "Shopify") === (o.platform || "Shopify") && (!o.orderRef || !m.orderRef || m.orderRef === o.orderRef));
   // Textos claros (Jennifer, 2026-10-14: "Stock +1 vendido pendiente"
   // parecía un alta de stock).
-  const ORIGEN_MOV = { venta: "venta: se usa del stock", envio: "enviado", "no-salio": "no había stock: se pide al proveedor", manual: "a mano", devolucion: "devolución", "alta-a-pendiente": "alta asignada a este pedido" };
+  const ORIGEN_MOV = { venta: "venta: se usa del stock", envio: "enviado", "no-salio": "no había stock: se pide al proveedor", manual: "a mano", devolucion: "devolución", "alta-a-pendiente": "alta asignada a este pedido", "cambio-medida": "cambio de medida del pedido" };
   for (const m of movs) add(fechaBusca(m.fecha), (m.campo === "vendidoPendiente" ? "Pendiente de recibir del proveedor " : "Stock en almacén ") + (m.delta > 0 ? "+" : "") + m.delta + ": " + nombreCortoModelo(m.stockModel) + " " + (m.talla || "") + (m.origen ? " (" + (ORIGEN_MOV[m.origen] || m.origen) + ")" : ""), m.usuario);
   // Cargas en las que ha salido (las cerradas guardan sus envíos).
   for (const c of d.cargas) {
@@ -12129,6 +12211,33 @@ async function handleFetch(request, env) {
       }
       return Response.json(data, { status: res.status });
     }
+    // Cambiar la medida del pedido entero (Jennifer, 2026-10-14).
+    if (url.pathname === "/api/pedidos/cambiar-medida" && request.method === "POST") {
+      const { orderId, ids, de, tallaNueva, usuario } = await request.json();
+      const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const orders = await (await ordersStub.fetch("https://do/orders")).json();
+      const order = orders.find((o) => String(o.id) === String(orderId));
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      const a = String(tallaNueva || "").toUpperCase().replace(/CM/g, "").replace(/\s+/g, "").replace(/[×*]/g, "X");
+      if (!/^\d{2,3}X\d{2,3}$/.test(a)) return Response.json({ ok: false, error: "Medida no válida: escríbela como 160X200." }, { status: 400 });
+      let variantTitle = "";
+      if (de) {
+        const [dw, dl] = String(de).toUpperCase().split("X");
+        const re = new RegExp(dw + "\\s*[xX×]\\s*" + dl);
+        const v = (order.items || []).map((i) => i.variantTitle || "").find((t) => re.test(t)) || "";
+        variantTitle = v.replace(re, a.replace("X", "x"));
+      }
+      const inv = await (await inventoryStub(env).fetch("https://do/backorders/cambiar-medida", {
+        method: "POST", body: JSON.stringify({ orderId: order.id, ids: ids || [], tallaNueva: a, services: order.services || "", variantTitle, usuario }),
+      })).json();
+      if (!inv.ok) return Response.json(inv, { status: 400 });
+      const deReal = de || (inv.cambios[0] && inv.cambios[0].de) || "";
+      if (inv.cambios.length || !order.inventoryProcessed) {
+        await ordersStub.fetch("https://do/orders/cambio-medida", { method: "POST", body: JSON.stringify({ orderId: order.id, de: deReal, a, usuario }) });
+      }
+      return Response.json({ ok: true, cambios: inv.cambios, avisos: inv.avisos, a, sinTramitar: !order.inventoryProcessed });
+    }
+
     if (url.pathname === "/api/pedidos/cancelar-linea" && request.method === "POST") {
       const { orderId, itemIndex, unidades, texto, usuario } = await request.json();
       const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
