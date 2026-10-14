@@ -6542,6 +6542,10 @@ function avisoRefDuplicada(b) {
 function furnitureRowCells(o) {
   const grupo = pedidosDelGrupo(o);
   const items = grupo.flatMap(p => backordersPorPedido(p.id));
+  // Artículos ya dados por enviados: se siguen viendo, marcados (Jennifer,
+  // 2026-10-14: "no me gusta que pongas todo en stock... prefiero que se
+  // queden los productos individuales y que yo vea que se ha marcado").
+  const enviados = grupo.flatMap(p => backorders.filter(b => b.orderId === p.id && b.estado === "servido" && !b.reposicion && !b.gestoComercial && !b.envioAparte));
   const refDeOtroPedido = b => b.orderId !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(allOrders.find(p => p.id === b.orderId) || {}) + '</span> ' : "";
   const productoGrupo = grupo.length > 1
     ? grupo.map(p => (p.id !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(p) + '</span> ' : "") + p.product).join("<br>")
@@ -6565,14 +6569,17 @@ function furnitureRowCells(o) {
         </label>\${todoJunto && b.tipo === "colchon" ? '<div class="todo-junto-tag">Ha solicitado enviarlo todo junto — NO SACAR POR SEPARADO</div>' : ""}\${reservaAlmacenHtml(b)}\${items.length > 1 ? \`<button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="1" title="Sacar este artículo del envío: se queda pendiente como línea propia con la referencia terminada en 2">Enviar aparte</button>\` : ""}\${abiertoTagHtml(b)}
       \`;
       }).join("")
-    : "<em>Todo en stock</em>";
+    : "";
+  const enviadosHtml = enviados.map(b => '<label class="furniture-item-check" style="opacity:0.75"><input type="checkbox" disabled' + (b.recibidoFabrica ? " checked" : "") + '> '
+    + refDeOtroPedido(b) + (b.referencia ? escapeAttr(b.referencia) + " — " : "") + b.cantidad + "x " + escapeAttr(b.stockModel) + (b.talla ? " (" + escapeAttr(b.talla) + ")" : "")
+    + ' <span class="pedido-generado-tag">✔ Dado por enviado</span></label>').join("");
   return \`
     <td>\${refLabel(o)}\${grupoEnvioTag(o)}\${valdemoroTag(o)}\${casoTag(o)}\${direccionButton(o)}\${soloFaltanAlmohadas(items.filter(b => !(b.tipo === "colchon" && b.tipoEnvio === "FPK"))) ? '<div class="todo-junto-tag" style="margin-left:0">Solo faltan las almohadas</div>' : ""}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name}</td>
     <td>\${productoGrupo}</td>
     <td class="services">\${serviciosGrupo}</td>
-    <td class="furniture-items-cell">\${itemsHtml}</td>
+    <td class="furniture-items-cell">\${itemsHtml + enviadosHtml || "<em>Sin artículos</em>"}</td>
     <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
   \`;
 }
@@ -7073,7 +7080,7 @@ function renderRetenidos(retenidos) {
     const listo = todoRecibidoFurniture(o);
     const toca = retencionCumplida(o);
     const retTxt = (r.hasta ? "Enviar en la carga del " + fechaCortaEs(r.hasta) + " o la siguiente" : "Sin fecha: a falta de luz verde del cliente")
-      + '<br><span class="' + (listo ? "retenido-listo" : "retenido-falta") + '">' + (listo ? "✓ Todo en stock" : "Falta mercancía") + "</span>"
+      + '<br><span class="' + (listo ? "retenido-listo" : "retenido-falta") + '">' + (listo ? "✓ Todo recibido" : "Falta mercancía") + "</span>"
       + (toca ? '<br><span class="retenido-toca">TOCA EN ESTA CARGA</span>' : "");
     return '<tr' + (o.cancelado ? ' class="fila-cancelada"' : "") + ">" + furnitureRowCells(o)
       + "<td>" + retTxt + "</td><td>"

@@ -3016,7 +3016,7 @@ export class InventoryStore {
   // (o directas desde fábrica al cliente): se descuentan de esa columna y
   // los pendientes de fabricante asociados se cierran. El stock real no se
   // toca aquí — nunca llegó a estar disponible para descontarlo antes.
-  async settleShipment({ orderId, furniturePendiente }) {
+  async settleShipment({ orderId, furniturePendiente, esFurniture }) {
     const stock = await this.load("stock", {});
     const backorders = await this.load("backorders", []);
     let settled = 0;
@@ -3027,6 +3027,9 @@ export class InventoryStore {
       // orders-store.js, BEZEN12259): solo se cierra lo que sale aparte por
       // SEUR (colchón/topper que no es FUR).
       if (furniturePendiente && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR")) continue;
+      // Lo que aún no ha llegado del proveedor no puede haber salido
+      // (BEZEN12260: colchón FPK de LUSO dado por enviado).
+      if (esFurniture && b.estado === "pendiente" && !b.recibidoFabrica) continue;
       // Los artículos con envío propio no salen con el pedido (Jennifer,
       // 2026-09-30: los cabeceros "enviados aparte" de BEZEN12187 y
       // BEZEN12176 quedaron como servidos al enviarse el resto sin haber

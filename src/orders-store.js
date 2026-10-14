@@ -1086,6 +1086,15 @@ export class OrdersStore {
       carga.estado = "cerrada";
       carga.fechaCierre = new Date().toISOString();
       await this.state.storage.put("cargas", cargas);
+      // Pedidos de esta carga que la tienda ya daba por enviados (albarán
+      // de Furniture creado antes de que saliera la carga, BEZEN12260):
+      // ahora sí sale lo que iba en ella.
+      if ((carga.tipo || "furniture") === "furniture") {
+        const orders = (await this.state.storage.get("orders")) || {};
+        for (const o of Object.values(orders)) {
+          if (o.cargaId === carga.id && o.agencia === "FURNITURE" && o.shippingStatus === "fulfilled") await this.settleShipment(o.id);
+        }
+      }
       this.broadcast();
       return Response.json({ ok: true, carga });
     }
@@ -1188,6 +1197,7 @@ export class OrdersStore {
         // se reintenta al volver a subir el fichero aunque el albarán ya se
         // conozca.
         const errorAnterior = idx >= 0 ? tracking[idx].shopifyError : undefined;
+        const estadoAnterior = idx >= 0 ? String(tracking[idx].estado || "").toUpperCase() : "";
         const nuevaEntrada = {
           albaran: e.albaran, estado: e.estado, fechaAlmacen: e.fechaAlmacen,
           fechaPrevista: e.fechaPrevista, seguimiento: e.seguimiento, tipo: e.tipo,
@@ -1200,7 +1210,8 @@ export class OrdersStore {
         else tracking.push(nuevaEntrada);
         order.furnitureTracking = tracking;
         pedidosTocados.add(e.orderNumber);
-        actualizadosDetalle.push({ orderNumber: e.orderNumber, albaran: e.albaran, nombre: order.name || "", estado: e.estado, nuevo: esNuevo });
+        actualizadosDetalle.push({ orderNumber: e.orderNumber, albaran: e.albaran, nombre: order.name || "", estado: e.estado, nuevo: esNuevo,
+          recibidoAhora: estadoAnterior === "PENDIENTE DE RECEPCION" && String(e.estado || "").toUpperCase() !== "PENDIENTE DE RECEPCION" });
         if (
           (esNuevo || errorAnterior) && order.platform === "Shopify" &&
           !order.cancelado && order.shippingStatus !== "cancelado" &&
@@ -1217,7 +1228,7 @@ export class OrdersStore {
       // salió antes por SEUR): con el seguimiento de Furniture ya sale lo
       // que faltaba (Jennifer, 2026-10-14, BEZEN12259).
       for (const { e, order } of destinos) {
-        const nuevo = actualizadosDetalle.some((x) => x.orderNumber === e.orderNumber && x.albaran === e.albaran && x.nuevo);
+        const nuevo = actualizadosDetalle.some((x) => x.orderNumber === e.orderNumber && x.albaran === e.albaran && (x.nuevo || x.recibidoAhora));
         if (nuevo && order.shippingStatus === "fulfilled") await this.settleShipment(order.id);
       }
       this.broadcast();
@@ -1849,21 +1860,29 @@ export class OrdersStore {
   // pack entero como enviado en Shopify (es una sola línea), pero lo que va
   // por Furniture no ha salido hasta que hay seguimiento de Furniture o su
   // carga se cierra — eso no se puede dar por servido todavía.
+  // BEZEN12260 (Jennifer, 2026-10-14): un albarán de Furniture en
+  // "PENDIENTE DE RECEPCION" no es que haya salido — Furniture aún no tiene
+  // la mercancía (la carga es el viernes). Solo cuenta un seguimiento con
+  // otro estado o con fecha de almacén, o la carga ya cerrada. Y en un
+  // pedido de Furniture nunca se da por enviado lo que no ha llegado del
+  // proveedor (el colchón FPK de LUSO).
   async settleShipment(orderId) {
     const orders = (await this.state.storage.get("orders")) || {};
     const o = orders[orderId];
     let furniturePendiente = false;
-    if (o && o.agencia === "FURNITURE" && !o.entregadoCliente) {
+    const esFurniture = !!(o && o.agencia === "FURNITURE" && !o.entregadoCliente);
+    if (esFurniture) {
       const cargas = (await this.state.storage.get("cargas")) || [];
       const carga = o.cargaId && cargas.find((c) => c.id === o.cargaId);
-      const salioPorFurniture = (o.furnitureTracking || []).length > 0 || !!(carga && (carga.tipo || "furniture") === "furniture" && carga.estado === "cerrada");
+      const recibidoPorFurniture = (o.furnitureTracking || []).some((t) => t.fechaAlmacen || (t.estado && String(t.estado).toUpperCase() !== "PENDIENTE DE RECEPCION"));
+      const salioPorFurniture = recibidoPorFurniture || !!(carga && (carga.tipo || "furniture") === "furniture" && carga.estado === "cerrada");
       furniturePendiente = !salioPorFurniture;
     }
     const id = this.env.INVENTORY_STORE.idFromName("main");
     const stub = this.env.INVENTORY_STORE.get(id);
     await stub.fetch("https://do/settle-shipment", {
       method: "POST",
-      body: JSON.stringify({ orderId, furniturePendiente }),
+      body: JSON.stringify({ orderId, furniturePendiente, esFurniture }),
     });
   }
 
