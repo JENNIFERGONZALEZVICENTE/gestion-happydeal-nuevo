@@ -6779,7 +6779,7 @@ function renderFurniture() {
       renderFurniture();
     });
   });
-  const paraTenerEnCuenta = allOrders.filter(o => o.paraTenerEnCuenta && !esMiembroSecundario(o));
+  const paraTenerEnCuenta = allOrders.filter(o => o.paraTenerEnCuenta && !esMiembroSecundario(o) && !salioPorFurniture(o));
   document.getElementById("tener-en-cuenta-count").textContent = paraTenerEnCuenta.length + " pedidos marcados";
   document.querySelector("#tener-en-cuenta-table tbody").innerHTML = paraTenerEnCuenta.map(o => \`
     <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
@@ -6894,6 +6894,14 @@ function filtrarCargaFurniture() {
 }
 document.getElementById("buscar-carga-furniture").addEventListener("input", filtrarCargaFurniture);
 
+// "Tener en cuenta" es solo para lo que aún no ha salido (Jennifer,
+// 2026-10-14): si su carga ya se cerró o Furniture ya lo tiene, sale de la
+// lista.
+function salioPorFurniture(o) {
+  const c = o.cargaId && allCargas.find(x => x.id === o.cargaId);
+  return !!(c && c.estado === "cerrada") || (o.furnitureTracking || []).some(t => t.fechaAlmacen || (t.estado && String(t.estado).toUpperCase() !== "PENDIENTE DE RECEPCION"));
+}
+
 function quedaPorFurniture(o) {
   return parseFechaGenerica(o.orderDate) >= new Date("2026-10-01T00:00:00").getTime() && !(o.furnitureTracking || []).length && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "pendiente" && !b.reposicion && !b.gestoComercial && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
 }
@@ -6918,7 +6926,7 @@ function ubicacionesLogistica(o) {
     const c = o.cargaId && cargaDe(o.cargaId);
     if (c && c.estado === "abierta") add("🚚 En la carga de Furniture del " + fechaCarga(c), { vista: "furniture", cargaId: c.id, cont: "carga-abierta-table", ref: refFila });
     else if (c) add("✔ Salió en la carga de Furniture del " + fechaCarga(c), { vista: "historial-cargas" });
-    if (o.paraTenerEnCuenta) add("👀 En «Pedidos para tener en cuenta»", { vista: "furniture", cont: "tener-en-cuenta-table", ref });
+    if (o.paraTenerEnCuenta && !salioPorFurniture(o)) add("👀 En «Pedidos para tener en cuenta»", { vista: "furniture", cont: "tener-en-cuenta-table", ref });
     if (o.gestionadoExterno) add("↪ Gestionado por otra vía (no sale en las listas de Furniture)");
     else if (!o.cargaId && (o.shippingStatus !== "fulfilled" || quedaPorFurniture(o))) {
       const items = pedidosDelGrupo(o).filter(p => !p.cancelado).flatMap(p => backordersPorPedido(p.id))

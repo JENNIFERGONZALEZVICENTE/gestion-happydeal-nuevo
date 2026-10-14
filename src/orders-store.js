@@ -1091,8 +1091,17 @@ export class OrdersStore {
       // ahora sí sale lo que iba en ella.
       if ((carga.tipo || "furniture") === "furniture") {
         const orders = (await this.state.storage.get("orders")) || {};
+        let tocados = false;
         for (const o of Object.values(orders)) {
-          if (o.cargaId === carga.id && o.agencia === "FURNITURE" && o.shippingStatus === "fulfilled") await this.settleShipment(o.id);
+          if (o.cargaId !== carga.id) continue;
+          // Ya salió: deja de estar "para tener en cuenta" (Jennifer, 2026-10-14).
+          if (o.paraTenerEnCuenta) { o.paraTenerEnCuenta = false; tocados = true; }
+          if (o.agencia === "FURNITURE" && o.shippingStatus === "fulfilled") await this.settleShipment(o.id);
+        }
+        if (tocados) {
+          const actuales = (await this.state.storage.get("orders")) || {};
+          for (const o of Object.values(orders)) if (o.cargaId === carga.id && actuales[o.id]) actuales[o.id].paraTenerEnCuenta = false;
+          await this.state.storage.put("orders", actuales);
         }
       }
       this.broadcast();
