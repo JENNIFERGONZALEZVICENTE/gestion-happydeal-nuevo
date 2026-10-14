@@ -8756,19 +8756,31 @@ async function abrirSustituirDesdePedido(orderId) {
 // el artículo) marcado como reposición — ver crearReposicion en
 // inventory-store.js.
 let reposicionOrderActual = null;
-function abrirReposicionDesdePedido(orderId) {
+// Artículos que se pueden reponer: los del pedido, y los packs desplegados
+// en sus partes (Jennifer, 2026-10-14, BEZEN11965) — en un pack se repone
+// el canapé o el cabecero, no "el pack".
+let reposicionItemsActual = [];
+async function abrirReposicionDesdePedido(orderId) {
   const order = allOrders.find(o => String(o.id) === String(orderId));
   if (!order || !order.items || !order.items.length) {
     alert("Este pedido no tiene artículos reconocidos para reponer.");
     return;
   }
   reposicionOrderActual = order;
-  document.getElementById("reposicion-modal-texto").textContent = refLabel(order) + " — " + (order.name || "");
-  document.getElementById("reposicion-item-select").innerHTML = order.items.map((item, i) => {
+  reposicionItemsActual = [];
+  for (const item of order.items) {
     const prod = catalogoProducts.find(p => p.productId === item.productId);
-    const label = (prod ? prod.stockModel : (item.sku || "Artículo")) + (item.variantTitle ? " (" + item.variantTitle + ")" : "");
-    return \`<option value="\${i}">\${escapeAttr(label)}</option>\`;
-  }).join("");
+    if (prod && prod.product_type === "Pack") {
+      const r = await fetch("/api/inventario/reposicion/componentes", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ item }) }).then(x => x.json()).catch(() => ({}));
+      if (r.componentes && r.componentes.length) {
+        r.componentes.forEach(c => reposicionItemsActual.push(Object.assign({}, item, { componente: c.idx, etiqueta: c.nombre + " (del pack)" })));
+        continue;
+      }
+    }
+    reposicionItemsActual.push(Object.assign({}, item, { etiqueta: (prod ? prod.stockModel : (item.sku || "Artículo")) + (item.variantTitle ? " (" + item.variantTitle + ")" : "") }));
+  }
+  document.getElementById("reposicion-modal-texto").textContent = refLabel(order) + " — " + (order.name || "");
+  document.getElementById("reposicion-item-select").innerHTML = reposicionItemsActual.map((item, i) => '<option value="' + i + '">' + escapeAttr(item.etiqueta) + "</option>").join("");
   document.getElementById("reposicion-motivo").value = "";
   document.getElementById("reposicion-pieza-otra").value = "";
   document.getElementById("reposicion-otra-agencia").value = "";
@@ -8810,7 +8822,7 @@ async function activarCambioReposicion(activo) {
   if (!catalogoProducts.length) {
     try { catalogoProducts = await (await fetch("/api/inventario/catalogo")).json(); } catch (e) { /* sin catálogo no hay modelos que elegir */ }
   }
-  const item = reposicionOrderActual && reposicionOrderActual.items[Number(document.getElementById("reposicion-item-select").value)];
+  const item = reposicionOrderActual && reposicionItemsActual[Number(document.getElementById("reposicion-item-select").value)];
   const modelos = catalogoProducts.filter(p => p.product_type !== "Pack" && !p.excluido && p.stockModel)
     .sort((a, b) => (a.product_type || "").localeCompare(b.product_type || "") || a.stockModel.localeCompare(b.stockModel));
   const tipos = [...new Set(modelos.map(p => p.product_type || "Otros"))];
@@ -8827,7 +8839,7 @@ async function activarCambioReposicion(activo) {
 }
 function datosCambioReposicion() {
   if (!reposicionCambioActivo || !reposicionOrderActual) return null;
-  const item = reposicionOrderActual.items[Number(document.getElementById("reposicion-item-select").value)];
+  const item = reposicionItemsActual[Number(document.getElementById("reposicion-item-select").value)];
   return {
     productId: Number(document.getElementById("reposicion-cambio-modelo").value),
     talla: document.getElementById("reposicion-cambio-talla").value.trim().toUpperCase(),
@@ -8853,7 +8865,7 @@ async function cargarPiezasReposicion() {
   const piezaSelect = document.getElementById("reposicion-pieza-select");
   if (!reposicionOrderActual) return;
   const idx = Number(document.getElementById("reposicion-item-select").value);
-  const item = reposicionOrderActual.items[idx];
+  const item = reposicionItemsActual[idx];
   if (!item) return;
   piezaSelect.style.display = "";
   document.getElementById("reposicion-piezas-checks").style.display = "none";
@@ -8947,7 +8959,7 @@ document.getElementById("reposicion-modal-overlay").addEventListener("click", (e
 document.getElementById("reposicion-modal-confirmar").addEventListener("click", async () => {
   if (!reposicionOrderActual) return;
   const idx = Number(document.getElementById("reposicion-item-select").value);
-  const item = reposicionOrderActual.items[idx];
+  const item = reposicionItemsActual[idx];
   const resultEl = document.getElementById("reposicion-modal-result");
   // Piezas elegidas: casillas si el artículo tiene varias (canapé/base),
   // desplegable si solo tiene una.
@@ -11793,6 +11805,9 @@ async function handleFetch(request, env) {
     // genérica. `referencia` se manda vacía a propósito — es solo para
     // elegir la pieza, la referencia de verdad se asigna al confirmar
     // (ver crearReposicion).
+    if (url.pathname === "/api/inventario/reposicion/componentes" && request.method === "POST") {
+      return proxyInventory(env, "/admin/reposicion/componentes", request);
+    }
     if (url.pathname === "/api/inventario/reposicion/piezas" && request.method === "POST") {
       const { item, services, productoTexto, cambio } = await request.json();
       const previewRes = await inventoryStub(env).fetch("https://do/admin/reposicion/preview", {

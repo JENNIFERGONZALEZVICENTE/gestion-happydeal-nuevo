@@ -1424,7 +1424,17 @@ function resolveItem(item, products) {
 // (resolveItem, como siempre). Con `cambio: { productId, talla, color }`
 // se usa el artículo elegido a mano del Catálogo en lugar del del pedido.
 function resolverItemReposicion(item, cambio, products) {
-  if (!cambio) return resolveItem(item, products);
+  if (!cambio) {
+    const r = resolveItem(item, products);
+    // Pack (Jennifer, 2026-10-14, BEZEN11965: pletinas de un pack de canapé
+    // + cabecero): se repone una de sus partes, elegida en la ventana.
+    if (r.tipo === "pack" && item.componente != null) {
+      const c = r.componentes[Number(item.componente)];
+      if (!c || !c.product) return { tipo: "desconocido" };
+      return { tipo: c.tipo, product: c.product, talla: c.talla, color: c.color || "", variantTitle: c.variantPack || item.variantTitle, qty: 1 };
+    }
+    return r;
+  }
   const product = products[cambio.productId];
   if (!product || product.product_type === "Pack") return { tipo: "desconocido" };
   const tipo = TYPE_MAP[product.product_type] || "otro";
@@ -2340,6 +2350,13 @@ export class InventoryStore {
       return this.crearReposicion(await request.json());
     }
 
+    // Partes de un pack para elegir cuál se repone (Jennifer, 2026-10-14).
+    if (url.pathname === "/admin/reposicion/componentes" && method === "POST") {
+      const { item } = await request.json();
+      const r = resolveItem(item, await this.load("products", {}));
+      if (r.tipo !== "pack") return Response.json({ ok: true, componentes: [] });
+      return Response.json({ ok: true, componentes: r.componentes.map((c, idx) => ({ idx, nombre: c.product ? [c.product.stockModel, c.talla, c.color].filter(Boolean).join(" · ") : null })).filter((c) => c.nombre) });
+    }
     if (url.pathname === "/admin/reposicion/preview" && method === "POST") {
       return this.resolverItemPreview(await request.json());
     }
@@ -4057,6 +4074,28 @@ export class InventoryStore {
     // Número de unidades (Jennifer, 2026-10-07: "tengo que poder elegir el
     // número de unidades") — antes siempre 1.
     const cantidad = Math.max(1, Math.min(20, Math.floor(Number(unidades) || 1)));
+    // Las piezas escritas a mano son genéricas (Jennifer, 2026-10-14,
+    // BEZEN11965: "las pletinas de unión son genéricas, no tienes que asociar
+    // nada con el canapé"): se piden tal cual, sin modelo/medida/color, a
+    // Polival (o al proveedor del artículo si no es tapicería, ej. Luso).
+    if (piezaManual) {
+      if (!["FURNITURE", "SEUR", "NACEX"].includes(agenciaReposicion)) {
+        return Response.json({ ok: false, error: "Indica por dónde sale: FURNITURE, SEUR o NACEX." }, { status: 400 });
+      }
+      const prov = (resolved.product && resolved.tipo !== "tapiceria" && resolved.product.proveedor) || "POLIVAL";
+      const backorders = await this.load("backorders", []);
+      const id = crypto.randomUUID();
+      pushBackorder(backorders, {
+        id, orderId, orderNumber, stockModel: piezaManual, talla: "", color: "", tipo: "tapiceria", cantidad,
+        orderDate: new Date().toISOString(), esPack: false, proveedor: prov, needsDecision: false,
+        referencia: prov === "POLIVAL" ? await nextReposicionReferencia(this.state) : null,
+        mercanciaFabrica: "PIEZA A REPONER: " + (piezaTexto || piezaManual),
+        platform, orderRef, reposicion: true, piezaTexto: piezaTexto || piezaManual, recibidoFabrica: false, agenciaReposicion,
+      });
+      backorders.find((b) => b.id === id).piezaManual = piezaManual;
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, id, enStock: 0 });
+    }
     if (resolved.tipo === "pack" || resolved.tipo === "desconocido") {
       return Response.json({ ok: false, error: "No se ha podido resolver este artículo contra el Catálogo." }, { status: 400 });
     }
