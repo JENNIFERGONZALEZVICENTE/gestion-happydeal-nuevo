@@ -4447,14 +4447,14 @@ function renderPB() {
     const celdaWeb = "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + margenHtmlPB(f, f.precio) + "</td>";
     // Precios BLACK 2026 (Jennifer, 2026-10-15): editable, guardado por SKU
     // (no por subida), sustituye a la columna "Precio anterior".
-    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" /><div class="pb-black-margen">' + margenHtmlPB(f, f.precioBlack) + "</div>" : "") + "</td>";
+    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="1" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" /><div class="pb-black-margen">' + margenHtmlPB(f, f.precioBlack) + "</div>" : "") + "</td>";
     return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
       + celdaTarifa
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
       + celdaWeb + "<td style=\\"white-space:nowrap;font-weight:600\\">" + (f.precioFijo != null ? fmtPrecio(f.precioFijo) : '<span style="color:var(--muted)">—</span>') + "</td>" + celdaBlack
-      + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
+      + "<td>" + (f.sku ? '<input type="number" step="1" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
   }).join("");
   // El margen se recalcula mientras se escribe, antes de guardar (Jennifer,
   // 2026-10-15: "si yo pongo un precio... me podrías calcular cuánto margen").
@@ -4465,12 +4465,12 @@ function renderPB() {
   }));
   document.querySelectorAll(".pb-black").forEach(inp => inp.addEventListener("change", async () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
-    await guardarPreciosNuevosPB([{ sku: f.sku, precio: inp.value === "" ? null : Number(inp.value) }], "black2026");
+    await guardarPreciosNuevosPB([{ sku: f.sku, precio: inp.value === "" ? null : Math.ceil(Number(inp.value) - 0.000001) }], "black2026");
   }));
   document.querySelectorAll(".pb-tarifa-btn").forEach(btn => btn.addEventListener("click", () => abrirDesgloseTarifaPB(pbDatos.filas[Number(btn.dataset.i)])));
   document.querySelectorAll(".pb-nuevo").forEach(inp => inp.addEventListener("change", async () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
-    const valor = inp.value === "" ? null : Number(inp.value);
+    const valor = inp.value === "" ? null : Math.ceil(Number(inp.value) - 0.000001);
     await guardarPreciosNuevosPB([{ sku: f.sku, precio: valor }]);
   }));
 }
@@ -4589,7 +4589,8 @@ document.getElementById("pb-descargar-btn").addEventListener("click", () => {
   const vistos = new Set();
   const filas = pbDatos.filas.filter(f => f.sku && !vistos.has(f.sku) && vistos.add(f.sku));
   // Vacía -> precio fijo (15/10); si el SKU no estaba entonces, precio web.
-  const precioDe = (f) => f[campo] != null ? f[campo] : f.precioFijo != null ? f.precioFijo : f.precio;
+  // Precios de la web SIEMPRE sin decimales, redondeo al alza (Jennifer, 2026-10-15).
+  const precioDe = (f) => { const p = f[campo] != null ? f[campo] : f.precioFijo != null ? f.precioFijo : f.precio; return p == null ? null : Math.ceil(p - 0.000001); };
   const conPrecio = filas.filter(f => precioDe(f) != null);
   if (!conPrecio.length) { alert("No hay precios para descargar."); return; }
   // VARIANTE CON 0: el precio con dos ceros al final (268 -> 26800).
