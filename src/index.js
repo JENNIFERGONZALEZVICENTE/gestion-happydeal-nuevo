@@ -12836,7 +12836,7 @@ async function handleFetch(request, env) {
     // precios (Jennifer, 2026-10-15). Solo lectura.
     if (url.pathname === "/api/shopify/productos-precios" && request.method === "GET") {
       const lista = [];
-      let next = `https://${env.SHOPIFY_SHOP_DOMAIN}/admin/api/2026-07/products.json?limit=250&status=any&fields=id,title,status,product_type,vendor,handle,variants`;
+      let next = `https://${env.SHOPIFY_SHOP_DOMAIN}/admin/api/2026-07/products.json?limit=250&fields=id,title,status,product_type,vendor,handle,variants`;
       while (next) {
         const res = await fetch(next, { headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN } });
         if (!res.ok) return new Response(`Shopify API error: ${res.status} ${await res.text()}`, { status: 502 });
