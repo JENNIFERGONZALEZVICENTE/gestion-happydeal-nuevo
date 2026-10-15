@@ -1845,6 +1845,8 @@ function renderPage() {
   .furniture-pendiente-tag { display: block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #fef3c7; color: #92400e; }
   .carga-abierta-box .toolbar { padding: 1rem 1rem 0.25rem; }
   .carga-abierta-box .table-wrap { max-height: 320px; }
+  /* Ampliar el cuadro de la carga solo cuando hace falta (Jennifer, 2026-10-15). */
+  .carga-abierta-box .table-wrap.ampliada { max-height: none; }
   /* Cargas de SEUR (Jennifer, 2026-09-29: "el cuadro se corta"): la tabla
      solo tiene 6 columnas, así que se ajusta al ancho del cuadro en vez del
      mínimo general de 1100px, y el texto largo pasa a la línea de abajo. Si
@@ -2345,10 +2347,11 @@ function renderPage() {
       <input type="file" id="tracking-upload-input" accept=".xls,.htm,.html" style="display:none" />
       <span id="tracking-upload-status" class="inventario-count" style="padding:0"></span>
       <button type="button" id="tracking-report-btn" class="secondary" style="display:none">Descargar reporte de esta subida</button>
+      <button type="button" id="ampliar-carga-furniture-btn" class="secondary" title="Ver todas las líneas de la carga sin barra de desplazamiento">⤢ Ampliar</button>
       <input type="search" id="buscar-carga-furniture" placeholder="🔎 Buscar en esta carga (pedido, nombre, producto, ref. de fábrica…)" style="min-width:300px" />
     </div>
     <div id="carga-abierta-count" class="inventario-count"></div>
-    <div class="table-wrap">
+    <div class="table-wrap" id="carga-abierta-wrap">
       <table id="carga-abierta-table">
         <thead><tr><th><input type="checkbox" id="sel-todos-furniture" title="Marcar / desmarcar todos" /></th><th>Pedido</th><th>Plataforma</th><th>Nombre</th><th>Producto comprado</th><th>Servicios adicionales</th><th>Artículos / Llegada</th><th>Notas</th><th></th></tr></thead>
         <tbody></tbody>
@@ -7775,6 +7778,10 @@ function etiquetaDescargaFurniture() {
 document.getElementById("sel-todos-furniture").addEventListener("change", e => {
   document.querySelectorAll("#carga-abierta-table tbody tr").forEach(tr => { if (tr.style.display !== "none") { const c = tr.querySelector(".sel-envio-fur"); if (c) c.checked = e.target.checked; } });
   etiquetaDescargaFurniture();
+});
+document.getElementById("ampliar-carga-furniture-btn").addEventListener("click", e => {
+  const ampliada = document.getElementById("carga-abierta-wrap").classList.toggle("ampliada");
+  e.target.textContent = ampliada ? "⤡ Reducir" : "⤢ Ampliar";
 });
 document.getElementById("descargar-carga-btn").addEventListener("click", () => {
   if (!cargaAbierta) return;
