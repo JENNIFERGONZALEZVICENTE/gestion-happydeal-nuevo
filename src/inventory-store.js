@@ -2498,11 +2498,25 @@ export class InventoryStore {
       for (let i = 0; i < borrar.length; i += 100) await this.state.storage.delete(borrar.slice(i, i + 100));
       return Response.json({ ok: true, guardados: claves.length, borrados: borrar.length });
     }
+    // PRECIOS FIJOS (Jennifer, 2026-10-15): la subida del 15/10 queda como
+    // precio de referencia desde el que trabajar. No se puede borrar ni la
+    // sustituye ninguna subida posterior (cada subida se guarda aparte).
+    if (url.pathname === "/precios-bezen/fijar" && method === "POST") {
+      const { id, usuario } = await request.json();
+      const index = await this.load("preciosBezenIndex", []);
+      const s = index.find((x) => x.id === id);
+      if (!s) return Response.json({ ok: false, error: "Subida no encontrada." }, { status: 404 });
+      if (index.some((x) => x.fija && x.id !== id)) return Response.json({ ok: false, error: "Ya hay otra subida de precios fijos." }, { status: 409 });
+      s.fija = true; s.fijadaEn = new Date().toISOString(); s.fijadaPor = usuario || null;
+      await this.state.storage.put("preciosBezenIndex", index);
+      return Response.json({ ok: true, subida: s });
+    }
     if (url.pathname === "/precios-bezen/borrar" && method === "POST") {
       const { id } = await request.json();
       const index = await this.load("preciosBezenIndex", []);
       const s = index.find((x) => x.id === id);
       if (!s) return Response.json({ ok: false, error: "Subida no encontrada." }, { status: 404 });
+      if (s.fija) return Response.json({ ok: false, error: "Son los precios fijos: no se pueden borrar." }, { status: 409 });
       const claves = [...Array(s.chunks).keys()].map((i) => "preciosBezen:" + id + ":" + i);
       claves.push(...(await this.state.storage.list({ prefix: "preciosBezenNuevo:" + id + ":" })).keys());
       for (let i = 0; i < claves.length; i += 100) await this.state.storage.delete(claves.slice(i, i + 100));
@@ -4823,6 +4837,10 @@ export class InventoryStore {
     }
     const nuevos = await this.state.storage.list({ prefix: "preciosBezenNuevo:" + id + ":" });
     const precioNuevo = new Map([...nuevos].map(([k, v]) => [k.slice(("preciosBezenNuevo:" + id + ":").length), v]));
+    // Precio fijo (subida marcada como fija) de cada SKU.
+    const fija = index.find((s) => s.fija) || null;
+    const precioFijo = new Map();
+    if (fija) for (const f of fija.id === subida.id ? filas : await this.leerSubidaPreciosBezen(fija)) if (f[2] && !precioFijo.has(f[2].toUpperCase())) precioFijo.set(f[2].toUpperCase(), f[3]);
     const blacks = await this.state.storage.list({ prefix: "preciosBezenBlack2026:" });
     const precioBlack = new Map([...blacks].map(([k, v]) => [k.slice("preciosBezenBlack2026:".length), v]));
 
@@ -4882,9 +4900,10 @@ export class InventoryStore {
         tarifaModelo: tarifa != null && m ? m.stockModel : null, tarifaTalla: tarifa != null && m ? m.talla : null,
         precioNuevo: nuevo ? nuevo.precio : null, precioNuevoFecha: nuevo ? nuevo.fecha : null,
         precioBlack: sku && precioBlack.has(sku) ? precioBlack.get(sku).precio : null,
+        precioFijo: sku && precioFijo.has(sku.toUpperCase()) ? precioFijo.get(sku.toUpperCase()) : null,
       });
     }
-    return Response.json({ ok: true, subida, anterior: anterior ? { id: anterior.id, fecha: anterior.fecha } : null, filas: salida });
+    return Response.json({ ok: true, subida, anterior: anterior ? { id: anterior.id, fecha: anterior.fecha } : null, fija: fija ? { id: fija.id, fecha: fija.fecha } : null, filas: salida });
   }
 
   async getTarifaTabla(stockModel) {

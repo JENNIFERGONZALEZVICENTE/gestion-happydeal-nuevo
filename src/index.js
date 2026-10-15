@@ -2534,9 +2534,10 @@ function renderPage() {
     <select id="pb-descargar-columna">
       <option value="precioBlack">Precios BLACK 2026</option>
       <option value="precioNuevo">Precio nuevo</option>
-      <option value="precio">Precio web</option>
+      <option value="precioFijo">Precio fijo</option>
+      <option value="precio">Precio web de esta subida</option>
     </select>
-    <button type="button" id="pb-descargar-btn" class="secondary" title="Todos los SKU: SKU / VARIANTE CON 0 / PRECIO / PRECIO TACHADO. Si la columna elegida está vacía, sale el precio web de esta subida.">Descargar fichero de precios</button>
+    <button type="button" id="pb-descargar-btn" class="secondary" title="Todos los SKU: SKU / VARIANTE CON 0 / PRECIO / PRECIO TACHADO. Si la columna elegida está vacía, sale el precio fijo (y si no hay, el precio web de esta subida).">Descargar fichero de precios</button>
     <button type="button" id="pb-borrar-btn" class="secondary" style="margin-left:auto">Borrar esta subida</button>
   </div>
   <div class="toolbar">
@@ -2557,7 +2558,7 @@ function renderPage() {
   <div id="pb-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="pb-table">
-      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th id="pb-th-web">Precio web</th><th>Precios BLACK 2026</th><th>Precio nuevo</th></tr></thead>
+      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th id="pb-th-web">Precio web</th><th id="pb-th-fijo">Precio fijo</th><th>Precios BLACK 2026</th><th>Precio nuevo</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -4386,14 +4387,16 @@ async function cargarSubidasPB(elegir) {
   pbSubidas.sort((a, b) => b.fecha.localeCompare(a.fecha));
   const sel = document.getElementById("pb-subida");
   const actual = elegir || sel.value;
-  sel.innerHTML = pbSubidas.map(s => '<option value="' + escapeAttr(s.id) + '">' + escapeAttr(fechaSubidaPB(s)) + " · " + s.filas + " filas" + (s.usuario ? " · " + escapeAttr(s.usuario) : "") + "</option>").join("");
+  sel.innerHTML = pbSubidas.map(s => '<option value="' + escapeAttr(s.id) + '">' + (s.fija ? "🔒 PRECIOS FIJOS · " : "") + escapeAttr(fechaSubidaPB(s)) + " · " + s.filas + " filas" + (s.usuario ? " · " + escapeAttr(s.usuario) : "") + "</option>").join("");
   if (!pbSubidas.length) {
     pbDatos = null;
     document.getElementById("pb-count").textContent = "Todavía no hay ninguna subida. Sube el listado de la web (columnas A Producto, D Variante, E SKU, F Precio).";
     document.querySelector("#pb-table tbody").innerHTML = "";
     return;
   }
-  sel.value = pbSubidas.some(s => s.id === actual) ? actual : pbSubidas[0].id;
+  // Por defecto se abren los precios fijos: es desde donde se trabaja.
+  const fija = pbSubidas.find(s => s.fija);
+  sel.value = pbSubidas.some(s => s.id === actual) ? actual : (fija || pbSubidas[0]).id;
   await verPB(sel.value);
 }
 async function verPB(id) {
@@ -4427,8 +4430,11 @@ function renderPB() {
   const conNuevo = pbDatos ? pbDatos.filas.filter(f => f.precioNuevo != null).length : 0;
   document.getElementById("pb-count").textContent = filas.length + " de " + total + " filas" + (filas.length > PB_MAX_FILAS ? " (se ven las " + PB_MAX_FILAS + " primeras, afina la búsqueda)" : "")
     + " · " + conNuevo + " con precio nuevo"
-    + (pbDatos && pbDatos.anterior ? " · comparando con la subida del " + new Date(pbDatos.anterior.fecha).toLocaleDateString("es-ES") : " · no hay subida anterior para comparar");
+    + (pbDatos && pbDatos.anterior ? " · comparando con la subida del " + new Date(pbDatos.anterior.fecha).toLocaleDateString("es-ES") : " · no hay subida anterior para comparar")
+    + (pbDatos && pbDatos.fija ? " · 🔒 Precios fijos: los del " + new Date(pbDatos.fija.fecha).toLocaleDateString("es-ES") + " (guardados; no se borran ni los sustituye otra subida)" : "");
   document.getElementById("pb-th-web").textContent = pbDatos ? "Precio web (" + new Date(pbDatos.subida.fecha).toLocaleDateString("es-ES") + ")" : "Precio web";
+  document.getElementById("pb-th-fijo").textContent = pbDatos && pbDatos.fija ? "🔒 Precio fijo (" + new Date(pbDatos.fija.fecha).toLocaleDateString("es-ES") + ")" : "Precio fijo";
+  document.getElementById("pb-borrar-btn").style.display = pbDatos && pbDatos.subida.fija ? "none" : "";
   document.querySelector("#pb-table tbody").innerHTML = filas.slice(0, PB_MAX_FILAS).map(f => {
     const i = pbDatos.filas.indexOf(f);
     const dif = f.tarifa != null && f.precio != null ? f.precio - f.tarifa : null;
@@ -4447,7 +4453,7 @@ function renderPB() {
       + celdaTarifa
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
-      + celdaWeb + celdaBlack
+      + celdaWeb + "<td style=\"white-space:nowrap;font-weight:600\">" + (f.precioFijo != null ? fmtPrecio(f.precioFijo) : '<span style="color:var(--muted)">—</span>') + "</td>" + celdaBlack
       + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
   }).join("");
   // El margen se recalcula mientras se escribe, antes de guardar (Jennifer,
@@ -4566,13 +4572,14 @@ document.getElementById("pb-descargar-btn").addEventListener("click", () => {
   const campo = document.getElementById("pb-descargar-columna").value;
   const vistos = new Set();
   const filas = pbDatos.filas.filter(f => f.sku && !vistos.has(f.sku) && vistos.add(f.sku));
-  const precioDe = (f) => f[campo] != null ? f[campo] : f.precio;
+  // Vacía -> precio fijo (15/10); si el SKU no estaba entonces, precio web.
+  const precioDe = (f) => f[campo] != null ? f[campo] : f.precioFijo != null ? f.precioFijo : f.precio;
   const conPrecio = filas.filter(f => precioDe(f) != null);
   if (!conPrecio.length) { alert("No hay precios para descargar."); return; }
   // VARIANTE CON 0: el precio con dos ceros al final (268 -> 26800).
   // PRECIO TACHADO: vacío hasta tener la regla (Jennifer, 2026-10-15).
   const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(conPrecio.map(f => [f.sku, Math.round(precioDe(f) * 100), precioDe(f), ""]));
-  const nombre = { precioBlack: "BLACK 2026", precioNuevo: "nuevos", precio: "web" }[campo];
+  const nombre = { precioBlack: "BLACK 2026", precioNuevo: "nuevos", precioFijo: "fijos", precio: "web" }[campo];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Precios");
   XLSX.writeFile(wb, "Precios " + nombre + " " + new Date().toISOString().slice(0, 10) + ".xlsx");
@@ -12437,6 +12444,7 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/precios-bezen/subir" && request.method === "POST") return proxyInventory(env, "/precios-bezen/subir", request);
     if (url.pathname === "/api/precios-bezen/precio-nuevo" && request.method === "POST") return proxyInventory(env, "/precios-bezen/precio-nuevo", request);
     if (url.pathname === "/api/precios-bezen/borrar" && request.method === "POST") return proxyInventory(env, "/precios-bezen/borrar", request);
+    if (url.pathname === "/api/precios-bezen/fijar" && request.method === "POST") return proxyInventory(env, "/precios-bezen/fijar", request);
     if (url.pathname === "/api/tarifas/tabla" && request.method === "GET") {
       return inventoryStub(env).fetch("https://do/tarifas/tabla?stockModel=" + encodeURIComponent(url.searchParams.get("stockModel") || ""));
     }
