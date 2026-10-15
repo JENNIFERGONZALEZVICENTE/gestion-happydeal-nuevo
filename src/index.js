@@ -4453,7 +4453,7 @@ function renderPB() {
       + celdaTarifa
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
-      + celdaWeb + "<td style=\"white-space:nowrap;font-weight:600\">" + (f.precioFijo != null ? fmtPrecio(f.precioFijo) : '<span style="color:var(--muted)">—</span>') + "</td>" + celdaBlack
+      + celdaWeb + "<td style=\\"white-space:nowrap;font-weight:600\\">" + (f.precioFijo != null ? fmtPrecio(f.precioFijo) : '<span style="color:var(--muted)">—</span>') + "</td>" + celdaBlack
       + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
   }).join("");
   // El margen se recalcula mientras se escribe, antes de guardar (Jennifer,
