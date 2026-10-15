@@ -4435,7 +4435,7 @@ function renderPB() {
     const celdaWeb = "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + margenHtmlPB(f, f.precio) + "</td>";
     // Precios BLACK 2026 (Jennifer, 2026-10-15): editable, guardado por SKU
     // (no por subida), sustituye a la columna "Precio anterior".
-    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" />' + margenHtmlPB(f, f.precioBlack) : "") + "</td>";
+    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" /><div class="pb-black-margen">' + margenHtmlPB(f, f.precioBlack) + "</div>" : "") + "</td>";
     return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
       + celdaTarifa
@@ -4444,6 +4444,13 @@ function renderPB() {
       + celdaWeb + celdaBlack
       + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
   }).join("");
+  // El margen se recalcula mientras se escribe, antes de guardar (Jennifer,
+  // 2026-10-15: "si yo pongo un precio... me podrías calcular cuánto margen").
+  document.querySelectorAll(".pb-black").forEach(inp => inp.addEventListener("input", () => {
+    const f = pbDatos.filas[Number(inp.dataset.i)];
+    const caja = inp.parentNode.querySelector(".pb-black-margen");
+    if (caja) caja.innerHTML = margenHtmlPB(f, inp.value === "" ? null : Number(inp.value));
+  }));
   document.querySelectorAll(".pb-black").forEach(inp => inp.addEventListener("change", async () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
     await guardarPreciosNuevosPB([{ sku: f.sku, precio: inp.value === "" ? null : Number(inp.value) }], "black2026");
