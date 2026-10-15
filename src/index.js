@@ -2535,6 +2535,8 @@ function renderPage() {
     <select id="pb-filtro">
       <option value="">Todas las filas</option>
       <option value="dif">Precio web distinto de tarifa</option>
+      <option value="debajo">Precio web por debajo de tarifa</option>
+      <option value="encima">Precio web por encima de tarifa</option>
       <option value="sintarifa">Sin precio de tarifa</option>
       <option value="nuevo">Con precio nuevo</option>
       <option value="cambiado">Cambiados desde la subida anterior</option>
@@ -4400,6 +4402,8 @@ function filasFiltradasPB() {
   return pbDatos.filas.filter(f => {
     if (q.length) { const t = normBuscaProducto(f.producto + " " + f.variante + " " + f.sku); if (!q.every(w => t.includes(w))) return false; }
     if (filtro === "dif") return f.tarifa != null && f.precio != null && !pbIguales(f.precio, f.tarifa);
+    if (filtro === "debajo") return f.tarifa != null && f.precio != null && f.precio < f.tarifa - 0.005;
+    if (filtro === "encima") return f.tarifa != null && f.precio != null && f.precio > f.tarifa + 0.005;
     if (filtro === "sintarifa") return f.tarifa == null;
     if (filtro === "nuevo") return f.precioNuevo != null;
     if (filtro === "cambiado") return pbDatos.anterior && f.precioAnterior !== undefined && !pbIguales(f.precioAnterior, f.precio);
@@ -4420,14 +4424,17 @@ function renderPB() {
     const dif = f.tarifa != null && f.precio != null ? f.precio - f.tarifa : null;
     const pct = dif != null && f.tarifa ? dif / f.tarifa * 100 : null;
     const distinto = dif != null && Math.abs(dif) >= 0.005;
+    // Por encima de tarifa = vendemos por encima del mínimo: verde (Jennifer,
+    // 2026-10-15). Por debajo: rojo.
+    const colorDif = !distinto ? "" : dif > 0 ? ";color:#15803d;font-weight:600" : ";color:#b91c1c;font-weight:600";
     const cambio = pbDatos.anterior && f.precioAnterior !== undefined && !pbIguales(f.precioAnterior, f.precio);
     const ant = !pbDatos.anterior ? "" : f.precioAnterior === undefined ? '<span style="color:var(--muted)">nuevo</span>' : (cambio ? "<strong>" + fmtPrecio(f.precioAnterior) + "</strong>" : fmtPrecio(f.precioAnterior));
-    return "<tr" + (distinto ? ' style="background:rgba(254,226,226,.6)"' : "") + ">"
+    return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
       + "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + "</td><td style=\\"white-space:nowrap\\">" + ant + "</td>"
       + "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? fmtPrecio(f.tarifa) : '<span style="color:var(--muted)">—</span>') + "</td>"
-      + "<td style=\\"white-space:nowrap" + (distinto ? ";color:#b91c1c;font-weight:600" : "") + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
-      + "<td style=\\"white-space:nowrap" + (distinto ? ";color:#b91c1c;font-weight:600" : "") + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
+      + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
+      + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
       + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
   }).join("");
   document.querySelectorAll(".pb-nuevo").forEach(inp => inp.addEventListener("change", async () => {
