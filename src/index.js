@@ -2389,7 +2389,9 @@ function renderPage() {
         <tr id="furniture-filter-row">
           <th></th>
           <th><input id="furniture-pedido-search" type="text" placeholder="Filtrar..." /></th>
-          <th></th><th></th><th></th><th></th>
+          <th></th><th></th>
+          <th><input id="furniture-producto-search" type="text" placeholder="Ej.: madera wengue 150x190" title="Busca pedidos con un artículo que tenga todas estas palabras (modelo, color, medida)" /></th>
+          <th></th>
           <th><input id="furniture-referencia-search" type="text" placeholder="Filtrar..." /></th>
           <th></th>
         </tr>
@@ -4041,6 +4043,7 @@ document.getElementById("descargar-reservas-almacen-btn").addEventListener("clic
 });
 document.getElementById("furniture-pedido-search").addEventListener("input", renderFurniture);
 document.getElementById("furniture-referencia-search").addEventListener("input", renderFurniture);
+document.getElementById("furniture-producto-search").addEventListener("input", renderFurniture);
 document.getElementById("color-filter").addEventListener("change", applyFilter);
 
 function updateUserBadge() {
@@ -6750,6 +6753,25 @@ function estadoDescargaFurniture(keys, pedidos) {
   if (conAlbaran && !fechas.length) return { nuevo: false, html: tag("#e5e7eb", "#374151", "📥 Ya tiene albarán") };
   return { nuevo: true, html: tag("#dcfce7", "#166534", fechas.length ? "🆕 Nuevo (en parte descargado)" : "🆕 Nuevo") };
 }
+// Buscador por producto en los pendientes de Furniture (Jennifer,
+// 2026-10-15: "tengo de sobra un canapé de madera wengué de 150x190 y
+// quiero saber si tengo algo pendiente de enviar de ese modelo y medida").
+// Todas las palabras tienen que estar en el MISMO artículo, sin tildes.
+function normBuscaProducto(t) {
+  return String(t || "").toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").replace(/(\\d)\\s*[x×]\\s*(\\d)/g, "$1x$2");
+}
+function articuloCoincide(texto, q) {
+  const t = normBuscaProducto(texto);
+  return normBuscaProducto(q).split(/\\s+/).filter(Boolean).every(w => t.includes(w));
+}
+function textoArticulo(b) {
+  return [b.stockModel, b.color, b.talla, b.mercanciaFabrica, b.piezaTexto].filter(Boolean).join(" ");
+}
+function pedidoTieneProducto(o, q) {
+  const lineas = String(o.product || "").split(/,\\s*(?=\\d+x\\s)/);
+  if (lineas.some(l => articuloCoincide(l, q))) return true;
+  return backordersPorPedido(o.id).some(b => articuloCoincide(textoArticulo(b), q));
+}
 function renderFurniture() {
   renderPestanasFurniture();
   document.getElementById("carga-abierta-titulo").textContent = formatCargaTitulo(cargaAbierta);
@@ -6772,6 +6794,7 @@ function renderFurniture() {
     : [];
   const busquedaPedido = document.getElementById("furniture-pedido-search").value.trim().toLowerCase();
   const busquedaReferencia = document.getElementById("furniture-referencia-search").value.trim().toLowerCase();
+  const busquedaProducto = document.getElementById("furniture-producto-search").value;
   // Al revés que Polival: aquí Jennifer quiere los más antiguos arriba, para
   // detectar de un vistazo los pedidos más retrasados y atenderlos primero
   // (2026-09-16). allOrders llega del backend ya ordenado más reciente
@@ -6792,6 +6815,7 @@ function renderFurniture() {
       if (!encaja) return false;
     }
     if (busquedaReferencia && !grupo.some(p => referenciasPorPedido(p.id).toLowerCase().includes(busquedaReferencia))) return false;
+    if (busquedaProducto.trim() && !grupo.some(p => pedidoTieneProducto(p, busquedaProducto))) return false;
     return true;
   }).sort((a, b) => parseFechaGenerica(a.orderDate) - parseFechaGenerica(b.orderDate));
 
@@ -6808,6 +6832,7 @@ function renderFurniture() {
     || (b.envioAparte && (b.estado === "pendiente" || b.estado === "cubierto"));
   const reposicionesEnCarga = cargaAbierta ? backorders.filter(b => esLineaPropia(b) && b.cargaId === cargaAbierta.id) : [];
   const reposicionesPendientes = backorders.filter(b => esLineaPropia(b) && !b.cargaId).filter(b => {
+    if (busquedaProducto.trim() && !articuloCoincide(textoArticulo(b), busquedaProducto)) return false;
     if (!busquedaPedido) return true;
     // refLabel(b) ya incluye el prefijo "REP" (Jennifer, 2026-09-21) —
     // buscar solo bezen+número/orderRef no lo encontraba si se escribía
@@ -7126,6 +7151,7 @@ async function irALogistica(ir) {
     document.getElementById("buscar-carga-furniture").value = "";
     document.getElementById("furniture-pedido-search").value = "";
     document.getElementById("furniture-referencia-search").value = "";
+    document.getElementById("furniture-producto-search").value = "";
   }
   await selectLogistica(ir.vista);
   if (!ir.cont || !ir.ref) return;
