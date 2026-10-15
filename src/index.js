@@ -2554,6 +2554,7 @@ function renderPage() {
     </select>
     <button type="button" id="pb-tarifa-a-nuevo-btn" class="secondary" title="En las filas que se ven ahora y tienen precio de tarifa">Poner precio de tarifa como precio nuevo</button>
     <button type="button" id="pb-quitar-nuevo-btn" class="secondary" title="En las filas que se ven ahora">Quitar precios nuevos</button>
+    <button type="button" id="pb-fijo-a-black-btn" class="secondary" title="En las filas que se ven ahora y tienen el BLACK vacío: modelos que no se rebajan en BLACK">= Precio actual en BLACK</button>
   </div>
   <div id="pb-count" class="inventario-count"></div>
   <div class="table-wrap">
@@ -4447,7 +4448,7 @@ function renderPB() {
     const celdaWeb = "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + margenHtmlPB(f, f.precio) + "</td>";
     // Precios BLACK 2026 (Jennifer, 2026-10-15): editable, guardado por SKU
     // (no por subida), sustituye a la columna "Precio anterior".
-    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="1" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" /><div class="pb-black-margen">' + margenHtmlPB(f, f.precioBlack) + "</div>" : "") + "</td>";
+    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="1" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" />' + (f.precioFijo != null || f.precio != null ? ' <button type="button" class="secondary pb-black-igual" data-i="' + i + '" title="Poner el precio actual (sin rebaja)" style="padding:2px 7px">=</button>' : "") + '<div class="pb-black-margen">' + margenHtmlPB(f, f.precioBlack) + "</div>" : "") + "</td>";
     return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
       + celdaTarifa
@@ -4466,6 +4467,10 @@ function renderPB() {
   document.querySelectorAll(".pb-black").forEach(inp => inp.addEventListener("change", async () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
     await guardarPreciosNuevosPB([{ sku: f.sku, precio: inp.value === "" ? null : Math.ceil(Number(inp.value) - 0.000001) }], "black2026");
+  }));
+  document.querySelectorAll(".pb-black-igual").forEach(btn => btn.addEventListener("click", () => {
+    const f = pbDatos.filas[Number(btn.dataset.i)];
+    guardarPreciosNuevosPB([{ sku: f.sku, precio: precioActualPB(f) }], "black2026");
   }));
   document.querySelectorAll(".pb-tarifa-btn").forEach(btn => btn.addEventListener("click", () => abrirDesgloseTarifaPB(pbDatos.filas[Number(btn.dataset.i)])));
   document.querySelectorAll(".pb-nuevo").forEach(inp => inp.addEventListener("change", async () => {
@@ -4556,6 +4561,21 @@ document.getElementById("pb-tarifa-a-nuevo-btn").addEventListener("click", async
   if (!filas.length) { alert("Ninguna de las filas que se ven tiene precio de tarifa."); return; }
   if (!confirm("¿Poner el precio de tarifa como precio nuevo en " + filas.length + " filas?")) return;
   await guardarPreciosNuevosPB(filas.map(f => ({ sku: f.sku, precio: f.tarifa })));
+});
+// Modelos que no se rebajan en BLACK (Jennifer, 2026-10-15): el BLACK
+// replica el precio actual = precio fijo del 15/10 (o el web si no estaba),
+// sin decimales y al alza. Solo rellena los BLACK vacíos, no pisa los puestos.
+function precioActualPB(f) {
+  const p = f.precioFijo != null ? f.precioFijo : f.precio;
+  return p == null ? null : Math.ceil(p - 0.000001);
+}
+document.getElementById("pb-fijo-a-black-btn").addEventListener("click", async () => {
+  if (!pbDatos) return;
+  const vistos = new Set();
+  const filas = filasFiltradasPB().filter(f => f.sku && f.precioBlack == null && precioActualPB(f) != null && !vistos.has(f.sku) && vistos.add(f.sku));
+  if (!filas.length) { alert("Ninguna de las filas que se ven tiene el BLACK vacío."); return; }
+  if (!confirm("¿Poner el precio actual como precio BLACK en " + filas.length + " variantes (solo las que tienen el BLACK vacío)?")) return;
+  await guardarPreciosNuevosPB(filas.map(f => ({ sku: f.sku, precio: precioActualPB(f) })), "black2026");
 });
 document.getElementById("pb-quitar-nuevo-btn").addEventListener("click", async () => {
   if (!pbDatos) return;
