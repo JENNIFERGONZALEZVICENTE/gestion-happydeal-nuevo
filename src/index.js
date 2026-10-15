@@ -2548,7 +2548,7 @@ function renderPage() {
   <div id="pb-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="pb-table">
-      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th id="pb-th-web">Precio web</th><th>Precio anterior</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th>Precio nuevo</th></tr></thead>
+      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio tarifa</th><th id="pb-th-web">Precio web</th><th>Precio anterior</th><th>Dif. €</th><th>Dif. %</th><th>Precio nuevo</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -4432,8 +4432,8 @@ function renderPB() {
     const ant = !pbDatos.anterior ? "" : f.precioAnterior === undefined ? '<span style="color:var(--muted)">nuevo</span>' : (cambio ? "<strong>" + fmtPrecio(f.precioAnterior) + "</strong>" : fmtPrecio(f.precioAnterior));
     return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
-      + "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + "</td><td style=\\"white-space:nowrap\\">" + ant + "</td>"
       + "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? (f.tarifaModelo ? '<button type="button" class="secondary pb-tarifa-btn" data-i="' + i + '" title="Ver cómo se calcula">' + fmtPrecio(f.tarifa) + "</button>" : fmtPrecio(f.tarifa)) : '<span style="color:var(--muted)">—</span>') + "</td>"
+      + "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + "</td><td style=\\"white-space:nowrap\\">" + ant + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
       + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
