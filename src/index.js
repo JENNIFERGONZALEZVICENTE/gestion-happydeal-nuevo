@@ -12832,6 +12832,26 @@ async function handleFetch(request, env) {
       return new Response(JSON.stringify(result), { headers: { "content-type": "application/json; charset=utf-8" } });
     }
 
+    // Listado de TODOS los productos de Shopify con sus variantes, SKU y
+    // precios (Jennifer, 2026-10-15). Solo lectura.
+    if (url.pathname === "/api/shopify/productos-precios" && request.method === "GET") {
+      const lista = [];
+      let next = `https://${env.SHOPIFY_SHOP_DOMAIN}/admin/api/2026-07/products.json?limit=250&status=any&fields=id,title,status,product_type,vendor,handle,variants`;
+      while (next) {
+        const res = await fetch(next, { headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN } });
+        if (!res.ok) return new Response(`Shopify API error: ${res.status} ${await res.text()}`, { status: 502 });
+        const data = await res.json();
+        lista.push(...data.products);
+        const link = res.headers.get("Link");
+        const n = link && link.split(",").find((p) => p.includes('rel="next"'));
+        next = n ? n.match(/<(.+)>/)[1] : null;
+      }
+      return Response.json(lista.map((p) => ({
+        id: p.id, titulo: p.title, estado: p.status, tipo: p.product_type, marca: p.vendor, handle: p.handle,
+        variantes: (p.variants || []).map((v) => ({ id: v.id, titulo: v.title, sku: v.sku, precio: v.price, precioAntes: v.compare_at_price, inventario: v.inventory_quantity })),
+      })));
+    }
+
     if (url.pathname === "/api/cargas/export" && request.method === "GET") {
       const cargaId = url.searchParams.get("cargaId") || null;
       const result = await buildFurnitureExport(env, cargaId);
