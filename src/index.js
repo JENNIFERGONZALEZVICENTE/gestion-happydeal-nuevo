@@ -1983,6 +1983,13 @@ function renderPage() {
     <li><a href="#" class="nav-link" data-tarifas="consultar">Consultar tarifas</a></li>
     <li><a href="#" class="nav-link" data-tarifas="plataformas">Ficheros plataformas</a></li>
   </ul>
+  <button class="section-title" id="precios-bezen-toggle">
+    <span>Precios BEZEN</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="precios-bezen-list">
+    <li><a href="#" class="nav-link" data-precios="bezen">Precios de la web</a></li>
+  </ul>
   <button class="section-title" id="plazos-toggle">
     <span>Plazos de entrega</span>
     <span class="chevron">▶</span>
@@ -2512,6 +2519,37 @@ function renderPage() {
 
 <div id="view-tarifas-plataformas" style="display:none">
   <div id="tarifas-plataformas-lista" class="inventario-count">Cargando...</div>
+</div>
+
+<div id="view-precios-bezen" style="display:none">
+  <div class="toolbar">
+    <button type="button" id="pb-subir-btn">Subir listado de la web (.xlsx)</button>
+    <input type="file" id="pb-subir-input" accept=".xlsx,.xls" style="display:none" />
+    <label style="font-size:13px;color:var(--muted)">Subida:</label>
+    <select id="pb-subida" style="min-width:260px"></select>
+    <button type="button" id="pb-descargar-btn" class="secondary" title="SKU / VARIANTE CON 0 / PRECIO / PRECIO TACHADO, con los precios nuevos de esta subida">Descargar fichero para BEZEN</button>
+    <button type="button" id="pb-borrar-btn" class="secondary" style="margin-left:auto">Borrar esta subida</button>
+  </div>
+  <div class="toolbar">
+    <input id="pb-buscar" type="text" placeholder="Buscar producto, medida o SKU..." style="min-width:280px" />
+    <select id="pb-filtro">
+      <option value="">Todas las filas</option>
+      <option value="dif">Precio web distinto de tarifa</option>
+      <option value="sintarifa">Sin precio de tarifa</option>
+      <option value="nuevo">Con precio nuevo</option>
+      <option value="cambiado">Cambiados desde la subida anterior</option>
+      <option value="sinsku">Sin SKU</option>
+    </select>
+    <button type="button" id="pb-tarifa-a-nuevo-btn" class="secondary" title="En las filas que se ven ahora y tienen precio de tarifa">Poner precio de tarifa como precio nuevo</button>
+    <button type="button" id="pb-quitar-nuevo-btn" class="secondary" title="En las filas que se ven ahora">Quitar precios nuevos</button>
+  </div>
+  <div id="pb-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="pb-table">
+      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio web</th><th>Precio anterior</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th>Precio nuevo</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
 </div>
 
 <div id="view-casos" style="display:none">
@@ -4103,7 +4141,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-casos-revisar-seur", "view-devoluciones-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-plazos-marketplace", "view-casos", "view-tareas"];
+const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-casos-revisar-seur", "view-devoluciones-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -4257,6 +4295,7 @@ document.querySelectorAll(".nav-link").forEach(a => {
     else if (a.dataset.logistica) selectLogistica(a.dataset.logistica);
     else if (a.dataset.historico) selectHistorico(a.dataset.historico);
     else if (a.dataset.tarifas) selectTarifas(a.dataset.tarifas);
+    else if (a.dataset.precios) selectPreciosBezen();
     else if (a.dataset.plazos) selectPlazos(a.dataset.plazos);
     else if (a.dataset.agenda === "tareas") selectTareas();
     else if (a.dataset.agenda) selectAgenda();
@@ -4303,6 +4342,165 @@ const tarifasListEl = document.getElementById("tarifas-list");
 tarifasToggle.addEventListener("click", () => {
   tarifasToggle.classList.toggle("open");
   tarifasListEl.classList.toggle("open");
+});
+
+const preciosBezenToggle = document.getElementById("precios-bezen-toggle");
+const preciosBezenListEl = document.getElementById("precios-bezen-list");
+preciosBezenToggle.addEventListener("click", () => {
+  preciosBezenToggle.classList.toggle("open");
+  preciosBezenListEl.classList.toggle("open");
+});
+
+// PRECIOS BEZEN (Jennifer, 2026-10-15): histórico de los precios de la web
+// (cada subida del listado queda con su fecha), comparados con el precio
+// BEZEN de Tarifas, con un "precio nuevo" decidido a mano y el fichero para
+// subir a BEZEN (SKU / VARIANTE CON 0 / PRECIO / PRECIO TACHADO). "Nada que
+// ver con Tarifas": Tarifas solo se consulta para la comparativa.
+let pbSubidas = [];
+let pbDatos = null;
+const PB_MAX_FILAS = 500;
+function selectPreciosBezen() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.precios === "bezen"));
+  hideAllViews();
+  document.getElementById("view-title").textContent = "Precios BEZEN · Precios de la web";
+  document.getElementById("view-precios-bezen").style.display = "block";
+  cargarSubidasPB();
+}
+function fechaSubidaPB(s) {
+  return new Date(s.fecha).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+async function cargarSubidasPB(elegir) {
+  pbSubidas = await fetch("/api/precios-bezen/subidas").then(r => r.json()).catch(() => []);
+  pbSubidas.sort((a, b) => b.fecha.localeCompare(a.fecha));
+  const sel = document.getElementById("pb-subida");
+  const actual = elegir || sel.value;
+  sel.innerHTML = pbSubidas.map(s => '<option value="' + escapeAttr(s.id) + '">' + escapeAttr(fechaSubidaPB(s)) + " · " + s.filas + " filas" + (s.usuario ? " · " + escapeAttr(s.usuario) : "") + "</option>").join("");
+  if (!pbSubidas.length) {
+    pbDatos = null;
+    document.getElementById("pb-count").textContent = "Todavía no hay ninguna subida. Sube el listado de la web (columnas A Producto, D Variante, E SKU, F Precio).";
+    document.querySelector("#pb-table tbody").innerHTML = "";
+    return;
+  }
+  sel.value = pbSubidas.some(s => s.id === actual) ? actual : pbSubidas[0].id;
+  await verPB(sel.value);
+}
+async function verPB(id) {
+  document.getElementById("pb-count").textContent = "Cargando...";
+  const res = await fetch("/api/precios-bezen/ver?id=" + encodeURIComponent(id));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { document.getElementById("pb-count").textContent = data.error || "No se ha podido cargar."; return; }
+  pbDatos = data;
+  renderPB();
+}
+function pbIguales(a, b) { return a != null && b != null && Math.abs(Number(a) - Number(b)) < 0.005; }
+function filasFiltradasPB() {
+  if (!pbDatos) return [];
+  const q = normBuscaProducto(document.getElementById("pb-buscar").value).split(" ").filter(Boolean);
+  const filtro = document.getElementById("pb-filtro").value;
+  return pbDatos.filas.filter(f => {
+    if (q.length) { const t = normBuscaProducto(f.producto + " " + f.variante + " " + f.sku); if (!q.every(w => t.includes(w))) return false; }
+    if (filtro === "dif") return f.tarifa != null && f.precio != null && !pbIguales(f.precio, f.tarifa);
+    if (filtro === "sintarifa") return f.tarifa == null;
+    if (filtro === "nuevo") return f.precioNuevo != null;
+    if (filtro === "cambiado") return pbDatos.anterior && f.precioAnterior !== undefined && !pbIguales(f.precioAnterior, f.precio);
+    if (filtro === "sinsku") return !f.sku;
+    return true;
+  });
+}
+function renderPB() {
+  const filas = filasFiltradasPB();
+  const total = pbDatos ? pbDatos.filas.length : 0;
+  const conNuevo = pbDatos ? pbDatos.filas.filter(f => f.precioNuevo != null).length : 0;
+  document.getElementById("pb-count").textContent = filas.length + " de " + total + " filas" + (filas.length > PB_MAX_FILAS ? " (se ven las " + PB_MAX_FILAS + " primeras, afina la búsqueda)" : "")
+    + " · " + conNuevo + " con precio nuevo"
+    + (pbDatos && pbDatos.anterior ? " · comparando con la subida del " + new Date(pbDatos.anterior.fecha).toLocaleDateString("es-ES") : " · no hay subida anterior para comparar");
+  document.querySelector("#pb-table tbody").innerHTML = filas.slice(0, PB_MAX_FILAS).map(f => {
+    const i = pbDatos.filas.indexOf(f);
+    const dif = f.tarifa != null && f.precio != null ? f.precio - f.tarifa : null;
+    const pct = dif != null && f.tarifa ? dif / f.tarifa * 100 : null;
+    const distinto = dif != null && Math.abs(dif) >= 0.005;
+    const cambio = pbDatos.anterior && f.precioAnterior !== undefined && !pbIguales(f.precioAnterior, f.precio);
+    const ant = !pbDatos.anterior ? "" : f.precioAnterior === undefined ? '<span style="color:var(--muted)">nuevo</span>' : (cambio ? "<strong>" + fmtPrecio(f.precioAnterior) + "</strong>" : fmtPrecio(f.precioAnterior));
+    return "<tr" + (distinto ? ' style="background:rgba(254,226,226,.6)"' : "") + ">"
+      + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
+      + "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + "</td><td style=\\"white-space:nowrap\\">" + ant + "</td>"
+      + "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? fmtPrecio(f.tarifa) : '<span style="color:var(--muted)">—</span>') + "</td>"
+      + "<td style=\\"white-space:nowrap" + (distinto ? ";color:#b91c1c;font-weight:600" : "") + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
+      + "<td style=\\"white-space:nowrap" + (distinto ? ";color:#b91c1c;font-weight:600" : "") + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
+      + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
+  }).join("");
+  document.querySelectorAll(".pb-nuevo").forEach(inp => inp.addEventListener("change", async () => {
+    const f = pbDatos.filas[Number(inp.dataset.i)];
+    const valor = inp.value === "" ? null : Number(inp.value);
+    await guardarPreciosNuevosPB([{ sku: f.sku, precio: valor }]);
+  }));
+}
+async function guardarPreciosNuevosPB(cambios) {
+  const res = await fetch("/api/precios-bezen/precio-nuevo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pbDatos.subida.id, cambios, usuario: currentUser }) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { alert(data.error || "No se ha podido guardar el precio nuevo."); return false; }
+  const porSku = new Map(cambios.map(c => [c.sku, c.precio]));
+  for (const f of pbDatos.filas) if (porSku.has(f.sku)) f.precioNuevo = porSku.get(f.sku);
+  renderPB();
+  return true;
+}
+document.getElementById("pb-subida").addEventListener("change", e => verPB(e.target.value));
+document.getElementById("pb-buscar").addEventListener("input", renderPB);
+document.getElementById("pb-filtro").addEventListener("change", renderPB);
+document.getElementById("pb-subir-btn").addEventListener("click", () => document.getElementById("pb-subir-input").click());
+document.getElementById("pb-subir-input").addEventListener("change", async e => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    const hoja = wb.Sheets[wb.SheetNames[0]];
+    const filas = XLSX.utils.sheet_to_json(hoja, { header: 1, defval: "" }).slice(1)
+      .map(r => [r[0], r[3], r[4], r[5] === "" ? null : Number(String(r[5]).replace(",", "."))])
+      .filter(r => String(r[0]).trim() || String(r[2]).trim());
+    if (!filas.length) { alert("El fichero no trae filas."); return; }
+    if (!confirm("Se van a guardar " + filas.length + " filas de «" + file.name + "» (columnas A Producto, D Variante, E SKU, F Precio) como subida de hoy. ¿Seguir?")) return;
+    const res = await fetch("/api/precios-bezen/subir", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nombre: file.name, usuario: currentUser, filas }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) { alert(data.error || "No se ha podido subir."); return; }
+    await cargarSubidasPB(data.subida.id);
+    mostrarAvisoBreve("Subida guardada: " + data.subida.filas + " filas.");
+  } catch (err) {
+    alert("No se ha podido leer el fichero: " + err.message);
+  }
+});
+document.getElementById("pb-tarifa-a-nuevo-btn").addEventListener("click", async () => {
+  if (!pbDatos) return;
+  const filas = filasFiltradasPB().filter(f => f.sku && f.tarifa != null);
+  if (!filas.length) { alert("Ninguna de las filas que se ven tiene precio de tarifa."); return; }
+  if (!confirm("¿Poner el precio de tarifa como precio nuevo en " + filas.length + " filas?")) return;
+  await guardarPreciosNuevosPB(filas.map(f => ({ sku: f.sku, precio: f.tarifa })));
+});
+document.getElementById("pb-quitar-nuevo-btn").addEventListener("click", async () => {
+  if (!pbDatos) return;
+  const filas = filasFiltradasPB().filter(f => f.sku && f.precioNuevo != null);
+  if (!filas.length) { alert("Ninguna de las filas que se ven tiene precio nuevo."); return; }
+  if (!confirm("¿Quitar el precio nuevo de " + filas.length + " filas?")) return;
+  await guardarPreciosNuevosPB(filas.map(f => ({ sku: f.sku, precio: null })));
+});
+document.getElementById("pb-descargar-btn").addEventListener("click", () => {
+  if (!pbDatos) return;
+  const vistos = new Set();
+  const filas = pbDatos.filas.filter(f => f.sku && f.precioNuevo != null && !vistos.has(f.sku) && vistos.add(f.sku));
+  if (!filas.length) { alert("Esta subida no tiene ningún precio nuevo. Escribe el precio nuevo en las filas que quieras subir a BEZEN."); return; }
+  // VARIANTE CON 0: el precio con dos ceros al final (268 -> 26800).
+  // PRECIO TACHADO: vacío hasta tener la regla (Jennifer, 2026-10-15).
+  const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(filas.map(f => [f.sku, Math.round(f.precioNuevo * 100), f.precioNuevo, ""]));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Precios BEZEN");
+  XLSX.writeFile(wb, "Precios BEZEN " + new Date(pbDatos.subida.fecha).toISOString().slice(0, 10) + ".xlsx");
+});
+document.getElementById("pb-borrar-btn").addEventListener("click", async () => {
+  if (!pbDatos) return;
+  if (!confirm("¿Borrar la subida del " + fechaSubidaPB(pbDatos.subida) + " con sus precios nuevos? No se puede deshacer.")) return;
+  const res = await fetch("/api/precios-bezen/borrar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pbDatos.subida.id }) });
+  if (!res.ok) { alert("No se ha podido borrar."); return; }
+  await cargarSubidasPB();
 });
 
 const plazosToggle = document.getElementById("plazos-toggle");
@@ -12147,6 +12345,12 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/tarifas/periodo-activo" && request.method === "POST") {
       return proxyInventory(env, "/tarifas/periodo-activo", request);
     }
+    // PRECIOS BEZEN (Jennifer, 2026-10-15): histórico de precios de la web.
+    if (url.pathname === "/api/precios-bezen/subidas" && request.method === "GET") return proxyInventory(env, "/precios-bezen/subidas", request);
+    if (url.pathname === "/api/precios-bezen/ver" && request.method === "GET") return proxyInventory(env, "/precios-bezen/ver?id=" + encodeURIComponent(url.searchParams.get("id") || ""), request);
+    if (url.pathname === "/api/precios-bezen/subir" && request.method === "POST") return proxyInventory(env, "/precios-bezen/subir", request);
+    if (url.pathname === "/api/precios-bezen/precio-nuevo" && request.method === "POST") return proxyInventory(env, "/precios-bezen/precio-nuevo", request);
+    if (url.pathname === "/api/precios-bezen/borrar" && request.method === "POST") return proxyInventory(env, "/precios-bezen/borrar", request);
     if (url.pathname === "/api/tarifas/tabla" && request.method === "GET") {
       return inventoryStub(env).fetch("https://do/tarifas/tabla?stockModel=" + encodeURIComponent(url.searchParams.get("stockModel") || ""));
     }

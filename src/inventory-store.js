@@ -2466,6 +2466,47 @@ export class InventoryStore {
       }
       return Response.json({ ok: true, costes: [...vistos.values()] });
     }
+    // PRECIOS BEZEN (Jennifer, 2026-10-15): histórico de los precios de la
+    // web, comparados con el precio BEZEN de Tarifas.
+    if (url.pathname === "/precios-bezen/subidas" && method === "GET") {
+      return Response.json(await this.load("preciosBezenIndex", []));
+    }
+    if (url.pathname === "/precios-bezen/subir" && method === "POST") {
+      return this.subirPreciosBezen(await request.json());
+    }
+    if (url.pathname === "/precios-bezen/ver" && method === "GET") {
+      return this.verPreciosBezen(url.searchParams.get("id"));
+    }
+    if (url.pathname === "/precios-bezen/precio-nuevo" && method === "POST") {
+      const { id, cambios, usuario } = await request.json();
+      const index = await this.load("preciosBezenIndex", []);
+      if (!index.some((s) => s.id === id)) return Response.json({ ok: false, error: "Subida no encontrada." }, { status: 404 });
+      const ahora = new Date().toISOString();
+      const puts = {};
+      const borrar = [];
+      for (const c of cambios || []) {
+        if (!c.sku) continue;
+        const key = "preciosBezenNuevo:" + id + ":" + c.sku;
+        const n = c.precio === null || c.precio === "" || c.precio === undefined ? null : Number(c.precio);
+        if (n === null) borrar.push(key);
+        else if (Number.isFinite(n) && n >= 0) puts[key] = { precio: Math.round(n * 100) / 100, fecha: ahora, usuario: usuario || null };
+      }
+      const claves = Object.keys(puts);
+      for (let i = 0; i < claves.length; i += 100) await this.state.storage.put(Object.fromEntries(claves.slice(i, i + 100).map((k) => [k, puts[k]])));
+      for (let i = 0; i < borrar.length; i += 100) await this.state.storage.delete(borrar.slice(i, i + 100));
+      return Response.json({ ok: true, guardados: claves.length, borrados: borrar.length });
+    }
+    if (url.pathname === "/precios-bezen/borrar" && method === "POST") {
+      const { id } = await request.json();
+      const index = await this.load("preciosBezenIndex", []);
+      const s = index.find((x) => x.id === id);
+      if (!s) return Response.json({ ok: false, error: "Subida no encontrada." }, { status: 404 });
+      const claves = [...Array(s.chunks).keys()].map((i) => "preciosBezen:" + id + ":" + i);
+      claves.push(...(await this.state.storage.list({ prefix: "preciosBezenNuevo:" + id + ":" })).keys());
+      for (let i = 0; i < claves.length; i += 100) await this.state.storage.delete(claves.slice(i, i + 100));
+      await this.state.storage.put("preciosBezenIndex", index.filter((x) => x.id !== id));
+      return Response.json({ ok: true });
+    }
     if (url.pathname === "/tarifas/tabla" && method === "GET") {
       return this.getTarifaTabla(url.searchParams.get("stockModel"));
     }
@@ -4729,6 +4770,90 @@ export class InventoryStore {
 
   // Tabla completa (todas las tallas del Catálogo para ese modelo) —
   // GET /tarifas/tabla?stockModel=...
+  // PRECIOS BEZEN (Jennifer, 2026-10-15). Cada subida del listado de la
+  // web (Producto, Variante, SKU, Precio) se guarda con su fecha, en trozos
+  // (el almacenamiento no admite valores muy grandes).
+  async subirPreciosBezen({ nombre, usuario, filas }) {
+    if (!Array.isArray(filas) || !filas.length) return Response.json({ ok: false, error: "El fichero no trae filas." }, { status: 400 });
+    const limpias = filas.map((f) => [String(f[0] || "").trim(), String(f[1] || "").trim(), String(f[2] || "").trim(), f[3] === "" || f[3] == null ? null : Number(f[3])])
+      .filter((f) => f[0] || f[2]);
+    const id = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14) + "-" + crypto.randomUUID().slice(0, 6);
+    const TROZO = 300;
+    let chunks = 0;
+    for (let i = 0; i < limpias.length; i += TROZO) {
+      await this.state.storage.put("preciosBezen:" + id + ":" + chunks, limpias.slice(i, i + TROZO));
+      chunks++;
+    }
+    const index = await this.load("preciosBezenIndex", []);
+    const entrada = { id, fecha: new Date().toISOString(), usuario: usuario || null, nombre: nombre || "", filas: limpias.length, chunks };
+    index.push(entrada);
+    await this.state.storage.put("preciosBezenIndex", index);
+    return Response.json({ ok: true, subida: entrada });
+  }
+
+  async leerSubidaPreciosBezen(s) {
+    const filas = [];
+    for (let i = 0; i < s.chunks; i++) filas.push(...((await this.state.storage.get("preciosBezen:" + s.id + ":" + i)) || []));
+    return filas;
+  }
+
+  async verPreciosBezen(id) {
+    const index = (await this.load("preciosBezenIndex", [])).slice().sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const pos = index.findIndex((s) => s.id === id);
+    if (pos < 0) return Response.json({ ok: false, error: "Subida no encontrada." }, { status: 404 });
+    const subida = index[pos];
+    const filas = await this.leerSubidaPreciosBezen(subida);
+    const anterior = pos > 0 ? index[pos - 1] : null;
+    const precioAntes = new Map();
+    if (anterior) for (const f of await this.leerSubidaPreciosBezen(anterior)) if (f[2]) precioAntes.set(f[2].toUpperCase(), f[3]);
+    const nuevos = await this.state.storage.list({ prefix: "preciosBezenNuevo:" + id + ":" });
+    const precioNuevo = new Map([...nuevos].map(([k, v]) => [k.slice(("preciosBezenNuevo:" + id + ":").length), v]));
+
+    // Precio de Tarifas (columna BEZEN): solo colchones, que es lo que
+    // calcula Tarifas. Se cruza por SKU (prefijo del Catálogo + medida) y,
+    // si no, por el nombre del producto y la medida de la variante.
+    const products = activeProducts(await this.load("products", {})).filter((p) => p.product_type === "Colchones");
+    const norm = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
+    const tallaDe = (v) => { const m = /(\d{2,3})\s*[x×]\s*(\d{2,3})/i.exec(v || ""); return m ? m[1] + "X" + m[2] : null; };
+    const modeloDe = (producto, variante, sku) => {
+      const s = String(sku || "").toUpperCase();
+      let mejor = null;
+      for (const p of products) {
+        const pre = String(p.skuPrefix || "").toUpperCase();
+        if (!pre || !s.startsWith(pre)) continue;
+        const t = s.slice(pre.length);
+        if ((p.tallas || []).some((x) => String(x).toUpperCase() === t) && (!mejor || pre.length > mejor.pre.length)) mejor = { pre, stockModel: p.stockModel, talla: t };
+      }
+      if (mejor) return mejor;
+      const p = products.find((x) => norm(x.title) === norm(producto));
+      const t = tallaDe(variante) || tallaDe(sku);
+      return p && t ? { stockModel: p.stockModel, talla: t } : null;
+    };
+    const tarifaCache = new Map();
+    const salida = [];
+    for (const [producto, variante, sku, precio] of filas) {
+      const m = modeloDe(producto, variante, sku);
+      let tarifa = null;
+      if (m) {
+        const k = m.stockModel + "|" + m.talla;
+        if (!tarifaCache.has(k)) {
+          let v = null;
+          try { const t = await this.calcularTarifaModelo(m.stockModel, m.talla); v = t && t.columnas && t.columnas.BEZEN ? t.columnas.BEZEN.precio : null; } catch (e) { v = null; }
+          tarifaCache.set(k, v);
+        }
+        tarifa = tarifaCache.get(k);
+      }
+      const nuevo = sku ? precioNuevo.get(sku) : null;
+      salida.push({
+        producto, variante, sku, precio,
+        precioAnterior: anterior && sku ? (precioAntes.has(sku.toUpperCase()) ? precioAntes.get(sku.toUpperCase()) : undefined) : undefined,
+        tarifa: tarifa ?? null,
+        precioNuevo: nuevo ? nuevo.precio : null, precioNuevoFecha: nuevo ? nuevo.fecha : null,
+      });
+    }
+    return Response.json({ ok: true, subida, anterior: anterior ? { id: anterior.id, fecha: anterior.fecha } : null, filas: salida });
+  }
+
   async getTarifaTabla(stockModel) {
     const products = await this.load("products", {});
     const product = activeProducts(products).find((p) => p.stockModel === stockModel);
