@@ -598,6 +598,11 @@ async function nextGestoComercialReferencia(state) {
 // puede formar la referencia completa (tipo sin clasificar, o color sin
 // letra asignada): se asigna igualmente el número (para no dejar huecos en
 // el correlativo) pero sin prefijo/sufijo, y Jennifer la corrige a mano.
+function tieneServicioSubidaRetirada(servicesText) {
+  const t = normalizeKey(servicesText || "");
+  return /subida|retirada/.test(t);
+}
+
 function buildReferencia(numero, referenciaTipo, color, vaFurniture) {
   const fur = vaFurniture ? "FUR" : "";
   if (referenciaTipo === "numero") return { referencia: "N" + numero + fur, needsReview: false };
@@ -4946,6 +4951,11 @@ export class InventoryStore {
       colchonesSueltos = flat.filter((c) => c.tipo === "colchon");
       agencia = colchonesSueltos.some((c) => c.product.exceptionFurniture) ? "FURNITURE" : "SEUR";
     }
+    // Subida a domicilio / retirada del colchón antiguo (Jennifer,
+    // 2026-10-15, BEZEN12318): ese servicio solo lo hace Furniture — "NUNCA
+    // puede salir con Seur". Y los complementos (almohadas, protector) van
+    // en el mismo envío, que Furniture no los cobra aparte.
+    if (tieneServicioSubidaRetirada(services)) agencia = "FURNITURE";
 
     // Caso sin regla fija posible (Jennifer, 2026-08-25): un colchón suelto
     // (no parte del pack) que comparte pedido con tapicería. No hay forma
