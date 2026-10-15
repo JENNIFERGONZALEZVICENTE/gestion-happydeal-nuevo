@@ -2548,7 +2548,7 @@ function renderPage() {
   <div id="pb-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="pb-table">
-      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio tarifa</th><th id="pb-th-web">Precio web</th><th>Precio anterior</th><th>Dif. €</th><th>Dif. %</th><th>Precio nuevo</th></tr></thead>
+      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th id="pb-th-web">Precio web</th><th>Precios BLACK 2026</th><th>Precio nuevo</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -4428,16 +4428,23 @@ function renderPB() {
     // Por encima de tarifa = vendemos por encima del mínimo: verde (Jennifer,
     // 2026-10-15). Por debajo: rojo.
     const colorDif = !distinto ? "" : dif > 0 ? ";color:#15803d;font-weight:600" : ";color:#b91c1c;font-weight:600";
-    const cambio = pbDatos.anterior && f.precioAnterior !== undefined && !pbIguales(f.precioAnterior, f.precio);
-    const ant = !pbDatos.anterior ? "" : f.precioAnterior === undefined ? '<span style="color:var(--muted)">nuevo</span>' : (cambio ? "<strong>" + fmtPrecio(f.precioAnterior) + "</strong>" : fmtPrecio(f.precioAnterior));
+    const celdaTarifa = "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? (f.tarifaModelo ? '<button type="button" class="secondary pb-tarifa-btn" data-i="' + i + '" title="Ver cómo se calcula">' + fmtPrecio(f.tarifa) + "</button>" : fmtPrecio(f.tarifa)) : '<span style="color:var(--muted)">—</span>') + "</td>";
+    const celdaWeb = "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + "</td>";
+    // Precios BLACK 2026 (Jennifer, 2026-10-15): editable, guardado por SKU
+    // (no por subida), sustituye a la columna "Precio anterior".
+    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" />' : "") + "</td>";
     return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
-      + "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? (f.tarifaModelo ? '<button type="button" class="secondary pb-tarifa-btn" data-i="' + i + '" title="Ver cómo se calcula">' + fmtPrecio(f.tarifa) + "</button>" : fmtPrecio(f.tarifa)) : '<span style="color:var(--muted)">—</span>') + "</td>"
-      + "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + "</td><td style=\\"white-space:nowrap\\">" + ant + "</td>"
+      + celdaTarifa
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
+      + celdaWeb + celdaBlack
       + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
   }).join("");
+  document.querySelectorAll(".pb-black").forEach(inp => inp.addEventListener("change", async () => {
+    const f = pbDatos.filas[Number(inp.dataset.i)];
+    await guardarPreciosNuevosPB([{ sku: f.sku, precio: inp.value === "" ? null : Number(inp.value) }], "black2026");
+  }));
   document.querySelectorAll(".pb-tarifa-btn").forEach(btn => btn.addEventListener("click", () => abrirDesgloseTarifaPB(pbDatos.filas[Number(btn.dataset.i)])));
   document.querySelectorAll(".pb-nuevo").forEach(inp => inp.addEventListener("change", async () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
@@ -4460,12 +4467,12 @@ async function abrirDesgloseTarifaPB(f) {
   abrirDesgloseTarifa(f.tarifaTalla, "BEZEN");
   document.getElementById("tarifas-desglose-titulo").textContent = f.producto + " · " + f.tarifaTalla + " — BEZEN";
 }
-async function guardarPreciosNuevosPB(cambios) {
-  const res = await fetch("/api/precios-bezen/precio-nuevo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pbDatos.subida.id, cambios, usuario: currentUser }) });
+async function guardarPreciosNuevosPB(cambios, campo) {
+  const res = await fetch("/api/precios-bezen/precio-nuevo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pbDatos.subida.id, cambios, campo: campo || "nuevo", usuario: currentUser }) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) { alert(data.error || "No se ha podido guardar el precio nuevo."); return false; }
   const porSku = new Map(cambios.map(c => [c.sku, c.precio]));
-  for (const f of pbDatos.filas) if (porSku.has(f.sku)) f.precioNuevo = porSku.get(f.sku);
+  for (const f of pbDatos.filas) if (porSku.has(f.sku)) { if (campo === "black2026") f.precioBlack = porSku.get(f.sku); else f.precioNuevo = porSku.get(f.sku); }
   renderPB();
   return true;
 }

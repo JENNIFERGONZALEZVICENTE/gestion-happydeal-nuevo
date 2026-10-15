@@ -2478,7 +2478,9 @@ export class InventoryStore {
       return this.verPreciosBezen(url.searchParams.get("id"));
     }
     if (url.pathname === "/precios-bezen/precio-nuevo" && method === "POST") {
-      const { id, cambios, usuario } = await request.json();
+      const { id, cambios, usuario, campo } = await request.json();
+      // "black2026": Precios BLACK 2026, por SKU para todas las subidas.
+      const prefijo = campo === "black2026" ? "preciosBezenBlack2026:" : "preciosBezenNuevo:" + id + ":";
       const index = await this.load("preciosBezenIndex", []);
       if (!index.some((s) => s.id === id)) return Response.json({ ok: false, error: "Subida no encontrada." }, { status: 404 });
       const ahora = new Date().toISOString();
@@ -2486,7 +2488,7 @@ export class InventoryStore {
       const borrar = [];
       for (const c of cambios || []) {
         if (!c.sku) continue;
-        const key = "preciosBezenNuevo:" + id + ":" + c.sku;
+        const key = prefijo + c.sku;
         const n = c.precio === null || c.precio === "" || c.precio === undefined ? null : Number(c.precio);
         if (n === null) borrar.push(key);
         else if (Number.isFinite(n) && n >= 0) puts[key] = { precio: Math.round(n * 100) / 100, fecha: ahora, usuario: usuario || null };
@@ -4821,6 +4823,8 @@ export class InventoryStore {
     }
     const nuevos = await this.state.storage.list({ prefix: "preciosBezenNuevo:" + id + ":" });
     const precioNuevo = new Map([...nuevos].map(([k, v]) => [k.slice(("preciosBezenNuevo:" + id + ":").length), v]));
+    const blacks = await this.state.storage.list({ prefix: "preciosBezenBlack2026:" });
+    const precioBlack = new Map([...blacks].map(([k, v]) => [k.slice("preciosBezenBlack2026:".length), v]));
 
     // Precio de Tarifas (columna BEZEN): solo colchones, que es lo que
     // calcula Tarifas. Se cruza por SKU (prefijo del Catálogo + medida) y,
@@ -4864,6 +4868,7 @@ export class InventoryStore {
         // Para abrir el desglose del cálculo, como en Tarifas.
         tarifaModelo: tarifa != null && m ? m.stockModel : null, tarifaTalla: tarifa != null && m ? m.talla : null,
         precioNuevo: nuevo ? nuevo.precio : null, precioNuevoFecha: nuevo ? nuevo.fecha : null,
+        precioBlack: sku && precioBlack.has(sku) ? precioBlack.get(sku).precio : null,
       });
     }
     return Response.json({ ok: true, subida, anterior: anterior ? { id: anterior.id, fecha: anterior.fecha } : null, filas: salida });
