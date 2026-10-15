@@ -10666,9 +10666,9 @@ function bultosCanapeMagnum(modelo, medida, color, referencia, tapaPartida, geme
 function bultosCanapeInitial(modelo, medida, color, referencia, tapaPartida, gemelo) {
   const linea = (parte) => ({ parte, texto: [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ") });
   if (gemelo) return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2"), linea("JUEGO DE PATAS")];
-  // El INITIAL de 105 lleva un solo cajón, sin cabecero/piecero (Jennifer,
-  // 2026-10-14).
-  const cajones = modelo === "CANAPÉ INITIAL" && medida.ancho === 105
+  // El INITIAL y el SOUL de 105 llevan un solo cajón, sin cabecero/piecero
+  // (Jennifer, 2026-10-14 y 2026-10-15).
+  const cajones = (modelo === "CANAPÉ INITIAL" || modelo === "CANAPÉ SOUL") && medida.ancho === 105
     ? [linea("CAJÓN")]
     : [linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
   const rows = tapaPartida
@@ -11442,8 +11442,14 @@ function estadoSeurDeLinea(order, ref, lineasDelPedido) {
   // Solo la misma referencia exacta (Jennifer, 2026-10-02): antes, con una
   // sola entrada se usaba esa aunque fuera de otro envío, y las líneas
   // "…-A2" salían con el estado del primer envío "…-A".
-  const t = tracking.find((x) => norm(x.referencia) === norm(ref));
-  return t || null;
+  // Varias etiquetas con la misma referencia (10002293221-B, Jennifer,
+  // 2026-10-15: una anulada en SEUR, otra devuelta y una nueva): vale la
+  // más reciente que SEUR no haya anulado.
+  const fecha = (x) => { const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(x.fechaCreacion || "").trim()); return m ? m[3] + m[2].padStart(2, "0") + m[1].padStart(2, "0") : ""; };
+  const mismas = tracking.filter((x) => norm(x.referencia) === norm(ref))
+    .map((x, i) => [x, i]).sort((a, b) => fecha(a[0]).localeCompare(fecha(b[0])) || a[1] - b[1]).map((p) => p[0]);
+  const vivas = mismas.filter((x) => !/se ha anulado/i.test(x.estado || ""));
+  return (vivas.length ? vivas : mismas).slice(-1)[0] || null;
 }
 
 function seurSkuExport(product, talla) {
