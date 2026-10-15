@@ -11243,6 +11243,8 @@ async function buildListadoAlmacenSeur(env, cargaId) {
     let origen;
     if (b.reservaEnviada) origen = "YA APARTADO CON ETIQUETA DE RESERVA (" + corto(b.reservaEnviada) + ")";
     else if (/^ENVÍO SUELTO/i.test(b.mercanciaFabrica || "")) origen = "APARTADO EN ALMACÉN";
+    // Gesto comercial cubierto con stock (Jennifer, 2026-10-15): se coge del stock.
+    else if (b.gestoComercial && /ya en stock/i.test(b.mercanciaFabrica || "")) origen = "STOCK";
     else if (b.fechaRecibido) origen = diaDe(b.fechaRecibido) === hoy ? "RECIBIDO HOY (" + (b.proveedor || "fábrica") + ")" : "RECIBIDO " + corto(b.fechaRecibido) + " (" + (b.proveedor || "fábrica") + ")";
     else origen = "RECIBIDO DE " + (b.proveedor || "FÁBRICA");
     filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", prefijo), cliente: o.name || "", producto: producto(b), cantidad: b.cantidad || 1, origen });
