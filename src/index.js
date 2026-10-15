@@ -8176,7 +8176,7 @@ function renderEnviosSeur() {
     (!soloPunto || (e.enPunto && !e.archivado)) &&
     (!ocultarEntregados || !esEntregado(e)) &&
     (!ocultarArchivados || !e.archivado) &&
-    (!q ||[e.ref, e.refSeur, e.nombre, e.observaciones, e.nota].join(" ").toLowerCase().includes(q)) &&
+    (!q ||[e.ref, e.refSeur, e.nombre, e.observaciones, e.nota, e.numeroExpedicion].concat((e.otrasEtiquetas || []).map(x => x.expedicion + " " + x.referencia)).join(" ").toLowerCase().includes(q)) &&
     (!estado || (e.estadoSeur || "__sin__") === estado) &&
     (!reclamado || (reclamado === "si" ? e.reclamado : reclamado === "no" ? !e.reclamado : reclamado === "respuesta" ? e.correoNoLeidos > 0 : !!(e.correo && e.correo.mensajes && e.correo.mensajes.length))) &&
     (!pais || e.pais === pais));
@@ -8203,7 +8203,12 @@ function renderEnviosSeur() {
     const avisoCelda = e.aviso24h && !e.archivado ? '<br><span class="badge" style="background:' + (e.reclamado ? "#fde68a;color:#78350f" : "#fee2e2;color:#b91c1c") + '">⚠ Sin recoger ' + Math.floor(e.horasDesdeCierre / 24) + ' día(s) tras cerrar la carga' + (e.reclamado ? " (reclamado)" : " — reclamar") + '</span>' : "";
     const ausenciaCelda = esAusencia(e) ? '<br><span class="badge" style="background:#ffedd5;color:#c2410c">📞 Ausencia o cierre — avisar al cliente</span>' : "";
     const puntoCelda = e.enPunto && !e.archivado ? '<br><span class="badge" style="background:#dbeafe;color:#1e40af">📍 En punto de recogida — revisar</span>' : "";
-    const seguimiento = avisoCelda + ausenciaCelda + puntoCelda + (e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver en SEUR</a>' : "");
+    const seguimiento = avisoCelda + ausenciaCelda + puntoCelda + (e.seguimiento ? ' <a href="' + escapeAttr(e.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver en SEUR</a>' : "")
+      + (e.numeroExpedicion ? '<br><span style="color:var(--muted);font-size:11px">Exp. ' + escapeAttr(e.numeroExpedicion) + '</span>' : "")
+      + ((e.otrasEtiquetas || []).length ? '<details style="margin-top:4px;font-size:11px"><summary style="cursor:pointer;color:var(--muted)">Otras etiquetas en SEUR (' + e.otrasEtiquetas.length + ')</summary>'
+        + e.otrasEtiquetas.map(x => '<div style="margin-top:3px">Exp. ' + escapeAttr(x.expedicion || "—") + (x.referencia && x.referencia !== (e.refSeur || e.ref) ? " · " + escapeAttr(x.referencia) : "")
+          + (x.fechaCreacion ? " · " + escapeAttr(x.fechaCreacion) : "") + ": " + escapeAttr(x.estado || "sin estado") + (x.anuladoApp ? " (anulada en la app)" : "")
+          + (x.seguimiento ? ' <a href="' + escapeAttr(x.seguimiento) + '" target="_blank" rel="noopener" class="tracking-link">Ver</a>' : "") + '</div>').join("") + '</details>' : "");
     const recl = e.reclamado
       ? '<span class="badge" style="background:#fde68a;color:#78350f">✔ Reclamado ' + (e.fechaReclamado ? new Date(e.fechaReclamado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Quitar</button>'
       : '<button type="button" class="secondary envio-seur-reclamar" data-i="' + i + '" data-valor="1">Reclamado a SEUR</button>';
@@ -11451,6 +11456,14 @@ function estadoSeurDeLinea(order, ref, lineasDelPedido) {
   const vivas = mismas.filter((x) => !/se ha anulado/i.test(x.estado || ""));
   return (vivas.length ? vivas : mismas).slice(-1)[0] || null;
 }
+// Todas las demás etiquetas que el pedido tiene en SEUR, por si acaso
+// (Jennifer, 2026-10-15): anuladas, devueltas o de otra referencia.
+function otrasEtiquetasSeur(order, principal) {
+  return ((order && order.seurTracking) || []).filter((x) => x !== principal).map((x) => ({
+    referencia: x.referencia || "", expedicion: String(x.numeroExpedicion || ""), estado: x.estado || "",
+    fechaSituacion: x.fechaSituacion || "", fechaCreacion: x.fechaCreacion || "", seguimiento: x.seguimiento || "", anuladoApp: !!x.anulado,
+  }));
+}
 
 function seurSkuExport(product, talla) {
   return `${(product.skuPrefix || "").toUpperCase()}${talla}`;
@@ -12554,7 +12567,7 @@ async function handleFetch(request, env) {
             estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
             nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
             archivado: !!info.archivado, fechaArchivado: info.fechaArchivado || null,
-            numeroExpedicion: t ? t.numeroExpedicion || "" : "",
+            numeroExpedicion: t ? t.numeroExpedicion || "" : "", otrasEtiquetas: otrasEtiquetasSeur(o, t),
             correo: info.correo || null, correoNoLeidos: noLeidosCorreo(info.correo),
           });
         }
@@ -12575,7 +12588,7 @@ async function handleFetch(request, env) {
             estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
             nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
             archivado: !!info.archivado, fechaArchivado: info.fechaArchivado || null,
-            numeroExpedicion: t ? t.numeroExpedicion || "" : "",
+            numeroExpedicion: t ? t.numeroExpedicion || "" : "", otrasEtiquetas: otrasEtiquetasSeur(o, t),
             correo: info.correo, correoNoLeidos: noLeidosCorreo(info.correo),
           });
         }
