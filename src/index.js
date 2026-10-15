@@ -4564,6 +4564,22 @@ document.getElementById("pb-quitar-nuevo-btn").addEventListener("click", async (
   if (!confirm("¿Quitar el precio nuevo de " + filas.length + " filas?")) return;
   await guardarPreciosNuevosPB(filas.map(f => ({ sku: f.sku, precio: null })));
 });
+// PRECIO TACHADO (Jennifer, 2026-10-15): el precio que se sube es un
+// descuento sobre el tachado según el ancho de la medida: hasta 105 → 40%,
+// hasta 150 → 50%, de 160 en adelante → 60%. Tachado = precio ÷ (1 − dto),
+// redondeado al alza al euro (así el descuento nunca queda por debajo).
+// Sin medida (almohadas, cabeceros...): vacío.
+function descuentoTachadoPB(f) {
+  const m = /(\\d{2,3})\\s*[x×]\\s*(\\d{2,3})/i.exec((f.variante || "") + " " + (f.sku || ""));
+  if (!m) return null;
+  const ancho = Number(m[1]);
+  return ancho <= 105 ? 0.40 : ancho <= 150 ? 0.50 : 0.60;
+}
+function precioTachadoPB(f, precio) {
+  const dto = descuentoTachadoPB(f);
+  if (dto == null || precio == null || !(precio > 0)) return "";
+  return Math.ceil(precio / (1 - dto));
+}
 // Fichero de precios con TODOS los SKU de la subida (Jennifer, 2026-10-15):
 // se elige la columna (Black, nuevo o web) y, si en esa fila está vacía,
 // sale el precio web de la subida actual.
@@ -4577,8 +4593,7 @@ document.getElementById("pb-descargar-btn").addEventListener("click", () => {
   const conPrecio = filas.filter(f => precioDe(f) != null);
   if (!conPrecio.length) { alert("No hay precios para descargar."); return; }
   // VARIANTE CON 0: el precio con dos ceros al final (268 -> 26800).
-  // PRECIO TACHADO: vacío hasta tener la regla (Jennifer, 2026-10-15).
-  const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(conPrecio.map(f => [f.sku, Math.round(precioDe(f) * 100), precioDe(f), ""]));
+  const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(conPrecio.map(f => [f.sku, Math.round(precioDe(f) * 100), precioDe(f), precioTachadoPB(f, precioDe(f))]));
   const nombre = { precioBlack: "BLACK 2026", precioNuevo: "nuevos", precioFijo: "fijos", precio: "web" }[campo];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Precios");
