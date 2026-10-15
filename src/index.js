@@ -2531,6 +2531,7 @@ function renderPage() {
     <label style="font-size:13px;color:var(--muted)">Subida:</label>
     <select id="pb-subida" style="min-width:260px"></select>
     <button type="button" id="pb-descargar-btn" class="secondary" title="SKU / VARIANTE CON 0 / PRECIO / PRECIO TACHADO, con los precios nuevos de esta subida">Descargar fichero para BEZEN</button>
+    <button type="button" id="pb-descargar-black-btn" class="secondary" title="SKU / VARIANTE CON 0 / PRECIO / PRECIO TACHADO, con los precios BLACK 2026">Descargar precios BLACK</button>
     <button type="button" id="pb-borrar-btn" class="secondary" style="margin-left:auto">Borrar esta subida</button>
   </div>
   <div class="toolbar">
@@ -4552,18 +4553,24 @@ document.getElementById("pb-quitar-nuevo-btn").addEventListener("click", async (
   if (!confirm("¿Quitar el precio nuevo de " + filas.length + " filas?")) return;
   await guardarPreciosNuevosPB(filas.map(f => ({ sku: f.sku, precio: null })));
 });
-document.getElementById("pb-descargar-btn").addEventListener("click", () => {
+// Mismo fichero para el precio nuevo o para los precios BLACK 2026
+// (Jennifer, 2026-10-15: "he subido precios en la columna de BLACK... no me
+// da la opción" de descargarlos).
+function descargarFicheroPB(campo) {
   if (!pbDatos) return;
+  const black = campo === "precioBlack";
   const vistos = new Set();
-  const filas = pbDatos.filas.filter(f => f.sku && f.precioNuevo != null && !vistos.has(f.sku) && vistos.add(f.sku));
-  if (!filas.length) { alert("Esta subida no tiene ningún precio nuevo. Escribe el precio nuevo en las filas que quieras subir a BEZEN."); return; }
+  const filas = pbDatos.filas.filter(f => f.sku && f[campo] != null && !vistos.has(f.sku) && vistos.add(f.sku));
+  if (!filas.length) { alert(black ? "No hay ningún precio BLACK escrito." : "Esta subida no tiene ningún precio nuevo. Escribe el precio nuevo en las filas que quieras subir a BEZEN."); return; }
   // VARIANTE CON 0: el precio con dos ceros al final (268 -> 26800).
   // PRECIO TACHADO: vacío hasta tener la regla (Jennifer, 2026-10-15).
-  const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(filas.map(f => [f.sku, Math.round(f.precioNuevo * 100), f.precioNuevo, ""]));
+  const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(filas.map(f => [f.sku, Math.round(f[campo] * 100), f[campo], ""]));
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Precios BEZEN");
-  XLSX.writeFile(wb, "Precios BEZEN " + new Date(pbDatos.subida.fecha).toISOString().slice(0, 10) + ".xlsx");
-});
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), black ? "Precios BLACK" : "Precios BEZEN");
+  XLSX.writeFile(wb, (black ? "Precios BLACK 2026 " + new Date().toISOString().slice(0, 10) : "Precios BEZEN " + new Date(pbDatos.subida.fecha).toISOString().slice(0, 10)) + ".xlsx");
+}
+document.getElementById("pb-descargar-btn").addEventListener("click", () => descargarFicheroPB("precioNuevo"));
+document.getElementById("pb-descargar-black-btn").addEventListener("click", () => descargarFicheroPB("precioBlack"));
 document.getElementById("pb-borrar-btn").addEventListener("click", async () => {
   if (!pbDatos) return;
   if (!confirm("¿Borrar la subida del " + fechaSubidaPB(pbDatos.subida) + " con sus precios nuevos? No se puede deshacer.")) return;
