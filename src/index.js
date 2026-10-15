@@ -4479,16 +4479,23 @@ function margenConPrecioPB(f, precio) {
   if (precio == null || f.tarifaBase == null || !f.tarifaMargenPct) return null;
   const queda = precio / 1.04 / 1.21 * 0.77;
   const margen = queda - f.tarifaBase;
-  const margenTarifa = f.tarifaBase / (1 - f.tarifaMargenPct / 100) - f.tarifaBase;
-  return { margen, pct: queda > 0 ? margen / queda * 100 : null, margenTarifa, dif: margen - margenTarifa };
+  // Se compara con el margen del PRECIO DE TARIFA real (f.tarifa), no con el
+  // % teórico de la fórmula: en muchos modelos la tarifa lleva un precio
+  // aplicado distinto (p. ej. "Zen Mandala + 15€"), y Nirvana 80x190 en
+  // tarifa (251€) ya deja un 39,5%, no un 32% (Jennifer, 2026-10-15).
+  const quedaTarifa = f.tarifa != null ? f.tarifa / 1.04 / 1.21 * 0.77 : f.tarifaBase / (1 - f.tarifaMargenPct / 100);
+  const margenTarifa = quedaTarifa - f.tarifaBase;
+  const pctTarifa = quedaTarifa > 0 ? margenTarifa / quedaTarifa * 100 : null;
+  return { margen, pct: queda > 0 ? margen / queda * 100 : null, margenTarifa, pctTarifa, dif: margen - margenTarifa };
 }
 function margenHtmlPB(f, precio) {
   const m = margenConPrecioPB(f, precio);
   if (!m) return "";
   const color = m.dif < -0.005 ? "#b91c1c" : "#15803d";
-  return '<div style="font-size:11px;margin-top:3px;white-space:nowrap;color:' + color + '" title="Margen en tarifa: ' + fmtPrecio(m.margenTarifa) + " (" + f.tarifaMargenPct + '%)">'
-    + "Margen " + fmtPrecio(m.margen) + (m.pct != null ? " (" + m.pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%)" : "")
-    + "<br>" + (m.dif >= 0 ? "+" : "") + fmtPrecio(m.dif) + " vs tarifa (" + f.tarifaMargenPct + "%)</div>";
+  const pct = (v) => v.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%";
+  return '<div style="font-size:11px;margin-top:3px;white-space:nowrap;color:' + color + '" title="Coste + envío: ' + fmtPrecio(f.tarifaBase) + " · Margen con el precio de tarifa: " + fmtPrecio(m.margenTarifa) + (m.pctTarifa != null ? " (" + pct(m.pctTarifa) + ")" : "") + " · Margen de la fórmula: " + f.tarifaMargenPct + '%">'
+    + "Margen " + fmtPrecio(m.margen) + (m.pct != null ? " (" + pct(m.pct) + ")" : "")
+    + "<br>" + (m.dif >= 0 ? "+" : "") + fmtPrecio(m.dif) + " vs tarifa" + (m.pctTarifa != null ? " (" + pct(m.pctTarifa) + ")" : "") + "</div>";
 }
 async function guardarPreciosNuevosPB(cambios, campo) {
   const res = await fetch("/api/precios-bezen/precio-nuevo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pbDatos.subida.id, cambios, campo: campo || "nuevo", usuario: currentUser }) });

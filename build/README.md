@@ -1,0 +1,1 @@
+This folder contains the built output assets for the worker "gestion-happydeal" generated at 2026-10-13T14:48:25.898Z.
