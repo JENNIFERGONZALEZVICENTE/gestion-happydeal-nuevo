@@ -2251,7 +2251,7 @@ export class InventoryStore {
     }
 
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
-      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, cuarentena, previsionEntrega, cantidad, enStock } = await request.json();
+      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, cuarentena, previsionEntrega, cantidad, enStock, refSuffix, desdeStock } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return new Response("not found", { status: 404 });
@@ -2271,6 +2271,12 @@ export class InventoryStore {
       // cancela. Sigue en la lista del proveedor, marcado, y no se puede
       // pedir a fábrica hasta quitarlo. { motivo, usuario } o null.
       if (cuarentena !== undefined) entry.cuarentena = cuarentena ? { motivo: String(cuarentena.motivo || ""), usuario: cuarentena.usuario || null, desde: new Date().toISOString() } : null;
+      // Sufijo de la referencia de SEUR a mano (Jennifer, 2026-10-15,
+      // 002-26246L38546-A: la "-A2" ya se usó y se anuló en SEUR).
+      if (refSuffix !== undefined) entry.refSuffix = String(refSuffix || "");
+      // Sale del stock del almacén aunque el pendiente sea de proveedor: en
+      // el listado de la carga de SEUR sale como STOCK.
+      if (desdeStock !== undefined) entry.desdeStock = !!desdeStock;
       if (referencia !== undefined) entry.referencia = referencia;
       if (mercanciaFabrica !== undefined) entry.mercanciaFabrica = mercanciaFabrica;
       // Tapa del canapé que ya está en el almacén (Jennifer, 2026-09-30,
