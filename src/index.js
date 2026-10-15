@@ -9445,7 +9445,7 @@ document.getElementById("gesto-comercial-modal-confirmar").addEventListener("cli
   }
   cerrarModalGestoComercial();
   alert(body.cubiertoConStock >= cantidad
-    ? "Gesto comercial registrado — cubierto con stock real, ya está en Furniture pendientes."
+    ? "Gesto comercial registrado — cubierto con stock real" + (body.carga ? ", va en la " + formatSeurCargaTitulo(body.carga) + "." : ". Prepáralo para SEUR desde Proveedores · Polival.")
     : "Gesto comercial registrado — " + (cantidad - body.cubiertoConStock) + " ud. quedan en Proveedores pendientes (" + body.referencia + ").");
   await loadOrders();
   if (document.getElementById("view-pendientes").style.display !== "none") loadPendientes();

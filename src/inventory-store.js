@@ -4497,7 +4497,15 @@ export class InventoryStore {
     });
     await this.state.storage.put("stock", stock);
     await this.state.storage.put("backorders", backorders);
-    return Response.json({ ok: true, id, referencia, cubiertoConStock: covered });
+    // Todo en stock (Jennifer, 2026-10-15, GCBEZEN12211): no pasa por
+    // Polival — directo a la carga de SEUR (antes de las 15:00 la de hoy,
+    // después la de mañana). Solo almohadas: nunca por Furniture.
+    let carga = null;
+    if (falta === 0) {
+      const r = await (await this.resolveSeurBackorder(id, "auto")).json().catch(() => ({}));
+      if (r.ok) carga = r.carga;
+    }
+    return Response.json({ ok: true, id, referencia, cubiertoConStock: covered, carga });
   }
 
   // === TARIFAS (Jennifer, 2026-09-22) ===
