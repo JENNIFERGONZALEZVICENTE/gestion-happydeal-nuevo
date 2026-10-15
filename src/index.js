@@ -4365,6 +4365,7 @@ function selectPreciosBezen() {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.precios === "bezen"));
   hideAllViews();
   document.getElementById("view-title").textContent = "Precios BEZEN · Precios de la web";
+  pbTablasTarifa.clear();
   document.getElementById("view-precios-bezen").style.display = "block";
   cargarSubidasPB();
 }
@@ -4432,16 +4433,32 @@ function renderPB() {
     return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
       + "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + "</td><td style=\\"white-space:nowrap\\">" + ant + "</td>"
-      + "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? fmtPrecio(f.tarifa) : '<span style="color:var(--muted)">—</span>') + "</td>"
+      + "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? (f.tarifaModelo ? '<button type="button" class="secondary pb-tarifa-btn" data-i="' + i + '" title="Ver cómo se calcula">' + fmtPrecio(f.tarifa) + "</button>" : fmtPrecio(f.tarifa)) : '<span style="color:var(--muted)">—</span>') + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
       + "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
   }).join("");
+  document.querySelectorAll(".pb-tarifa-btn").forEach(btn => btn.addEventListener("click", () => abrirDesgloseTarifaPB(pbDatos.filas[Number(btn.dataset.i)])));
   document.querySelectorAll(".pb-nuevo").forEach(inp => inp.addEventListener("change", async () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
     const valor = inp.value === "" ? null : Number(inp.value);
     await guardarPreciosNuevosPB([{ sku: f.sku, precio: valor }]);
   }));
+}
+// Desglose del precio de tarifa, el mismo que en Tarifas (Jennifer,
+// 2026-10-15: "al igual que puedo verlo en la tarifa").
+const pbTablasTarifa = new Map();
+async function abrirDesgloseTarifaPB(f) {
+  if (!f || !f.tarifaModelo) return;
+  if (!pbTablasTarifa.has(f.tarifaModelo)) {
+    const res = await fetch("/api/tarifas/tabla?stockModel=" + encodeURIComponent(f.tarifaModelo));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) { alert(data.error || "No se ha podido cargar el cálculo de la tarifa."); return; }
+    pbTablasTarifa.set(f.tarifaModelo, data.filas);
+  }
+  tarifasFilasActuales = pbTablasTarifa.get(f.tarifaModelo);
+  abrirDesgloseTarifa(f.tarifaTalla, "BEZEN");
+  document.getElementById("tarifas-desglose-titulo").textContent = f.producto + " · " + f.tarifaTalla + " — BEZEN";
 }
 async function guardarPreciosNuevosPB(cambios) {
   const res = await fetch("/api/precios-bezen/precio-nuevo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pbDatos.subida.id, cambios, usuario: currentUser }) });

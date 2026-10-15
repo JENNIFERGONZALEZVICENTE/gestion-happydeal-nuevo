@@ -4861,6 +4861,8 @@ export class InventoryStore {
         producto, variante, sku, precio, precioDesde: sku ? desde.get(sku.toUpperCase()) : subida.fecha,
         precioAnterior: anterior && sku ? (precioAntes.has(sku.toUpperCase()) ? precioAntes.get(sku.toUpperCase()) : undefined) : undefined,
         tarifa: tarifa ?? null,
+        // Para abrir el desglose del cálculo, como en Tarifas.
+        tarifaModelo: tarifa != null && m ? m.stockModel : null, tarifaTalla: tarifa != null && m ? m.talla : null,
         precioNuevo: nuevo ? nuevo.precio : null, precioNuevoFecha: nuevo ? nuevo.fecha : null,
       });
     }
