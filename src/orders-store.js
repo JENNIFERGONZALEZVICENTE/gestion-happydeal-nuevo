@@ -1103,6 +1103,22 @@ export class OrdersStore {
       return Response.json({ ok: true });
     }
 
+    // Envíos de la carga de Furniture ya descargados en el Excel (Jennifer,
+    // 2026-10-15: va sacando las etiquetas poco a poco y necesita distinguir
+    // lo nuevo). Solo informativo: la descarga no se limita. { cargaId, keys }
+    if (url.pathname === "/cargas/descargas" && request.method === "POST") {
+      const { cargaId, keys } = await request.json();
+      const cargas = (await this.state.storage.get("cargas")) || [];
+      const carga = cargas.find((c) => c.id === cargaId);
+      if (!carga) return new Response("not found", { status: 404 });
+      const ahora = new Date().toISOString();
+      carga.descargas = carga.descargas || {};
+      for (const k of keys || []) carga.descargas[k] = ahora;
+      await this.state.storage.put("cargas", cargas);
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+
     if (url.pathname === "/cargas/close" && request.method === "POST") {
       const { cargaId } = await request.json();
       const cargas = (await this.state.storage.get("cargas")) || [];

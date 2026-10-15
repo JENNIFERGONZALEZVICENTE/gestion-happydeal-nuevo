@@ -6734,6 +6734,22 @@ function reposicionRowCells(b) {
   \`;
 }
 
+// Si un envío de la carga ya salió en un Excel de Furniture descargado
+// (carga.descargas, se apunta al descargar). Los que ya tienen albarán de
+// Furniture "PENDIENTE DE RECEPCION" también tienen etiqueta hecha (los de
+// antes de que la app apuntara las descargas).
+function estadoDescargaFurniture(keys, pedidos) {
+  const d = (cargaAbierta && cargaAbierta.descargas) || {};
+  const fechas = keys.map(k => d[k]).filter(Boolean).sort();
+  const tag = (fondo, color, texto) => '<div style="margin-top:4px;white-space:nowrap"><span class="badge" style="background:' + fondo + ';color:' + color + '">' + texto + '</span></div>';
+  if (keys.length && fechas.length === keys.length) {
+    const f = new Date(fechas[fechas.length - 1]);
+    return { nuevo: false, html: tag("#e5e7eb", "#374151", "📥 Descargado " + f.toLocaleString("es-ES", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })) };
+  }
+  const conAlbaran = pedidos.some(p => (p.furnitureTracking || []).some(t => String(t.estado || "").toUpperCase() === "PENDIENTE DE RECEPCION"));
+  if (conAlbaran && !fechas.length) return { nuevo: false, html: tag("#e5e7eb", "#374151", "📥 Ya tiene albarán") };
+  return { nuevo: true, html: tag("#dcfce7", "#166534", fechas.length ? "🆕 Nuevo (en parte descargado)" : "🆕 Nuevo") };
+}
 function renderFurniture() {
   renderPestanasFurniture();
   document.getElementById("carga-abierta-titulo").textContent = formatCargaTitulo(cargaAbierta);
@@ -6800,19 +6816,28 @@ function renderFurniture() {
   }).sort((a, b) => parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha));
 
   document.getElementById("carga-abierta-count").textContent = (enCarga.length + reposicionesEnCarga.length) + " pedidos en esta carga";
-  document.querySelector("#carga-abierta-table tbody").innerHTML = enCarga.map(o => \`
+  // Ya descargado / nuevo (Jennifer, 2026-10-15): lo nuevo arriba, para
+  // verlo de un golpe; lo descargado sigue pudiéndose descargar otra vez.
+  const filasCarga = enCarga.map(o => {
+    const d = estadoDescargaFurniture(pedidosDelGrupo(o).map(p => "o:" + p.id), pedidosDelGrupo(o));
+    return { nuevo: d.nuevo, html: \`
     <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
-      <td><input type="checkbox" class="sel-envio-fur" data-keys="\${escapeAttr(pedidosDelGrupo(o).map(p => "o:" + p.id).join(","))}" /></td>
+      <td><input type="checkbox" class="sel-envio-fur" data-keys="\${escapeAttr(pedidosDelGrupo(o).map(p => "o:" + p.id).join(","))}" />\${d.html}</td>
       \${furnitureRowCells(o)}
       <td><button type="button" class="sacar-carga-btn" data-id="\${o.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-order-id="' + o.id + '"')}</td>
     </tr>
-  \`).join("") + reposicionesEnCarga.map(b => \`
+  \` };
+  }).concat(reposicionesEnCarga.map(b => {
+    const d = estadoDescargaFurniture(["b:" + b.id], []);
+    return { nuevo: d.nuevo, html: \`
     <tr>
-      <td><input type="checkbox" class="sel-envio-fur" data-keys="\${escapeAttr("b:" + b.id)}" /></td>
+      <td><input type="checkbox" class="sel-envio-fur" data-keys="\${escapeAttr("b:" + b.id)}" />\${d.html}</td>
       \${reposicionRowCells(b)}
       <td><button type="button" class="sacar-carga-reposicion-btn" data-repo-id="\${b.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-backorder-id="' + escapeAttr(b.id) + '"')}</td>
     </tr>
-  \`).join("");
+  \` };
+  }));
+  document.querySelector("#carga-abierta-table tbody").innerHTML = filasCarga.filter(f => f.nuevo).concat(filasCarga.filter(f => !f.nuevo)).map(f => f.html).join("");
   filtrarCargaFurniture();
   document.getElementById("sel-todos-furniture").checked = false;
   etiquetaDescargaFurniture();
@@ -7479,6 +7504,8 @@ document.getElementById("descargar-carga-btn").addEventListener("click", () => {
   if (!cargaAbierta) return;
   const sel = [...document.querySelectorAll(".sel-envio-fur:checked")].flatMap(c => c.dataset.keys.split(","));
   window.location.href = "/api/cargas/export?cargaId=" + encodeURIComponent(cargaAbierta.id) + (sel.length ? "&sel=" + encodeURIComponent(sel.join(",")) : "");
+  // Repinta con la marca de descargado (se apunta al generar el fichero).
+  setTimeout(async () => { await loadCargas(); elegirCargaFurniture(); renderFurniture(); }, 2500);
 });
 
 document.getElementById("cerrar-carga-btn").addEventListener("click", async () => {
@@ -12786,6 +12813,13 @@ async function handleFetch(request, env) {
       const rows = sel.length ? result.rows.filter((r, i) => sel.includes(result.rowKeys[i])) : result.rows;
       if (sel.length && !rows.length) return new Response("Ninguno de los envíos marcados tiene líneas en el fichero.", { status: 400 });
       const csv = buildFurnitureCsv(rows);
+      // Se apunta qué envíos han salido en el fichero (Jennifer, 2026-10-15).
+      const keysDescargadas = [...new Set(result.rowKeys.filter((k, i) => !sel.length || sel.includes(result.rowKeys[i])))].filter(Boolean);
+      if (keysDescargadas.length) {
+        await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/cargas/descargas", {
+          method: "POST", body: JSON.stringify({ cargaId: result.carga.id, keys: keysDescargadas }),
+        }).catch(() => {});
+      }
       const filename = `Furniture_${result.carga.fecha}${sel.length ? "_seleccion" : ""}.csv`;
       return new Response(csv, {
         headers: {
