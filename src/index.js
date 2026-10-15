@@ -4568,10 +4568,10 @@ document.getElementById("pb-quitar-nuevo-btn").addEventListener("click", async (
 // descuento sobre el tachado según el ancho de la medida: hasta 105 → 40%,
 // hasta 150 → 50%, de 160 en adelante → 60%. Tachado = precio ÷ (1 − dto),
 // redondeado al alza al euro (así el descuento nunca queda por debajo).
-// Sin medida (almohadas, cabeceros...): vacío.
+// Sin medida (almohadas, cabeceros...): siempre 50% (Jennifer, 2026-10-15).
 function descuentoTachadoPB(f) {
   const m = /(\\d{2,3})\\s*[x×]\\s*(\\d{2,3})/i.exec((f.variante || "") + " " + (f.sku || ""));
-  if (!m) return null;
+  if (!m) return 0.50;
   const ancho = Number(m[1]);
   return ancho <= 105 ? 0.40 : ancho <= 150 ? 0.50 : 0.60;
 }
