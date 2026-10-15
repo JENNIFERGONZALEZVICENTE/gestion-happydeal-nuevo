@@ -4429,10 +4429,10 @@ function renderPB() {
     // 2026-10-15). Por debajo: rojo.
     const colorDif = !distinto ? "" : dif > 0 ? ";color:#15803d;font-weight:600" : ";color:#b91c1c;font-weight:600";
     const celdaTarifa = "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? (f.tarifaModelo ? '<button type="button" class="secondary pb-tarifa-btn" data-i="' + i + '" title="Ver cómo se calcula">' + fmtPrecio(f.tarifa) + "</button>" : fmtPrecio(f.tarifa)) : '<span style="color:var(--muted)">—</span>') + "</td>";
-    const celdaWeb = "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + "</td>";
+    const celdaWeb = "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + margenHtmlPB(f, f.precio) + "</td>";
     // Precios BLACK 2026 (Jennifer, 2026-10-15): editable, guardado por SKU
     // (no por subida), sustituye a la columna "Precio anterior".
-    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" />' : "") + "</td>";
+    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="0.01" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" />' + margenHtmlPB(f, f.precioBlack) : "") + "</td>";
     return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
       + celdaTarifa
@@ -4466,6 +4466,26 @@ async function abrirDesgloseTarifaPB(f) {
   tarifasFilasActuales = pbTablasTarifa.get(f.tarifaModelo);
   abrirDesgloseTarifa(f.tarifaTalla, "BEZEN");
   document.getElementById("tarifas-desglose-titulo").textContent = f.producto + " · " + f.tarifaTalla + " — BEZEN";
+}
+// Margen que queda con el precio Black (Jennifer, 2026-10-15: "calcular
+// sobre el precio de coste qué importe estamos cobrando siguiendo las reglas
+// de la tarifa... siempre contra el margen"). Es la fórmula BEZEN de Tarifas
+// al revés: precio ÷ 1,04 (financieras) ÷ 1,21 (IVA) × 0,77 (publicidad) =
+// lo que queda para coste + envío + margen.
+function margenConPrecioPB(f, precio) {
+  if (precio == null || f.tarifaBase == null || !f.tarifaMargenPct) return null;
+  const queda = precio / 1.04 / 1.21 * 0.77;
+  const margen = queda - f.tarifaBase;
+  const margenTarifa = f.tarifaBase / (1 - f.tarifaMargenPct / 100) - f.tarifaBase;
+  return { margen, pct: queda > 0 ? margen / queda * 100 : null, margenTarifa, dif: margen - margenTarifa };
+}
+function margenHtmlPB(f, precio) {
+  const m = margenConPrecioPB(f, precio);
+  if (!m) return "";
+  const color = m.dif < -0.005 ? "#b91c1c" : "#15803d";
+  return '<div style="font-size:11px;margin-top:3px;white-space:nowrap;color:' + color + '" title="Margen en tarifa: ' + fmtPrecio(m.margenTarifa) + " (" + f.tarifaMargenPct + '%)">'
+    + "Margen " + fmtPrecio(m.margen) + (m.pct != null ? " (" + m.pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%)" : "")
+    + "<br>" + (m.dif >= 0 ? "+" : "") + fmtPrecio(m.dif) + " vs tarifa (" + f.tarifaMargenPct + "%)</div>";
 }
 async function guardarPreciosNuevosPB(cambios, campo) {
   const res = await fetch("/api/precios-bezen/precio-nuevo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pbDatos.subida.id, cambios, campo: campo || "nuevo", usuario: currentUser }) });

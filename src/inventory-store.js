@@ -4851,14 +4851,26 @@ export class InventoryStore {
     for (const [producto, variante, sku, precio] of filas) {
       const m = modeloDe(producto, variante, sku);
       let tarifa = null;
+      let tarifaInfo = null;
       if (m) {
         const k = m.stockModel + "|" + m.talla;
         if (!tarifaCache.has(k)) {
           let v = null;
-          try { const t = await this.calcularTarifaModelo(m.stockModel, m.talla); v = t && t.columnas && t.columnas.BEZEN ? t.columnas.BEZEN.precio : null; } catch (e) { v = null; }
+          try {
+            const t = await this.calcularTarifaModelo(m.stockModel, m.talla);
+            const col = t && t.columnas && t.columnas.BEZEN;
+            if (col && col.precio != null) {
+              // Coste + envío y % de margen de la propia fórmula, para
+              // calcular el margen que deja otro precio (precio Black).
+              const base = (col.pasos || []).find((p) => p.label === "Coste + envío");
+              const mm = (col.pasos || []).map((p) => /\((\d+(?:[.,]\d+)?)% margen\)/.exec(p.label)).find(Boolean);
+              v = { precio: col.precio, base: base ? base.valor : null, margenPct: mm ? Number(mm[1].replace(",", ".")) : null };
+            }
+          } catch (e) { v = null; }
           tarifaCache.set(k, v);
         }
-        tarifa = tarifaCache.get(k);
+        tarifaInfo = tarifaCache.get(k);
+        tarifa = tarifaInfo ? tarifaInfo.precio : null;
       }
       const nuevo = sku ? precioNuevo.get(sku) : null;
       salida.push({
@@ -4866,6 +4878,7 @@ export class InventoryStore {
         precioAnterior: anterior && sku ? (precioAntes.has(sku.toUpperCase()) ? precioAntes.get(sku.toUpperCase()) : undefined) : undefined,
         tarifa: tarifa ?? null,
         // Para abrir el desglose del cálculo, como en Tarifas.
+        tarifaBase: tarifaInfo ? tarifaInfo.base : null, tarifaMargenPct: tarifaInfo ? tarifaInfo.margenPct : null,
         tarifaModelo: tarifa != null && m ? m.stockModel : null, tarifaTalla: tarifa != null && m ? m.talla : null,
         precioNuevo: nuevo ? nuevo.precio : null, precioNuevoFecha: nuevo ? nuevo.fecha : null,
         precioBlack: sku && precioBlack.has(sku) ? precioBlack.get(sku).precio : null,
