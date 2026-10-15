@@ -4806,6 +4806,19 @@ export class InventoryStore {
     const anterior = pos > 0 ? index[pos - 1] : null;
     const precioAntes = new Map();
     if (anterior) for (const f of await this.leerSubidaPreciosBezen(anterior)) if (f[2]) precioAntes.set(f[2].toUpperCase(), f[3]);
+    // Desde cuándo tiene la web ese precio (Jennifer, 2026-10-15): la
+    // subida más antigua seguida con el mismo precio para ese SKU.
+    const desde = new Map();
+    const vigentes = new Map();
+    for (const f of filas) if (f[2]) { desde.set(f[2].toUpperCase(), subida.fecha); vigentes.set(f[2].toUpperCase(), f[3]); }
+    for (let i = pos - 1; i >= 0 && vigentes.size; i--) {
+      const otra = new Map();
+      for (const f of await this.leerSubidaPreciosBezen(index[i])) if (f[2]) otra.set(f[2].toUpperCase(), f[3]);
+      for (const [sku, precio] of [...vigentes]) {
+        if (otra.has(sku) && otra.get(sku) === precio) desde.set(sku, index[i].fecha);
+        else vigentes.delete(sku);
+      }
+    }
     const nuevos = await this.state.storage.list({ prefix: "preciosBezenNuevo:" + id + ":" });
     const precioNuevo = new Map([...nuevos].map(([k, v]) => [k.slice(("preciosBezenNuevo:" + id + ":").length), v]));
 
@@ -4845,7 +4858,7 @@ export class InventoryStore {
       }
       const nuevo = sku ? precioNuevo.get(sku) : null;
       salida.push({
-        producto, variante, sku, precio,
+        producto, variante, sku, precio, precioDesde: sku ? desde.get(sku.toUpperCase()) : subida.fecha,
         precioAnterior: anterior && sku ? (precioAntes.has(sku.toUpperCase()) ? precioAntes.get(sku.toUpperCase()) : undefined) : undefined,
         tarifa: tarifa ?? null,
         precioNuevo: nuevo ? nuevo.precio : null, precioNuevoFecha: nuevo ? nuevo.fecha : null,

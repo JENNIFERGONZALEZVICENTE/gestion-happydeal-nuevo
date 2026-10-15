@@ -2546,7 +2546,7 @@ function renderPage() {
   <div id="pb-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="pb-table">
-      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio web</th><th>Precio anterior</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th>Precio nuevo</th></tr></thead>
+      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th id="pb-th-web">Precio web</th><th>Precio anterior</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th>Precio nuevo</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -4414,6 +4414,7 @@ function renderPB() {
   document.getElementById("pb-count").textContent = filas.length + " de " + total + " filas" + (filas.length > PB_MAX_FILAS ? " (se ven las " + PB_MAX_FILAS + " primeras, afina la búsqueda)" : "")
     + " · " + conNuevo + " con precio nuevo"
     + (pbDatos && pbDatos.anterior ? " · comparando con la subida del " + new Date(pbDatos.anterior.fecha).toLocaleDateString("es-ES") : " · no hay subida anterior para comparar");
+  document.getElementById("pb-th-web").textContent = pbDatos ? "Precio web (" + new Date(pbDatos.subida.fecha).toLocaleDateString("es-ES") + ")" : "Precio web";
   document.querySelector("#pb-table tbody").innerHTML = filas.slice(0, PB_MAX_FILAS).map(f => {
     const i = pbDatos.filas.indexOf(f);
     const dif = f.tarifa != null && f.precio != null ? f.precio - f.tarifa : null;
@@ -4423,7 +4424,7 @@ function renderPB() {
     const ant = !pbDatos.anterior ? "" : f.precioAnterior === undefined ? '<span style="color:var(--muted)">nuevo</span>' : (cambio ? "<strong>" + fmtPrecio(f.precioAnterior) + "</strong>" : fmtPrecio(f.precioAnterior));
     return "<tr" + (distinto ? ' style="background:rgba(254,226,226,.6)"' : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
-      + "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + "</td><td style=\\"white-space:nowrap\\">" + ant + "</td>"
+      + "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + "</td><td style=\\"white-space:nowrap\\">" + ant + "</td>"
       + "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? fmtPrecio(f.tarifa) : '<span style="color:var(--muted)">—</span>') + "</td>"
       + "<td style=\\"white-space:nowrap" + (distinto ? ";color:#b91c1c;font-weight:600" : "") + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
       + "<td style=\\"white-space:nowrap" + (distinto ? ";color:#b91c1c;font-weight:600" : "") + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
