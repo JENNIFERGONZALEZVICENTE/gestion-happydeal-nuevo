@@ -2479,7 +2479,7 @@ function renderPage() {
   <div id="devoluciones-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="devoluciones-table">
-      <thead><tr><th>Detectado</th><th>Pedido</th><th>Nombre</th><th>Producto</th><th>Estado en SEUR</th><th>Motivo</th><th>Llegada al almacén</th><th>Estado del colchón</th><th>Qué se hace</th><th>Stock</th><th style="min-width:220px">Notas</th><th></th></tr></thead>
+      <thead><tr><th>Detectado</th><th>Pedido</th><th>Nombre</th><th>Producto</th><th>Estado en SEUR</th><th>Motivo</th><th>Llegada al almacén</th><th>Estado del colchón</th><th>Qué se hace</th><th>Stock</th><th style="min-width:220px">Notas</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -10870,7 +10870,10 @@ function renderDevoluciones() {
       ? '<span class="pedido-generado-tag">✓ Al stock ' + new Date(d.alStock.fecha).toLocaleDateString("es-ES") + "</span><br><small>" + escapeAttr(nombreCortoModelo(d.alStock.stockModel) + " " + d.alStock.talla) + (d.alStock.usuario ? " (" + escapeAttr(d.alStock.usuario) + ")" : "") + "</small>"
       : '<button type="button" class="secondary dev-stock-btn" data-id="' + idA + '" title="El colchón ha vuelto bien: suma 1 unidad al stock">＋ Pasar al stock</button>';
     return "<tr" + (devolucionResuelta(d) ? "" : ' class="fila-cuarentena"') + ">"
-      + "<td>" + new Date(d.creado).toLocaleDateString("es-ES") + "<br><small>" + (d.origen === "manual" ? "a mano" + (d.creadoPor ? " (" + escapeAttr(d.creadoPor) + ")" : "") : "automático") + "</small></td>"
+      + "<td>" + new Date(d.creado).toLocaleDateString("es-ES") + "<br><small>" + (d.origen === "manual" ? "a mano" + (d.creadoPor ? " (" + escapeAttr(d.creadoPor) + ")" : "") : "automático") + "</small>"
+      // Borrar una devolución metida por error (Jennifer, 2026-10-16: "sin
+      // tener que recurrir a ti"): visible al principio de la fila.
+      + '<br><button type="button" class="cancelar-pendiente-btn dev-borrar-btn" data-id="' + idA + '" title="Borrar esta devolución (metida por error)">🗑 Borrar</button></td>'
       + "<td>" + escapeAttr(refLabel(d)) + "<br><small>" + escapeAttr(d.platform || "Shopify") + "</small></td>"
       + "<td>" + escapeAttr(d.nombre || "") + "</td>"
       + "<td>" + escapeAttr(d.producto || "") + "</td>"
@@ -10881,7 +10884,6 @@ function renderDevoluciones() {
       + "<td>" + devSelect("destino", DEV_DESTINOS, d.destino, d.id) + "</td>"
       + "<td>" + stockHtml + "</td>"
       + '<td><textarea class="dev-campo" data-id="' + idA + '" data-campo="notas" placeholder="Notas...">' + escapeAttr(d.notas || "") + "</textarea></td>"
-      + '<td><button type="button" class="secondary dev-borrar-btn" data-id="' + idA + '" title="Quitar de la lista (no se vuelve a meter sola)">✕</button></td>'
       + "</tr>";
   }).join("");
 }
@@ -10907,7 +10909,7 @@ document.addEventListener("click", async (e) => {
   const d = devoluciones.find(x => x.id === (btnStock || btnBorrar).dataset.id);
   if (!d) return;
   if (btnBorrar) {
-    if (!confirm("¿Quitar " + refLabel(d) + " del histórico de devueltos?")) return;
+    if (!confirm("¿Borrar la devolución de " + refLabel(d) + "?" + (d.origen === "manual" ? "" : " (Es automática: no se vuelve a meter sola.)") + (d.alStock ? String.fromCharCode(10, 10) + "OJO: ya se pasó 1 unidad al stock (" + nombreCortoModelo(d.alStock.stockModel) + " " + d.alStock.talla + "). Borrar la devolución NO quita esa unidad del stock." : ""))) return;
     if (await guardarDevolucion({ id: d.id, descartado: true })) loadDevoluciones();
     return;
   }
