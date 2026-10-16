@@ -12546,6 +12546,9 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/plazos/marketplace/cargar" && request.method === "POST") {
       return proxyInventory(env, "/plazos/marketplace/cargar", request);
     }
+    if (url.pathname === "/api/plazos/marketplace/filas" && request.method === "GET") {
+      return proxyInventory(env, "/plazos/marketplace/filas", request);
+    }
     if (url.pathname === "/api/plazos/listar" && request.method === "GET") {
       return proxyInventory(env, "/plazos/listar", request);
     }

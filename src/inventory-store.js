@@ -2637,6 +2637,11 @@ export class InventoryStore {
     if (url.pathname === "/plazos/marketplace/export" && method === "GET") {
       return this.exportarPlazosMarketplace();
     }
+    // Solo lectura: el listado guardado (modelo, SKU, stockModel, talla, tipo).
+    if (url.pathname === "/plazos/marketplace/filas" && method === "GET") {
+      const todos = await this.load("plazosExportaciones", {});
+      return Response.json({ ok: true, filas: (todos.MARKETPLACE && todos.MARKETPLACE.filas) || [] });
+    }
     if (url.pathname === "/plazos/listar" && method === "GET") {
       return this.listarPlazos();
     }
