@@ -3329,6 +3329,18 @@ function cambioMedidaHtml(x) {
   if (!cm) return "";
   return '<div class="cambio-medida-tag" title="Cambiado el ' + new Date(cm.fecha).toLocaleDateString("es-ES") + (cm.usuario ? " por " + escapeAttr(cm.usuario) : "") + '">📏 MEDIDA CAMBIADA: ' + escapeAttr(cm.de || "?") + " → " + escapeAttr(cm.a) + "</div>";
 }
+// Cambio de modelo (Jennifer, 2026-10-16): el pedido sale con otro colchón
+// del que compró (stockModelOriginal/tallaOriginal en el pendiente). El
+// producto del pedido sigue mostrando lo que compró; esto avisa del cambio.
+function cambioModeloHtml(o) {
+  if (!o) return "";
+  return backorders.filter(b => String(b.orderId) === String(o.id) && b.stockModelOriginal && b.estado !== "cancelado").map(b =>
+    '<div class="cambio-medida-tag" title="Lo que compró: ' + escapeAttr(b.stockModelOriginal + " " + (b.tallaOriginal || "")) + ' · Lo que sale: ' + escapeAttr(b.stockModel + " " + b.talla) + '">🔄 CAMBIO DE MODELO: '
+    + escapeAttr(nombreCortoModelo(b.stockModelOriginal) + " " + (b.tallaOriginal || "")) + " → " + escapeAttr(nombreCortoModelo(b.stockModel) + " " + b.talla) + "</div>").join("");
+}
+function cambiosPedidoHtml(o) {
+  return cambioMedidaHtml(o) + cambioModeloHtml(o);
+}
 function cambiarMedidaButton(order) {
   if (!order || order.cancelado) return "";
   return '<button type="button" class="cambiar-medida-btn" data-cambiar-medida-id="' + escapeAttr(String(order.id)) + '" title="Cambiar la medida del pedido (el cliente lo quiere en otra medida)">📏</button>';
