@@ -3338,8 +3338,17 @@ function cambioModeloHtml(o) {
     '<div class="cambio-medida-tag" title="Lo que compró: ' + escapeAttr(b.stockModelOriginal + " " + (b.tallaOriginal || "")) + ' · Lo que sale: ' + escapeAttr(b.stockModel + " " + b.talla) + '">🔄 CAMBIO DE MODELO: '
     + escapeAttr(nombreCortoModelo(b.stockModelOriginal) + " " + (b.tallaOriginal || "")) + " → " + escapeAttr(nombreCortoModelo(b.stockModel) + " " + b.talla) + "</div>").join("");
 }
+// Cambio ofrecido que al final no salió (Jennifer, 2026-10-16): el
+// pendiente volvió al colchón original y se apunta por qué.
+function cambioNoSalioHtml(b) {
+  const c = b && b.cambioNoSalio;
+  if (!c) return "";
+  return '<div class="cambio-medida-tag" style="background:#fef3c7;color:#92400e" title="' + escapeAttr(c.nota || "") + (c.fecha ? " (" + new Date(c.fecha).toLocaleDateString("es-ES") + ")" : "") + '">↩ CAMBIO NO REALIZADO: se le ofreció '
+    + escapeAttr(nombreCortoModelo(c.a) + " " + (c.tallaA || "")) + " pero no había en stock. Vuelve a su " + escapeAttr(nombreCortoModelo(c.de) + " " + (c.tallaDe || "")) + "</div>";
+}
 function cambiosPedidoHtml(o) {
-  return cambioMedidaHtml(o) + cambioModeloHtml(o);
+  return cambioMedidaHtml(o) + cambioModeloHtml(o)
+    + (o ? backorders.filter(b => String(b.orderId) === String(o.id) && b.cambioNoSalio && b.estado !== "cancelado").map(cambioNoSalioHtml).join("") : "");
 }
 function cambiarMedidaButton(order) {
   if (!order || order.cancelado) return "";
@@ -5838,7 +5847,7 @@ function renderPendientes() {
     // Sin fecha a propósito (Jennifer, 2026-09-23): pendientes marcados
     // "pedido a fábrica" a mano por fuera del PDF normal, para distinguir
     // de los que sí llevan fecha real (ver markOrdered/sinFecha).
-    const pedidoTag = cambioMedidaHtml(b) + (b.pedidoGenerado
+    const pedidoTag = cambioMedidaHtml(b) + cambioNoSalioHtml(b) + (b.pedidoGenerado
       ? \`<span class="pedido-generado-tag">✓ Pedido a fábrica\${b.fechaPedidoFabrica ? " " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : ""}</span>\`
       : "");
     const refPolivalCell = showRefPolivalCol
@@ -12240,6 +12249,10 @@ async function handleFetch(request, env) {
       return proxyInventory(env, `/backorders/${resolveSeurPendingMatch[1]}/resolver-seur`, request);
     }
 
+    if (url.pathname.startsWith("/api/inventario/pendientes/") && url.pathname.endsWith("/deshacer-cambio-modelo") && request.method === "POST") {
+      const idEnc = url.pathname.slice("/api/inventario/pendientes/".length, -"/deshacer-cambio-modelo".length);
+      return proxyInventory(env, "/backorders/" + idEnc + "/deshacer-cambio-modelo", request);
+    }
     const undoSeurPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/deshacer-seur$/);
     if (undoSeurPendingMatch && request.method === "POST") {
       return proxyInventory(env, `/backorders/${undoSeurPendingMatch[1]}/deshacer-seur`, request);

@@ -1163,6 +1163,10 @@ function separarUnidades(backorders, entry, n, etiqueta) {
   return nuevo;
 }
 
+function nombreCortoModeloSrv(stockModel) {
+  const partes = String(stockModel || "").split("|").map((x) => x.trim()).filter(Boolean);
+  return partes[partes.length - 1] || stockModel || "";
+}
 function nextRefSuffix(current) {
   const n = parseInt(current, 10);
   return Number.isFinite(n) ? String(n + 1) : "2";
@@ -2132,6 +2136,32 @@ export class InventoryStore {
     if (undoSeurMatch && method === "POST") {
       const opciones = await request.json().catch(() => ({}));
       return this.undoSeurBackorder(decodeURIComponent(undoSeurMatch[1]), opciones);
+    }
+    const SUF_DESHACER = "/deshacer-cambio-modelo";
+    const deshacerCambioMatch = url.pathname.startsWith("/backorders/") && url.pathname.endsWith(SUF_DESHACER) ? [null, url.pathname.slice("/backorders/".length, -SUF_DESHACER.length)] : null;
+    if (deshacerCambioMatch && method === "POST") {
+      const { nota } = await request.json().catch(() => ({}));
+      const backorders = await this.load("backorders", []);
+      const entry = backorders.find((b) => b.id === decodeURIComponent(deshacerCambioMatch[1]));
+      if (!entry) return new Response("not found", { status: 404 });
+      if (!entry.stockModelOriginal) return Response.json({ ok: false, error: "Este pendiente no tiene cambio de modelo." }, { status: 409 });
+      if (entry.estado !== "pendiente") return Response.json({ ok: false, error: "Solo se puede deshacer en un pendiente (quítalo antes de la carga)." }, { status: 409 });
+      const sustituto = { stockModel: entry.stockModel, talla: entry.talla };
+      this.revertirCambioModelo(entry, nota || ("Se le ofreció cambio por " + nombreCortoModeloSrv(entry.stockModel) + " " + entry.talla + ", pero a la hora de salir no había en stock"));
+      // Lo vendido pendiente pasa del sustituto al original.
+      if (entry.tipo === "colchon" && !entry.reposicion) {
+        const stock = await this.load("stock", {});
+        for (const [k, sm, t, d] of [[stockKey(sustituto.stockModel, sustituto.talla), sustituto.stockModel, sustituto.talla, -entry.cantidad], [stockKey(entry.stockModel, entry.talla), entry.stockModel, entry.talla, entry.cantidad]]) {
+          const row = stock[k] || { stockModel: sm, talla: t, cantidad: 0, vendidoPendiente: 0 };
+          const antes = row.vendidoPendiente || 0;
+          row.vendidoPendiente = Math.max(0, antes + d);
+          stock[k] = row;
+          await this.logMovement({ stockModel: sm, talla: t, campo: "vendidoPendiente", delta: row.vendidoPendiente - antes, resultante: row.vendidoPendiente, origen: "deshacer-cambio", orderNumber: entry.orderNumber, platform: entry.platform, orderRef: entry.orderRef });
+        }
+        await this.state.storage.put("stock", stock);
+      }
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, entry });
     }
     const alternativasMatch = url.pathname.match(/^\/backorders\/([^/]+)\/alternativas$/);
     if (alternativasMatch && method === "GET") {
@@ -3991,6 +4021,14 @@ export class InventoryStore {
   // nextRefSuffix).
   // mantenerRef (Jennifer, 2026-10-06, 012517739-A): se preparó por error y
   // no salió ninguna etiqueta, así que la referencia no lleva sufijo nuevo.
+  revertirCambioModelo(entry, nota) {
+    entry.cambioNoSalio = { de: entry.stockModelOriginal, tallaDe: entry.tallaOriginal || entry.talla, a: entry.stockModel, tallaA: entry.talla, nota: nota || "", fecha: new Date().toISOString() };
+    entry.stockModel = entry.stockModelOriginal;
+    entry.talla = entry.tallaOriginal || entry.talla;
+    delete entry.stockModelOriginal;
+    delete entry.tallaOriginal;
+  }
+
   async undoSeurBackorder(id, { mantenerRef } = {}) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
@@ -3998,6 +4036,12 @@ export class InventoryStore {
     if (entry.estado !== "listo-seur") {
       return Response.json({ ok: false, error: "Este pendiente no está preparado para SEUR." }, { status: 409 });
     }
+
+    // Cambio de modelo que al final no sale (Jennifer, 2026-10-16,
+    // 002-26259L13344-A: se le ofreció un Nirvana en vez de su París pero
+    // no había en stock): vuelve al colchón que compró, con una nota, y así
+    // se pide a fábrica el original.
+    if (entry.stockModelOriginal) this.revertirCambioModelo(entry, "Se le ofreció cambio por " + nombreCortoModeloSrv(entry.stockModel) + " " + entry.talla + ", pero a la hora de salir no había en stock");
 
     // Igual que en resolveSeurBackorder: "vendidoPendiente" solo existe para
     // colchones (Jennifer, 2026-09-22, gestos comerciales de almohada) y
