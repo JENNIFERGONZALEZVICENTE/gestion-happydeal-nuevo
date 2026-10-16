@@ -1959,6 +1959,39 @@ export class InventoryStore {
     if (url.pathname === "/stock/adjust-by-lookup" && method === "POST") {
       return this.adjustStockByLookup(await request.json());
     }
+    // Carga de Furniture cerrada (Jennifer, 2026-10-16, BEZEN121402: "me sale
+    // en los pedidos pendientes cuando ya se ha marcado como recibido"): lo
+    // que iba en ella con línea propia (envío aparte / reposición) ya ha
+    // salido — pasa a servido. Un colchón enviado aparte que no es
+    // reposición libera su "vendido pendiente", igual que settleShipment.
+    if (url.pathname === "/backorders/cerrar-carga" && method === "POST") {
+      const { cargaId } = await request.json();
+      if (!cargaId) return Response.json({ ok: false, error: "Falta la carga." }, { status: 400 });
+      const backorders = await this.load("backorders", []);
+      const stock = await this.load("stock", {});
+      const servidos = [];
+      for (const b of backorders) {
+        if (b.cargaId !== cargaId || (b.estado !== "pendiente" && b.estado !== "cubierto")) continue;
+        if (!b.envioAparte && !b.reposicion && !b.gestoComercial) continue;
+        if (b.tipo === "colchon" && !b.reposicion && !b.gestoComercial && b.estado === "pendiente") {
+          const key = stockKey(b.stockModel, b.talla);
+          const row = stock[key];
+          if (row) {
+            const antes = row.vendidoPendiente || 0;
+            row.vendidoPendiente = Math.max(0, antes - b.cantidad);
+            await this.logMovement({ stockModel: b.stockModel, talla: b.talla, campo: "vendidoPendiente", delta: row.vendidoPendiente - antes, resultante: row.vendidoPendiente, origen: "envio", orderNumber: b.orderNumber, platform: b.platform, orderRef: b.orderRef });
+          }
+        }
+        b.estado = "servido";
+        b.fechaServido = new Date().toISOString();
+        servidos.push(b.id);
+      }
+      if (servidos.length) {
+        await this.state.storage.put("stock", stock);
+        await this.state.storage.put("backorders", backorders);
+      }
+      return Response.json({ ok: true, servidos });
+    }
     if (url.pathname === "/stock/delete" && method === "POST") {
       return this.deleteStock(await request.json());
     }

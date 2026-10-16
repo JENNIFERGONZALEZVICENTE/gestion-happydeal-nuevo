@@ -4046,8 +4046,12 @@ window.addEventListener("resize", () => {
 // la tabla, que sí filtra). Mismas columnas que ya se ven en pantalla, más
 // "Proveedor" para poder distinguirlos una vez mezclados en una sola hoja.
 document.getElementById("descargar-excel-pendientes-btn").addEventListener("click", async () => {
+  // Con "Ocultar ya recibidos de fábrica" marcado, el Excel tampoco los
+  // saca (Jennifer, 2026-10-16, BEZEN12154/12155: "ya están recibidos y me
+  // los sacas en el listado").
+  const sinRecibidos = document.getElementById("pendientes-ocultar-recibidos").checked;
   const lista = backorders
-    .filter(b => b.estado === "pendiente" && ["POLIVAL", "LUSO", "NEW"].includes(b.proveedor))
+    .filter(b => b.estado === "pendiente" && ["POLIVAL", "LUSO", "NEW"].includes(b.proveedor) && !(sinRecibidos && b.recibidoFabrica))
     .sort((a, b) => (a.proveedor === b.proveedor ? parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha) : a.proveedor.localeCompare(b.proveedor)));
   // Coste de tarifa de los colchones de Luso/New (Jennifer, 2026-09-30:
   // "cuando descargue la tabla de proveedores esos precios se puedan
@@ -13086,7 +13090,16 @@ async function handleFetch(request, env) {
         }
       } catch (e) { /* no bloquea el cierre */ }
       const res = await stub.fetch("https://do/cargas/close", { method: "POST", body: cuerpo });
-      return new Response(await res.text(), { headers: { "content-type": "application/json" } });
+      const texto = await res.text();
+      // Lo que iba con línea propia (envío aparte / reposición) en una carga
+      // de Furniture pasa a servido al cerrarla (Jennifer, 2026-10-16).
+      try {
+        const r = JSON.parse(texto);
+        if (r && r.ok && r.carga && (r.carga.tipo || "furniture") === "furniture") {
+          await inventoryStub(env).fetch("https://do/backorders/cerrar-carga", { method: "POST", body: JSON.stringify({ cargaId: r.carga.id }) });
+        }
+      } catch (e) { /* no bloquea el cierre */ }
+      return new Response(texto, { headers: { "content-type": "application/json" } });
     }
 
     // "Envíos SEUR" (Jennifer, 2026-10-01): sustituye a "Casos a revisar".
@@ -13253,6 +13266,9 @@ async function handleFetch(request, env) {
     }
 
     // Histórico de devueltos de SEUR (Jennifer, 2026-10-13).
+    if (url.pathname === "/api/admin/cerrar-carga-lineas" && request.method === "POST") {
+      return proxyInventory(env, "/backorders/cerrar-carga", request);
+    }
     if (url.pathname === "/api/no-tramitar" && (request.method === "GET" || request.method === "POST")) {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do/no-tramitar", request.method === "POST" ? { method: "POST", body: await request.text() } : {});
