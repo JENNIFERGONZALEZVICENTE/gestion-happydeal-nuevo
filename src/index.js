@@ -6419,8 +6419,13 @@ async function checkAutoAddEnvioAparte(backorderId) {
   if (!b || !b.envioAparte || b.cargaId || !b.recibidoFabrica || (b.estado !== "pendiente" && b.estado !== "cubierto")) return;
   const o = allOrders.find(x => String(x.id) === String(b.orderId));
   if (o && (o.cancelado || o.recogeCliente)) return;
+  const grupo = grupoEnvioAparte(b);
+  if (grupo.some(x => !x.recibidoFabrica)) {
+    mostrarAvisoBreve(refLabel(b) + (b.refSuffix || "") + ": recibido. El envío aparte entra en la carga cuando llegue todo lo que va con él.");
+    return;
+  }
   if (o && (o.notas || "").trim() && !confirm(refLabel(b) + (b.refSuffix || "") + ' tiene una nota: "' + o.notas.trim() + '". ¿Añadir el envío aparte a la próxima carga igualmente?')) return;
-  await anadirReposicionesACarga([b.id]);
+  await anadirReposicionesACarga(grupo.map(x => x.id));
   const carga = allCargas.find(c => c.id === b.cargaId);
   mostrarAvisoBreve(refLabel(b) + (b.refSuffix || "") + ": envío aparte recibido — añadido a la carga" + (carga ? " del " + fechaCortaEs(carga.fecha) : "") + ".");
 }
@@ -7019,23 +7024,38 @@ document.addEventListener("click", async (e) => {
   renderFurniture();
 }, true);
 
-function reposicionRowCells(b) {
+// Envíos aparte con la misma referencia (pedido + sufijo) van en UNA sola
+// línea y entran juntos en la carga (Jennifer, 2026-10-16, BEZEN121402:
+// colchón + cabecero). Las reposiciones siguen una por línea.
+function agruparLineasPropias(lista) {
+  const grupos = new Map();
+  for (const b of lista) {
+    const k = b.envioAparte ? "a|" + b.orderId + "|" + (b.refSuffix || "") + "|" + (b.cargaId || "") : "r|" + b.id;
+    if (!grupos.has(k)) grupos.set(k, []);
+    grupos.get(k).push(b);
+  }
+  return [...grupos.values()];
+}
+function grupoEnvioAparte(b) {
+  return backorders.filter(x => x.envioAparte && String(x.orderId) === String(b.orderId) && (x.refSuffix || "") === (b.refSuffix || "")
+    && (x.estado === "pendiente" || x.estado === "cubierto") && (x.cargaId || null) === (b.cargaId || null));
+}
+function reposicionRowCells(b, grupo) {
   const o = allOrders.find(x => x.id === b.orderId) || {};
   if (b.envioAparte) {
     // Artículo enviado aparte (Jennifer, 2026-09-29): referencia del
     // pedido terminada en su sufijo ("…2") y opción de volver a juntarlo.
+    const items = grupo && grupo.length ? grupo : [b];
     return \`
     <td>\${refLabel(o.id ? o : b)}\${b.refSuffix || ""}<span class="envio-aparte-tag">ENVÍO APARTE</span>\${valdemoroTag(o)}</td>
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name || ""}</td>
-    <td>\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}\${b.color ? " " + escapeAttr(b.color) : ""}</td>
+    <td>\${items.map(x => x.cantidad + "x " + x.stockModel + (x.talla ? " (" + x.talla + ")" : "") + (x.color ? " " + escapeAttr(x.color) : "")).join("<br>")}</td>
     <td class="services">\${o.services || ""}</td>
     <td class="furniture-items-cell">
-      <label class="furniture-item-check">
-        <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
-        \${b.referencia ? b.referencia + " — " : ""}\${b.cantidad}x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}
-      </label>
-      <button type="button" class="envio-aparte-btn" data-envio-aparte="\${escapeAttr(b.id)}" data-aparte="0" title="Volver a juntarlo con el resto de su pedido">Juntar con el pedido</button>
+      \${items.map(x => '<label class="furniture-item-check"><input type="checkbox" class="item-recibido-check" data-id="' + escapeAttr(x.id) + '"' + (x.recibidoFabrica ? " checked" : "") + '> '
+        + (x.referencia ? x.referencia + " — " : "") + x.cantidad + "x " + x.stockModel + (x.talla ? " (" + x.talla + ")" : "") + "</label>"
+        + '<button type="button" class="envio-aparte-btn" data-envio-aparte="' + escapeAttr(x.id) + '" data-aparte="0" title="Volver a juntarlo con el resto de su pedido">Juntar con el pedido</button>').join("")}
     </td>
     <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
   \`;
@@ -7163,7 +7183,8 @@ function renderFurniture() {
     return (refLabel(b) + (b.refSuffix || "")).toLowerCase().includes(busquedaPedido);
   }).sort((a, b) => parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha));
 
-  document.getElementById("carga-abierta-count").textContent = (enCarga.length + reposicionesEnCarga.length) + " pedidos en esta carga";
+  const gruposEnCargaPropios = agruparLineasPropias(reposicionesEnCarga);
+  document.getElementById("carga-abierta-count").textContent = (enCarga.length + gruposEnCargaPropios.length) + " pedidos en esta carga";
   // Ya descargado / nuevo (Jennifer, 2026-10-15): lo nuevo arriba, para
   // verlo de un golpe; lo descargado sigue pudiéndose descargar otra vez.
   const filasCarga = enCarga.map(o => {
@@ -7175,13 +7196,15 @@ function renderFurniture() {
       <td><button type="button" class="sacar-carga-btn" data-id="\${o.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-order-id="' + o.id + '"')}</td>
     </tr>
   \` };
-  }).concat(reposicionesEnCarga.map(b => {
-    const d = estadoDescargaFurniture(["b:" + b.id], []);
+  }).concat(gruposEnCargaPropios.map(g => {
+    const b = g[0];
+    const ids = g.map(x => x.id);
+    const d = estadoDescargaFurniture(ids.map(id => "b:" + id), []);
     return { nuevo: d.nuevo, html: \`
     <tr>
-      <td><input type="checkbox" class="sel-envio-fur" data-keys="\${escapeAttr("b:" + b.id)}" />\${d.html}</td>
-      \${reposicionRowCells(b)}
-      <td><button type="button" class="sacar-carga-reposicion-btn" data-repo-id="\${b.id}">Sacar de la carga</button>\${moverFurnitureHtml('data-backorder-id="' + escapeAttr(b.id) + '"')}</td>
+      <td><input type="checkbox" class="sel-envio-fur" data-keys="\${escapeAttr(ids.map(id => "b:" + id).join(","))}" />\${d.html}</td>
+      \${reposicionRowCells(b, g)}
+      <td><button type="button" class="sacar-carga-reposicion-btn" data-repo-ids="\${escapeAttr(JSON.stringify(ids))}">Sacar de la carga</button>\${moverFurnitureHtml('data-backorder-ids="' + escapeAttr(JSON.stringify(ids)) + '"')}</td>
     </tr>
   \` };
   }));
@@ -7194,6 +7217,17 @@ function renderFurniture() {
     btn.addEventListener("click", async () => {
       const cargaId = btn.parentElement.querySelector(".mover-fur-destino").value;
       let body;
+      if (btn.dataset.backorderIds) {
+        // Envío aparte agrupado: se mueven todos sus artículos.
+        for (const backorderId of JSON.parse(btn.dataset.backorderIds)) {
+          const r = await fetch("/api/cargas/furniture/mover", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ backorderId, cargaId }) });
+          const dd = await r.json().catch(() => ({}));
+          if (!r.ok || dd.ok === false) { alert(dd.error || "No se ha podido mover."); break; }
+        }
+        await loadOrders();
+        await loadFurniture();
+        return;
+      }
       if (btn.dataset.backorderId) body = { backorderId: btn.dataset.backorderId, cargaId };
       else {
         const order = allOrders.find(o => String(o.id) === btn.dataset.orderId);
@@ -7224,13 +7258,15 @@ function renderFurniture() {
   });
   document.querySelectorAll(".sacar-carga-reposicion-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
-      await fetch("/api/inventario/reposicion/carga-remove", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: btn.dataset.repoId }),
-      });
-      const b = backorders.find(x => x.id === btn.dataset.repoId);
-      if (b) b.cargaId = null;
+      for (const id of (btn.dataset.repoIds ? JSON.parse(btn.dataset.repoIds) : [btn.dataset.repoId])) {
+        await fetch("/api/inventario/reposicion/carga-remove", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id }),
+        });
+        const b = backorders.find(x => x.id === id);
+        if (b) b.cargaId = null;
+      }
       renderFurniture();
     });
   });
@@ -7277,16 +7313,17 @@ function renderFurniture() {
 
   renderRetenidos(todasFurniture.filter(o => !o.cargaId && retencionDe(o)));
 
-  document.getElementById("furniture-pendientes-count").textContent = (pendientes.length + reposicionesPendientes.length) + " pedidos pendientes de envío por Furniture";
+  const gruposPendientesPropios = agruparLineasPropias(reposicionesPendientes);
+  document.getElementById("furniture-pendientes-count").textContent = (pendientes.length + gruposPendientesPropios.length) + " pedidos pendientes de envío por Furniture";
   document.querySelector("#furniture-pendientes-table tbody").innerHTML = pendientes.map(o => \`
     <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
       <td><input type="checkbox" class="furniture-check" data-id="\${o.id}"\${furnitureSeleccion.has(o.id) ? " checked" : ""}\${o.cancelado ? " disabled" : ""}></td>
       \${furnitureRowCells(o)}
     </tr>
-  \`).join("") + reposicionesPendientes.map(b => \`
+  \`).join("") + gruposPendientesPropios.map(g => \`
     <tr>
-      <td><input type="checkbox" class="reposicion-select-check" data-repo-id="\${b.id}"\${reposicionSeleccion.has(b.id) ? " checked" : ""}></td>
-      \${reposicionRowCells(b)}
+      <td><input type="checkbox" class="reposicion-select-check" data-repo-ids="\${escapeAttr(JSON.stringify(g.map(x => x.id)))}"\${g.every(x => reposicionSeleccion.has(x.id)) ? " checked" : ""}></td>
+      \${reposicionRowCells(g[0], g)}
     </tr>
   \`).join("");
   document.querySelectorAll(".furniture-check").forEach(chk => {
@@ -7299,9 +7336,8 @@ function renderFurniture() {
   });
   document.querySelectorAll(".reposicion-select-check").forEach(chk => {
     chk.addEventListener("change", () => {
-      const id = chk.dataset.repoId;
-      if (chk.checked) reposicionSeleccion.add(id);
-      else reposicionSeleccion.delete(id);
+      const ids = chk.dataset.repoIds ? JSON.parse(chk.dataset.repoIds) : [chk.dataset.repoId];
+      for (const id of ids) { if (chk.checked) reposicionSeleccion.add(id); else reposicionSeleccion.delete(id); }
       actualizarFurnitureSeleccionUI();
     });
   });
