@@ -2,6 +2,7 @@ export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
 import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES, findBestPrefixMatch, PREGUNTA_FORMATO_160 } from "./inventory-store.js";
 import { etiquetaTransformacionPdf, resumenSeurPdf } from "./etiqueta-pdf.js";
+import { CP_MONTANA, CP_REMOTA } from "./cp-montana.js";
 import { enviarEmailAlmacen, llamarScriptSeur, enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, fechaHoyEs, referenciaPedidoAlmacen, modeloCorto } from "./avisos-almacen.js";
 
 // Interruptor de Fase 2 de cada "marketplace" (Carrefour, Jennifer,
@@ -2895,6 +2896,17 @@ function renderPage() {
   </div>
 </div>
 
+<div class="modal-overlay" id="montana-modal-overlay">
+  <div class="modal-box">
+    <h3>⛰️ Pedido(s) a CP de MONTAÑA</h3>
+    <p style="font-size:14px">Furniture cobra <b>80 € de suplemento</b> por entregar en estos códigos postales. <b>No pueden salir hasta que el cliente pague el suplemento</b>: quedan retenidos en Furniture hasta que pulses «⛰️ Suplemento pagado».</p>
+    <ul id="montana-modal-lista" style="font-size:14px"></ul>
+    <div class="modal-actions">
+      <button type="button" id="montana-modal-ok">Entendido</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="retener-modal-overlay">
   <div class="modal-box">
     <h3>Retener hasta que el cliente lo pida</h3>
@@ -3967,6 +3979,7 @@ async function loadOrders() {
   const res = await fetch("/api/pedidos/shopify");
   allOrders = await res.json();
   applyFilter();
+  revisarAvisosMontana();
 }
 
 function currentFiltered() {
@@ -7478,7 +7491,8 @@ function ubicacionesLogistica(o) {
       const faltan = items.filter(i => !i.recibidoFabrica);
       const estadoArt = !items.length ? "" : (faltan.length ? " — falta por llegar: " + faltan.map(nombreArticuloBusca).join(", ") : " — todo recibido, listo para cargar");
       const r = retencionDe(o);
-      if (r) add("⏸ Retenido a la espera del cliente" + (r.hasta ? " hasta el " + fechaCortaEs(r.hasta) : "") + estadoArt, { vista: "furniture", cont: "retenidos-table", ref: refFila });
+      if (r && r.montana) add("⛰️ Retenido: CP de " + r.montana.toLowerCase() + ", falta que el cliente pague el suplemento de Furniture" + estadoArt, { vista: "furniture", cont: "retenidos-table", ref: refFila });
+      else if (r) add("⏸ Retenido a la espera del cliente" + (r.hasta ? " hasta el " + fechaCortaEs(r.hasta) : "") + estadoArt, { vista: "furniture", cont: "retenidos-table", ref: refFila });
       else add("⏳ En «Pedidos pendientes de envío por Furniture», sin carga" + estadoArt, { vista: "furniture", cont: "furniture-pendientes-table", ref: refFila });
     }
   }
@@ -7594,7 +7608,11 @@ document.querySelectorAll(".buscador-logistica").forEach(box => {
 // { hasta: "AAAA-MM-DD" | null }. En un envío conjunto basta con que uno
 // del grupo esté retenido.
 function retencionDe(o) {
-  const p = o && pedidosDelGrupo(o).find(x => x.retenido);
+  const grupo = o ? pedidosDelGrupo(o) : [];
+  // CP de montaña sin suplemento pagado: retenido sin fecha (no sube solo).
+  const m = grupo.find(montanaPendiente);
+  if (m) return { hasta: null, montana: zonaMontana(m) };
+  const p = grupo.find(x => x.retenido);
   return p ? p.retenido : null;
 }
 function todoRecibidoFurniture(o) {
@@ -7632,6 +7650,13 @@ function renderRetenidos(retenidos) {
     const r = retencionDe(o);
     const listo = todoRecibidoFurniture(o);
     const toca = retencionCumplida(o);
+    if (r.montana) {
+      return '<tr' + (o.cancelado ? ' class="fila-cancelada"' : "") + ">" + furnitureRowCells(o)
+        + '<td><span class="retenido-falta">⛰️ CP DE ' + r.montana + ": no sale hasta que el cliente pague el suplemento de Furniture (80 €)</span>"
+        + '<br><span class="' + (listo ? "retenido-listo" : "retenido-falta") + '">' + (listo ? "✓ Todo recibido" : "Falta mercancía") + "</span></td><td>"
+        + '<button type="button" class="supl-pagado-btn" data-id="' + o.id + '">⛰️ Suplemento pagado</button>'
+        + "</td></tr>";
+    }
     const retTxt = (r.hasta ? "Enviar en la carga del " + fechaCortaEs(r.hasta) + " o la siguiente" : "Sin fecha: a falta de luz verde del cliente")
       + '<br><span class="' + (listo ? "retenido-listo" : "retenido-falta") + '">' + (listo ? "✓ Todo recibido" : "Falta mercancía") + "</span>"
       + (toca ? '<br><span class="retenido-toca">TOCA EN ESTA CARGA</span>' : "");
@@ -7653,6 +7678,18 @@ function renderRetenidos(retenidos) {
       if (!confirm(refLabel(o) + " todavía no tiene toda la mercancía. Se quita la retención y subirá solo a la carga cuando llegue todo. ¿Seguir?")) return;
       await guardarRetencion([o.id], null);
     }
+    renderFurniture();
+  }));
+  document.querySelectorAll(".supl-pagado-btn").forEach(btn => btn.addEventListener("click", async () => {
+    const o = allOrders.find(x => String(x.id) === btn.dataset.id);
+    if (!o) return;
+    if (!confirm("¿El cliente de " + refLabel(o) + " ha pagado el suplemento de montaña de Furniture (80 €)?")) return;
+    const ids = pedidosDelGrupo(o).filter(montanaPendiente).map(x => x.id);
+    await Promise.all(ids.map(id => fetch("/api/pedidos/shopify/meta", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, suplementoMontana: { pagado: true } }),
+    })));
+    ids.forEach(id => { const p = allOrders.find(x => x.id === id); if (p) p.suplementoMontana = { avisado: true, pagado: true }; });
+    if (!retencionDe(o) && todoRecibidoFurniture(o) && confirm(refLabel(o) + " ya tiene todo recibido. ¿Lo meto ahora en la carga de Furniture?")) await anadirPedidosACarga([o.id]);
     renderFurniture();
   }));
   document.querySelectorAll(".quitar-retencion-btn").forEach(btn => btn.addEventListener("click", async () => {
@@ -7739,11 +7776,13 @@ async function anadirPedidosACarga(orderIds, cargaId) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ orderIds, cargaId: cargaId || undefined }),
   });
-  const { carga } = await res.json();
-  orderIds.forEach(id => {
+  const { carga, montana } = await res.json();
+  const bloqueados = montana || [];
+  orderIds.filter(id => !bloqueados.includes(id)).forEach(id => {
     const order = allOrders.find(o => o.id === id);
     if (order) order.cargaId = carga.id;
   });
+  if (bloqueados.length) alert("⛰️ No se ha metido en la carga: " + bloqueados.map(id => refLabel(allOrders.find(o => o.id === id) || {})).join(", ") + ". Es un CP de montaña y falta que el cliente pague el suplemento de Furniture (80 €).");
   if (!allCargas.some(c => c.id === carga.id)) allCargas.push(carga);
   if (!cargaAbierta) { cargaAbierta = carga; cargaFurnitureElegidaId = carga.id; }
   return carga;
@@ -10840,10 +10879,63 @@ loadTareas().then(() => { if (tareas.length && document.getElementById("view-sho
 // app (no en Shopify ni en el marketplace) y se mantiene aunque el pedido se
 // vuelva a sincronizar; los ficheros de Furniture/SEUR usan ya la nueva.
 let dirEditando = null;
+// CP de MONTAÑA de Furniture (Jennifer, 2026-10-16): un pedido de tapicería a
+// esos CP no sale hasta que el cliente pague el suplemento (80 €). Lista en
+// src/cp-montana.js (PDF de Furniture).
+const CP_MONTANA_SET = new Set(${JSON.stringify([...CP_MONTANA])});
+const CP_REMOTA_SET = new Set(${JSON.stringify([...CP_REMOTA])});
+function zonaMontana(o) {
+  if (!o) return null;
+  if (String(o.countryCode || "ES").toUpperCase() !== "ES") return null;
+  const d = String(o.postalCode || "").replace(/[^0-9]/g, "");
+  const cp = d.length === 4 ? "0" + d : d;
+  return CP_MONTANA_SET.has(cp) ? "MONTAÑA" : CP_REMOTA_SET.has(cp) ? "REMOTA" : null;
+}
+// Tapicería = va por Furniture; si aún no está tramitado, por el producto.
+function esTapiceriaMontana(o) {
+  if (o.agencia === "FURNITURE") return true;
+  if (o.agencia) return false;
+  return /canap|cabecer|base tapiz|somier|sof[aá]|tapizad|litera/i.test(o.product || "");
+}
+function suplementoPagado(o) { return !!(o && o.suplementoMontana && o.suplementoMontana.pagado); }
+function montanaPendiente(o) { return !!(o && o.agencia === "FURNITURE" && !o.cancelado && zonaMontana(o) && !suplementoPagado(o)); }
+function montanaTag(o) {
+  const z = zonaMontana(o);
+  if (!z || !esTapiceriaMontana(o)) return "";
+  const pag = suplementoPagado(o);
+  return '<br><span class="caso-tag" style="margin-left:0;font-weight:700;background:' + (pag ? "#dcfce7;color:#166534" : "#fef3c7;color:#92400e") + '" title="Furniture cobra 80 € de suplemento por CP de ' + z.toLowerCase() + '">⛰️ CP DE ' + z + (pag ? " · suplemento pagado" : " · cobrar suplemento 80 €") + "</span>";
+}
+// Aviso emergente (Jennifer: "si subo un fichero o se mete un pedido que
+// tiene esta característica, me salte un aviso"): una vez por pedido.
+const AVISO_MONTANA_DESDE = "2026-09-01";
+function fechaISOPedido(o) {
+  const s = String(o.orderDate || "");
+  const m = s.match(/^([0-9]{2})[/]([0-9]{2})[/]([0-9]{4})/);
+  return m ? m[3] + "-" + m[2] + "-" + m[1] : s.slice(0, 10);
+}
+let avisoMontanaAbierto = false;
+function revisarAvisosMontana() {
+  if (avisoMontanaAbierto) return;
+  const nuevos = allOrders.filter(o => zonaMontana(o) && esTapiceriaMontana(o) && !o.cancelado && !o.suplementoMontana
+    && fechaISOPedido(o) >= AVISO_MONTANA_DESDE && !(o.furnitureTracking || []).length);
+  if (!nuevos.length) return;
+  avisoMontanaAbierto = true;
+  document.getElementById("montana-modal-lista").innerHTML = nuevos.map(o => "<li><b>" + escapeAttr(refLabel(o)) + "</b> — " + escapeAttr(o.name || "") + " · CP " + escapeAttr(o.postalCode || "") + " " + escapeAttr(o.city || "") + " (zona " + zonaMontana(o) + ")</li>").join("");
+  const ov = document.getElementById("montana-modal-overlay");
+  ov.classList.add("open");
+  document.getElementById("montana-modal-ok").onclick = async () => {
+    ov.classList.remove("open");
+    await Promise.all(nuevos.map(o => fetch("/api/pedidos/shopify/meta", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: o.id, suplementoMontana: { avisado: true } }),
+    })));
+    nuevos.forEach(o => { o.suplementoMontana = { avisado: true, pagado: false }; });
+    avisoMontanaAbierto = false;
+  };
+}
 function direccionButton(o) {
   if (!o || o.id == null) return "";
   const m = o.direccionManual;
-  return ' <button type="button" class="dir-edit-btn" data-dir-editar="' + escapeAttr(o.id) + '" title="Cambiar dirección de entrega">✏️</button>' +
+  return montanaTag(o) + ' <button type="button" class="dir-edit-btn" data-dir-editar="' + escapeAttr(o.id) + '" title="Cambiar dirección de entrega">✏️</button>' +
     (m ? '<br><span class="caso-tag" style="background:#dbeafe;color:#1e40af;margin-left:0" title="Cambiada por ' + escapeAttr(m.usuario || "") + " el " + escapeAttr(fechaHoraCaso(m.fecha)) + (m.motivo ? " — " + escapeAttr(m.motivo) : "") + '">📍 Dirección cambiada</span>' : "");
 }
 function textoDireccion(d) {

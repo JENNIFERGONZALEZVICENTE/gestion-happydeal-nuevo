@@ -1,3 +1,4 @@
+import { montanaPendiente } from "./cp-montana.js";
 import { enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, referenciaPedidoAlmacen } from "./avisos-almacen.js";
 
 const ORPHAN_RE = /BEZEN0*([0-9]+)/i;
@@ -47,7 +48,7 @@ function itemsConCambioMedida(order) {
   return items.map((it) => ({ ...it, variantTitle: String(it.variantTitle || "").replace(re, w + "x" + l), sku: String(it.sku || "").replace(re, w + "X" + l) }));
 }
 
-const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal", "recogeCliente", "agenciaAntesDeRecogida", "entregadoCliente", "sinAvisoSeguimiento", "motivoFueraCarga", "cambioMedida"];
+const PRESERVED_FIELDS = ["colorTag", "observaciones", "notas", "agencia", "pendingManufacture", "needsReview", "inventoryProcessed", "reviewReasons", "reviewAnswers", "cargaId", "cancelado", "paraTenerEnCuenta", "furnitureTracking", "seurTracking", "shopifyFulfilled", "shopifyFulfillmentId", "gestionadoExterno", "vistoSinPagar", "fechaTramitacion", "pagoConfirmadoManual", "grupoEnvio", "agenciaAntesDeGrupo", "agenciaAntesDeFurniture", "motivoFurniture", "noSalioSeur", "lineasCanceladas", "retenido", "tapiceriaEnviada", "enviosSeurInfo", "direccionManual", "direccionOriginal", "recogeCliente", "agenciaAntesDeRecogida", "entregadoCliente", "sinAvisoSeguimiento", "motivoFueraCarga", "cambioMedida", "suplementoMontana"];
 
 // Campos que escribe processInventory al tramitar un pedido. Cuando en esta
 // misma pasada se acaba de tramitar (incoming.inventoryProcessed y el
@@ -874,7 +875,7 @@ export class OrdersStore {
     }
 
     if (url.pathname === "/orders/meta" && request.method === "POST") {
-      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta, needsReview, retenido, tapiceriaEnviada, gestionadoExterno } = await request.json();
+      const { id, colorTag, observaciones, notas, cancelado, paraTenerEnCuenta, needsReview, retenido, tapiceriaEnviada, gestionadoExterno, suplementoMontana } = await request.json();
       const orders = (await this.state.storage.get("orders")) || {};
       const existing = orders[id];
       if (!existing) return new Response("not found", { status: 404 });
@@ -907,6 +908,12 @@ export class OrdersStore {
       // Tapicería ya enviada por el sistema antiguo, sin seguimiento aquí
       // (Jennifer, 2026-09-30) — solo informativo en Luso/New.
       if (tapiceriaEnviada !== undefined) existing.tapiceriaEnviada = !!tapiceriaEnviada;
+      // CP de montaña de Furniture (Jennifer, 2026-10-16): avisado (ya se
+      // enseñó el aviso) y pagado (el cliente pagó el suplemento: puede salir).
+      if (suplementoMontana !== undefined) {
+        const antes = existing.suplementoMontana || {};
+        existing.suplementoMontana = suplementoMontana ? { avisado: true, pagado: !!suplementoMontana.pagado || !!antes.pagado, fecha: new Date().toISOString(), fechaPago: suplementoMontana.pagado ? new Date().toISOString() : antes.fechaPago || null } : null;
+      }
       if (retenido !== undefined) existing.retenido = retenido ? { hasta: retenido.hasta || null, desde: new Date().toISOString() } : null;
       // Marcar un aviso de revisión como resuelto a mano (Jennifer,
       // 2026-09-19: la campanita se quedaba encendida para siempre en
@@ -1010,16 +1017,19 @@ export class OrdersStore {
       }
       const orders = (await this.state.storage.get("orders")) || {};
       let añadidos = 0;
+      // CP de montaña sin suplemento pagado (Jennifer, 2026-10-16): no entra.
+      const montana = [];
       for (const id of orderIds || []) {
         const order = orders[id];
         if (!order || order.cargaId || order.recogeCliente) continue;
+        if (montanaPendiente(order)) { montana.push(id); continue; }
         order.cargaId = abierta.id;
         añadidos++;
       }
       await this.state.storage.put("orders", orders);
       await this.state.storage.put("cargas", cargas);
       this.broadcast();
-      return Response.json({ ok: true, carga: abierta, añadidos });
+      return Response.json({ ok: true, carga: abierta, añadidos, montana });
     }
 
     // Pasar pedidos de una carga de Furniture abierta a otra (Jennifer,
