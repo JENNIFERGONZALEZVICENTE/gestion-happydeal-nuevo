@@ -1565,6 +1565,15 @@ function renderPage() {
   #buscador-general { width: 230px; padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.4); font: inherit; font-size: 13px; }
   .buscador-datos { font-size: 13px; line-height: 1.5; margin: 6px 0 10px; }
   .buscador-estado { display: grid; gap: 8px; margin: 8px 0 10px; }
+  .buscador-pasos { margin: 8px 0 10px; padding: 10px 14px; border: 2px solid #2563eb; border-radius: 10px; background: #eff6ff; color: #0f172a; }
+  .buscador-pasos-tit { font-size: 12px; letter-spacing: 1px; color: #2563eb; font-weight: 700; margin-bottom: 4px; }
+  .buscador-pasos ol { margin: 0; padding-left: 22px; font-size: 14.5px; line-height: 1.6; }
+  .buscador-pasos li.seur { color: #1e40af; }
+  .buscador-pasos li.ok { color: #15803d; font-weight: 700; }
+  .buscador-pasos li.mal { color: #b91c1c; font-weight: 700; }
+  .buscador-detalle { margin-top: 10px; }
+  .buscador-detalle > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  @media (prefers-color-scheme: dark) { .buscador-pasos { background: #172554; color: #e2e8f0; border-color: #3b82f6; } .buscador-pasos li.seur { color: #93c5fd; } .buscador-pasos li.ok { color: #86efac; } .buscador-pasos li.mal { color: #fca5a5; } }
   .buscador-estado-art { border: 2px solid; border-radius: 10px; padding: 10px 14px; font-size: 14px; }
   .buscador-estado-art.no { border-color: #fca5a5; background: #fee2e2; color: #991b1b; }
   .buscador-estado-art.ok { border-color: #86efac; background: #dcfce7; color: #166534; }
@@ -10068,10 +10077,10 @@ function fechaHoraBusca(t, soloDia) {
 let buscadorDatos = null;
 async function cargarDatosBuscador() {
   const j = u => fetch(u).then(r => r.json()).catch(() => []);
-  const [orders, bos, cargas, movs, casosL, tareasL] = await Promise.all([
-    j("/api/pedidos/shopify"), j("/api/inventario/pendientes"), j("/api/cargas"), j("/api/inventario/movimientos"), j("/api/casos"), j("/api/tareas"),
+  const [orders, bos, cargas, movs, casosL, tareasL, devolucionesL] = await Promise.all([
+    j("/api/pedidos/shopify"), j("/api/inventario/pendientes"), j("/api/cargas"), j("/api/inventario/movimientos"), j("/api/casos"), j("/api/tareas"), j("/api/seur/devoluciones"),
   ]);
-  buscadorDatos = { orders, bos, cargas, movs, casos: casosL, tareas: tareasL };
+  buscadorDatos = { orders, bos, cargas, movs, casos: casosL, tareas: tareasL, devoluciones: Array.isArray(devolucionesL) ? devolucionesL : [] };
   return buscadorDatos;
 }
 function pedidosQueCoinciden(q, d) {
@@ -10100,6 +10109,60 @@ function nombreArticuloBusca(b) {
   const tipo = b.tipo === "colchon" ? "Colchón" : b.tipo === "almohada" ? "Almohada" : b.tipo === "canape" ? "Canapé" : b.tipo === "base" ? "Base" : (b.tipo || "");
   const modelo = nombreCortoModelo(b.stockModel);
   return [modelo.toLowerCase().startsWith(tipo.toLowerCase()) ? "" : tipo, modelo, b.talla, b.color].filter(Boolean).join(" ") + (b.cantidad > 1 ? " (" + b.cantidad + " ud.)" : "");
+}
+// PASOS DEL PEDIDO (Jennifer, 2026-10-16: "que se viera más sencillo"):
+// solo los pasos que importan, en orden. Metido en el sistema → hay stock /
+// se pide al proveedor → mercancía recibida → carga de SEUR/Furniture →
+// estado de SEUR → entregado → devuelto. El histórico completo sigue abajo.
+function pasosPedidoBuscador(o, d, bos) {
+  const pasos = [];
+  const dia = x => fechaHoraBusca(fechaBusca(x), true);
+  const cargaDe = id => d.cargas.find(c => c.id === id);
+  const nombreCarga = c => (c.tipo === "seur" ? "SEUR" : "Furniture") + " del " + dia(c.fecha);
+  const add = (t, texto, tipo) => pasos.push({ t: fechaBusca(t) || 0, texto, tipo: tipo || "" });
+  add(o.fechaTramitacion || o.orderDate, "Pedido metido en el sistema el " + dia(o.fechaTramitacion || o.orderDate));
+  const vivos = bos.filter(b => !b.paraStock);
+  const cargasVistas = new Set();
+  for (const b of vivos) {
+    const art = nombreArticuloBusca(b).replace(/^tapiceria /i, "");
+    const deStock = b.estado === "cubierto" || String(b.id).endsWith("-cubierto") || b.desdeStock;
+    if (b.reposicion) add(b.fecha, "Reposición: " + art + (b.proveedor ? " (" + b.proveedor + ")" : ""));
+    else if (b.gestoComercial) add(b.fecha, "Gesto comercial: " + art);
+    else if (deStock) add(b.fecha || o.orderDate, art + ": EN STOCK");
+    else add(b.fechaPedidoFabrica || b.fecha, art + ": sin stock, se pide a " + (b.proveedor || "proveedor") + (b.fechaPedidoFabrica ? " el " + dia(b.fechaPedidoFabrica) : b.pedidoGenerado ? "" : " (TODAVÍA SIN PEDIR)"));
+    if (b.fechaRecibido && !deStock) add(b.fechaRecibido, "Mercancía recibida el " + dia(b.fechaRecibido) + ": " + art);
+    if (b.estado === "cancelado") add(b.fechaCancelado, "Cancelado: " + art + (b.fechaCancelado ? " el " + dia(b.fechaCancelado) : ""), "mal");
+    const c = cargaDe(b.cargaId) || (b.estado !== "pendiente" && b.estado !== "cancelado" ? cargaDe(o.cargaId) : null);
+    if (c && !cargasVistas.has(c.id)) {
+      cargasVistas.add(c.id);
+      add(c.fecha, (c.estado === "cerrada" ? "Salió en la carga de " : "Metido en la carga de ") + nombreCarga(c));
+    }
+  }
+  if (o.cargaId && !cargasVistas.has(o.cargaId) && cargaDe(o.cargaId)) {
+    const c = cargaDe(o.cargaId);
+    cargasVistas.add(c.id);
+    add(c.fecha, (c.estado === "cerrada" ? "Salió en la carga de " : "Metido en la carga de ") + nombreCarga(c));
+  }
+  for (const t of o.seurTracking || []) {
+    if (t.anulado) continue;
+    if (t.estado) add(t.fechaSituacion || t.fechaCreacion, "SEUR (" + t.referencia + "): " + t.estado + (t.fechaSituacion ? " · " + dia(t.fechaSituacion) : ""), "seur");
+    if (/entregad/i.test(t.estado || "")) add((fechaBusca(t.fechaSituacion) || 0) + 1, "PEDIDO ENTREGADO" + (t.fechaSituacion ? " el " + dia(t.fechaSituacion) : ""), "ok");
+  }
+  for (const t of o.furnitureTracking || []) {
+    if (t.estado) add(t.fechaPrevista || t.fechaAlmacen, "Furniture (albarán " + (t.albaran || "") + "): " + t.estado, "seur");
+    if (/entregad/i.test(t.estado || "")) add((fechaBusca(t.fechaPrevista || t.fechaAlmacen) || 0) + 1, "PEDIDO ENTREGADO", "ok");
+  }
+  if (o.entregadoCliente) add(o.entregadoCliente.fecha, "PEDIDO ENTREGADO al cliente en mano el " + dia(o.entregadoCliente.fecha), "ok");
+  for (const dv of (d.devoluciones || []).filter(x => String(x.orderId) === String(o.id))) {
+    const f = dv.fechaLlegada || dv.creado;
+    add(f, "PEDIDO DEVUELTO el " + dia(f) + (dv.motivo ? " · " + dv.motivo : ""), "mal");
+  }
+  if (o.cancelado || o.shopifyCancelado) add(Date.now(), "PEDIDO CANCELADO", "mal");
+  // Orden por fecha; los que no tienen fecha se quedan donde estaban.
+  pasos.forEach((p, i) => { p.i = i; });
+  pasos.sort((a, b) => (a.t && b.t ? a.t - b.t : 0) || a.i - b.i);
+  return '<div class="buscador-pasos"><div class="buscador-pasos-tit">PASOS DEL PEDIDO</div><ol>'
+    + pasos.map(p => '<li class="' + p.tipo + '">' + escapeAttr(p.texto) + "</li>").join("") + "</ol></div>";
 }
 function fichaPedidoBuscador(o, d) {
   const ref = refLabel(o);
@@ -10264,6 +10327,7 @@ function fichaPedidoBuscador(o, d) {
   return '<div class="buscador-ficha">' +
     '<h3 style="margin:0 0 4px">' + escapeAttr(ref) + ' <span style="font-weight:400;color:var(--muted);font-size:13px">' + escapeAttr(o.platform || "Shopify") + " · " + escapeAttr(formatOrderDate(o.orderDate)) + "</span></h3>" +
     aviso +
+    pasosPedidoBuscador(o, d, bos) +
     (estadoArt.length && !cancelado ? '<div class="buscador-estado">' + estadoArt.join("") + "</div>" : "") +
     (pendientesAgenda.length ? '<div class="buscador-agenda"><ul>' + pendientesAgenda.join("") + "</ul></div>" : "") +
     (segs.length ? '<div class="buscador-seg"><div class="buscador-seg-tit">SEGUIMIENTO</div>' + segs.join("") + "</div>" : "") +
@@ -10276,10 +10340,11 @@ function fichaPedidoBuscador(o, d) {
       ((o.notas || "").trim() ? '<div class="buscador-nota">📝 ' + escapeAttr(o.notas) + "</div>" : "") +
       (notasSeur ? '<div class="buscador-nota">Envíos SEUR:<ul style="margin:2px 0 0 18px;padding:0">' + notasSeur + "</ul></div>" : "") +
     "</div>" +
+    '<details class="buscador-detalle"><summary>Ver todo el detalle (dónde está ahora e histórico completo)</summary>' +
     '<h4>Dónde está ahora</h4><ul class="buscador-donde">' + donde.map(x => "<li>" + escapeAttr(x) + "</li>").join("") + "</ul>" +
     "<h4>Histórico</h4>" +
     (ev.length ? '<table class="buscador-historico"><tbody>' + ev.map(e => '<tr><td style="white-space:nowrap;color:var(--muted)">' + fechaHoraBusca(e.t) + "</td><td>" + escapeAttr(e.texto) + (e.link ? ' <a href="' + escapeAttr(e.link) + '" target="_blank" rel="noopener" class="tracking-link">' + e.linkTxt + "</a>" : "") + (e.quien ? ' <span style="color:var(--muted);font-size:11px">· ' + escapeAttr(e.quien) + "</span>" : "") + "</td></tr>").join("") + "</tbody></table>" : '<p style="color:var(--muted)">Sin movimientos guardados.</p>') +
-    "</div>";
+    "</details></div>";
 }
 async function buscarPedidoGeneral(q) {
   const overlay = document.getElementById("buscador-modal-overlay");
