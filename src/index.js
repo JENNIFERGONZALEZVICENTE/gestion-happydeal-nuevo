@@ -3632,7 +3632,7 @@ function render(orders) {
       <td>\${o.name}</td>
       <td>\${o.address}\${direccionButton(o)}</td>
       <td>\${o.phone}</td>
-      <td>\${o.product}\${cambioMedidaHtml(o)}\${lineasCanceladasHtml(o)}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
+      <td>\${o.product}\${cambiosPedidoHtml(o)}\${lineasCanceladasHtml(o)}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
       <td class="services">\${o.services}</td>
       <td>\${o.paymentMethod}</td>
       <td>\${pagoManualCell(o)}</td>
@@ -6973,8 +6973,8 @@ function furnitureRowCells(o) {
   const enviados = grupo.flatMap(p => backorders.filter(b => b.orderId === p.id && b.estado === "servido" && !b.reposicion && !b.gestoComercial && !b.envioAparte));
   const refDeOtroPedido = b => b.orderId !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(allOrders.find(p => p.id === b.orderId) || {}) + '</span> ' : "";
   const productoGrupo = grupo.length > 1
-    ? grupo.map(p => (p.id !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(p) + '</span> ' : "") + p.product + cambioMedidaHtml(p)).join("<br>")
-    : o.product + cambioMedidaHtml(o);
+    ? grupo.map(p => (p.id !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(p) + '</span> ' : "") + p.product + cambiosPedidoHtml(p)).join("<br>")
+    : o.product + cambiosPedidoHtml(o);
   const serviciosGrupo = grupo.map(p => p.services).filter(Boolean).join(" · ");
   const todoJunto = pedidoQuiereTodoJunto(o);
   const itemsHtml = items.length
@@ -8446,7 +8446,7 @@ function renderMarketplace(platformId) {
       <td>\${o.province || ""}</td>
       <td>\${o.countryCode || ""}</td>
       <td>\${o.phone || ""}</td>
-      <td>\${o.product || ""}\${cambioMedidaHtml(o)}\${lineasCanceladasHtml(o)}</td>
+      <td>\${o.product || ""}\${cambiosPedidoHtml(o)}\${lineasCanceladasHtml(o)}</td>
       <td>\${o.qty || 1}</td>
       <td\${o.skuMatched ? "" : ' style="color:#991b1b;font-weight:600"'}>\${o.sku || ""}\${o.skuMatched ? "" : " ⚠"}</td>
       <td>\${o.price || ""}</td>
