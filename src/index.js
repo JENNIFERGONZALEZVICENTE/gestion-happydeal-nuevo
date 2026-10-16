@@ -2088,6 +2088,7 @@ function renderPage() {
     <label class="ocultar-recibidos-label"><input type="checkbox" id="carrefour-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="carrefour-upload-btn" class="secondary">Subir fichero de Carrefour</button>
     <input type="file" id="carrefour-upload-input" accept=".xlsx" style="display:none" />
+    <button type="button" class="secondary no-tramitar-btn" title="Pedidos que al subir el fichero NO se tramitan (se saltan del todo)">🚫 No tramitar</button>
     <span id="carrefour-upload-status" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="carrefour-sku-aviso" class="inventario-count" style="display:none;color:#991b1b;font-weight:600"></div>
@@ -2106,6 +2107,7 @@ function renderPage() {
     <label class="ocultar-recibidos-label"><input type="checkbox" id="maison-du-monde-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="maison-du-monde-upload-btn" class="secondary">Subir fichero de Maison Du Monde</button>
     <input type="file" id="maison-du-monde-upload-input" accept=".xlsx" style="display:none" />
+    <button type="button" class="secondary no-tramitar-btn" title="Pedidos que al subir el fichero NO se tramitan (se saltan del todo)">🚫 No tramitar</button>
     <span id="maison-du-monde-upload-status" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="maison-du-monde-sku-aviso" class="inventario-count" style="display:none;color:#991b1b;font-weight:600"></div>
@@ -2124,6 +2126,7 @@ function renderPage() {
     <label class="ocultar-recibidos-label"><input type="checkbox" id="worten-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="worten-upload-btn" class="secondary">Subir fichero de Worten</button>
     <input type="file" id="worten-upload-input" accept=".xlsx" style="display:none" />
+    <button type="button" class="secondary no-tramitar-btn" title="Pedidos que al subir el fichero NO se tramitan (se saltan del todo)">🚫 No tramitar</button>
     <span id="worten-upload-status" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="worten-sku-aviso" class="inventario-count" style="display:none;color:#991b1b;font-weight:600"></div>
@@ -2142,6 +2145,7 @@ function renderPage() {
     <label class="ocultar-recibidos-label"><input type="checkbox" id="conforama-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="conforama-upload-btn" class="secondary">Subir fichero de Conforama</button>
     <input type="file" id="conforama-upload-input" accept=".xlsx" style="display:none" />
+    <button type="button" class="secondary no-tramitar-btn" title="Pedidos que al subir el fichero NO se tramitan (se saltan del todo)">🚫 No tramitar</button>
     <span id="conforama-upload-status" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="conforama-sku-aviso" class="inventario-count" style="display:none;color:#991b1b;font-weight:600"></div>
@@ -2160,6 +2164,7 @@ function renderPage() {
     <label class="ocultar-recibidos-label"><input type="checkbox" id="conforama-es-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="conforama-es-upload-btn" class="secondary">Subir fichero de Conforama ES</button>
     <input type="file" id="conforama-es-upload-input" accept=".xlsx" style="display:none" />
+    <button type="button" class="secondary no-tramitar-btn" title="Pedidos que al subir el fichero NO se tramitan (se saltan del todo)">🚫 No tramitar</button>
     <span id="conforama-es-upload-status" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="conforama-es-sku-aviso" class="inventario-count" style="display:none;color:#991b1b;font-weight:600"></div>
@@ -2178,6 +2183,7 @@ function renderPage() {
     <label class="ocultar-recibidos-label"><input type="checkbox" id="leroy-merlin-orden-limite"> Primero los que vencen antes</label>
     <button type="button" id="leroy-merlin-upload-btn" class="secondary">Subir fichero de Leroy Merlin</button>
     <input type="file" id="leroy-merlin-upload-input" accept=".xlsx" style="display:none" />
+    <button type="button" class="secondary no-tramitar-btn" title="Pedidos que al subir el fichero NO se tramitan (se saltan del todo)">🚫 No tramitar</button>
     <span id="leroy-merlin-upload-status" class="inventario-count" style="padding:0"></span>
   </div>
   <div id="leroy-merlin-sku-aviso" class="inventario-count" style="display:none;color:#991b1b;font-weight:600"></div>
@@ -4658,6 +4664,20 @@ document.getElementById("pb-borrar-btn").addEventListener("click", async () => {
   await cargarSubidasPB();
 });
 
+// Lista de pedidos de marketplace que NO se tramitan al subir el fichero
+// (Jennifer, 2026-10-16): se edita aquí, uno por línea o separados por comas.
+document.addEventListener("click", async (e) => {
+  if (!e.target.closest(".no-tramitar-btn")) return;
+  const actual = await fetch("/api/no-tramitar").then(r => r.json()).catch(() => []);
+  const NL = String.fromCharCode(10);
+  const txt = prompt("Pedidos que NO se tramitan al subir el fichero (se saltan del todo: ni se guardan, ni van al proveedor, ni se envían)." + NL + NL + "Sepáralos con comas. Deja vacío para quitarlos todos.", actual.join(", "));
+  if (txt === null) return;
+  const lista = txt.split(/[,; ]+/).map(x => x.trim()).filter(Boolean);
+  const res = await fetch("/api/no-tramitar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lista, usuario: currentUser }) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert("No se ha podido guardar."); return; }
+  alert(r.lista.length ? "Guardado. No se tramitarán " + r.lista.length + " pedidos:" + NL + r.lista.join(", ") : "Lista vacía: se tramitará todo.");
+});
 const plazosToggle = document.getElementById("plazos-toggle");
 const plazosListEl = document.getElementById("plazos-list");
 plazosToggle.addEventListener("click", () => {
@@ -8410,7 +8430,8 @@ function initMarketplacePlatform(platformId) {
       res = await subir(true);
       data = await res.json();
     }
-    statusEl.textContent = data.actualizados + " pedidos actualizados · " + data.procesados + " tramitados ahora (nuevos, con descuento de stock)" + (data.sinMatch ? " · " + data.sinMatch + " con SKU sin reconocer" : "");
+    statusEl.textContent = data.actualizados + " pedidos actualizados · " + data.procesados + " tramitados ahora (nuevos, con descuento de stock)" + (data.sinMatch ? " · " + data.sinMatch + " con SKU sin reconocer" : "")
+      + (data.ignorados && data.ignorados.length ? " · 🚫 " + data.ignorados.length + " saltados por «no tramitar»: " + data.ignorados.join(", ") : "");
     await loadMarketplacePedidos(platformId);
     loadOrders(); // refresca el aviso rojo de fecha límite del menú
   });
@@ -12168,9 +12189,17 @@ async function handleFetch(request, env) {
         if (!entriesPorPedido.has(e.orderNumber)) entriesPorPedido.set(e.orderNumber, []);
         entriesPorPedido.get(e.orderNumber).push(e);
       }
-      const orders = [...entriesPorPedido.values()].map((grupo) => mapMarketplaceOrder(grupo, catalogMap, platform));
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
+      // Lista de "no tramitar" (Jennifer, 2026-10-16): esos pedidos se saltan
+      // del todo — ni se guardan ni se tramitan. Vale con o sin el "-A".
+      const noTramitar = new Set(await (await stub.fetch("https://do/no-tramitar")).json().catch(() => []));
+      const sinLetra = (x) => String(x || "").trim().toUpperCase().replace(/-[A-Z]$/, "");
+      const noTramitarBase = new Set([...noTramitar].map(sinLetra));
+      const todos = [...entriesPorPedido.values()].map((grupo) => mapMarketplaceOrder(grupo, catalogMap, platform));
+      const esNoTramitar = (o) => noTramitar.has(String(o.orderRef || "").toUpperCase()) || noTramitarBase.has(sinLetra(o.orderRef));
+      const ignorados = todos.filter(esNoTramitar).map((o) => o.orderRef);
+      const orders = todos.filter((o) => !esNoTramitar(o));
       // Fichero subido en la tienda equivocada (Jennifer, 2026-10-06: el de
       // Worten se subió en Leroy Merlin y creó 52 pedidos falsos). Antes de
       // guardar nada se compara con los pedidos que ya hay de cada tienda;
@@ -12194,7 +12223,7 @@ async function handleFetch(request, env) {
       }
       if (sinMotor.length) await stub.fetch("https://do/orders/import-simple", { method: "POST", body: JSON.stringify(sinMotor) });
       const sinMatch = orders.filter((o) => !o.skuMatched).length;
-      return Response.json({ ok: true, actualizados: orders.length, procesados: tramitadosAhora, sinMatch });
+      return Response.json({ ok: true, actualizados: orders.length, procesados: tramitadosAhora, sinMatch, ignorados });
     }
 
     const marketplacePedidosMatch = url.pathname.match(/^\/api\/(carrefour|maison-du-monde|worten|conforama|conforama-es|leroy-merlin)\/pedidos$/);
@@ -13224,6 +13253,11 @@ async function handleFetch(request, env) {
     }
 
     // Histórico de devueltos de SEUR (Jennifer, 2026-10-13).
+    if (url.pathname === "/api/no-tramitar" && (request.method === "GET" || request.method === "POST")) {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/no-tramitar", request.method === "POST" ? { method: "POST", body: await request.text() } : {});
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/seur/devoluciones" || url.pathname === "/api/seur/devoluciones/guardar") {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do" + url.pathname.slice("/api/seur".length), request.method === "POST" ? { method: "POST", body: await request.text() } : {});

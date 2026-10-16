@@ -1447,6 +1447,20 @@ export class OrdersStore {
     // solos cuando el seguimiento dice "Envío devuelto" o "se está devolviendo
     // a origen", o a mano. Es un histórico: "quitar" solo los oculta
     // (descartado), para que los automáticos no vuelvan a entrar.
+    // Pedidos de marketplace que NO se tramitan (Jennifer, 2026-10-16: "cuando
+    // suba el fichero de Maison el lunes no se tienen que tramitar... ni
+    // enviarlos ni meterlos en el proveedor ni nada de nada"): al importar
+    // el fichero se saltan por completo.
+    if (url.pathname === "/no-tramitar" && request.method === "GET") {
+      return Response.json((await this.state.storage.get("noTramitar")) || []);
+    }
+    if (url.pathname === "/no-tramitar" && request.method === "POST") {
+      const { lista, usuario } = await request.json();
+      const limpia = [...new Set((lista || []).map((x) => String(x || "").trim().toUpperCase()).filter(Boolean))];
+      await this.state.storage.put("noTramitar", limpia);
+      await this.state.storage.put("noTramitarCambio", { fecha: new Date().toISOString(), usuario: usuario || null });
+      return Response.json({ ok: true, lista: limpia });
+    }
     if (url.pathname === "/devoluciones" && request.method === "GET") {
       const orders = (await this.state.storage.get("orders")) || {};
       const devoluciones = (await this.state.storage.get("devoluciones")) || [];
