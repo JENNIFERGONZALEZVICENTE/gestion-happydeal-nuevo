@@ -3543,7 +3543,7 @@ function agenciaBadge(order) {
 // debajo del otro, etiquetados por tipo.
 const TRACKING_TIPO_LABEL = { BIS: "BIS", INC: "Incidencia", REP: "Reposición" };
 function esEstadoEntregado(estado) {
-  return (/ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "") && !/NO ENTREGAD|NO SE HA ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(estado || ""));
+  return (/ENTREGAD|entrega efectuada|retirado el envío/i.test(estado || "") && !/NO ENTREGAD|SERÁ ENTREGAD|SERA ENTREGAD|NO SE HA ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(estado || ""));
 }
 function trackingEntryHtml(label, seguimiento, estado, title) {
   const linkHtml = seguimiento
@@ -8608,7 +8608,7 @@ function renderEnviosSeur() {
   // Entregado = "entregado" o retirado de un punto pickup (mismo criterio
   // que el antiguo "Casos a revisar").
   const ocultarEntregados = document.getElementById("envios-seur-ocultar-entregados").checked;
-  const esEntregado = e => (/ENTREGAD|entrega efectuada|retirado el envío/i.test(e.estadoSeur || "") && !/NO ENTREGAD|NO SE HA ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(e.estadoSeur || ""));
+  const esEntregado = e => (/ENTREGAD|entrega efectuada|retirado el envío/i.test(e.estadoSeur || "") && !/NO ENTREGAD|SERÁ ENTREGAD|SERA ENTREGAD|NO SE HA ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(e.estadoSeur || ""));
   const ocultarArchivados = document.getElementById("envios-seur-ocultar-archivados").checked;
   const soloAvisos = document.getElementById("envios-seur-solo-avisos").checked;
   const soloPunto = document.getElementById("envios-seur-solo-punto").checked;
@@ -10146,11 +10146,11 @@ function pasosPedidoBuscador(o, d, bos) {
   for (const t of o.seurTracking || []) {
     if (t.anulado) continue;
     if (t.estado) add(t.fechaSituacion || t.fechaCreacion, "SEUR (" + t.referencia + "): " + t.estado + (t.fechaSituacion ? " · " + dia(t.fechaSituacion) : ""), "seur");
-    if (/entregad/i.test(t.estado || "")) add((fechaBusca(t.fechaSituacion) || 0) + 1, "PEDIDO ENTREGADO" + (t.fechaSituacion ? " el " + dia(t.fechaSituacion) : ""), "ok");
+    if (/entregad/i.test(t.estado || "") && !/ser[aá] entregad|no se ha entregad|no entregad/i.test(t.estado || "")) add((fechaBusca(t.fechaSituacion) || 0) + 1, "PEDIDO ENTREGADO" + (t.fechaSituacion ? " el " + dia(t.fechaSituacion) : ""), "ok");
   }
   for (const t of o.furnitureTracking || []) {
     if (t.estado) add(t.fechaPrevista || t.fechaAlmacen, "Furniture (albarán " + (t.albaran || "") + "): " + t.estado, "seur");
-    if (/entregad/i.test(t.estado || "")) add((fechaBusca(t.fechaPrevista || t.fechaAlmacen) || 0) + 1, "PEDIDO ENTREGADO", "ok");
+    if (/entregad/i.test(t.estado || "") && !/ser[aá] entregad|no se ha entregad|no entregad/i.test(t.estado || "")) add((fechaBusca(t.fechaPrevista || t.fechaAlmacen) || 0) + 1, "PEDIDO ENTREGADO", "ok");
   }
   if (o.entregadoCliente) add(o.entregadoCliente.fecha, "PEDIDO ENTREGADO al cliente en mano el " + dia(o.entregadoCliente.fecha), "ok");
   for (const dv of (d.devoluciones || []).filter(x => String(x.orderId) === String(o.id))) {
