@@ -8911,7 +8911,7 @@ function seurOrderRowCells(o, refSuffix) {
     <td>\${o.name}</td>
     <td>\${o.furnitureAddress || o.address || ""}\${direccionButton(o)}</td>
     <td>\${o.phone}</td>
-    <td>\${o.product}</td>
+    <td>\${o.product}\${cambiosPedidoHtml(o)}</td>
   \`;
 }
 
