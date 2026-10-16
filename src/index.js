@@ -8622,7 +8622,7 @@ function renderEnviosSeur() {
     (!soloPunto || (e.enPunto && !e.archivado)) &&
     (!ocultarEntregados || !esEntregado(e)) &&
     (!ocultarArchivados || !e.archivado) &&
-    (!q ||[e.ref, e.refSeur, e.nombre, e.observaciones, e.nota, e.numeroExpedicion].concat((e.otrasEtiquetas || []).map(x => x.expedicion + " " + x.referencia)).join(" ").toLowerCase().includes(q)) &&
+    (!q ||[e.ref, e.refSeur, e.orderId, e.nombre, e.observaciones, e.nota, e.numeroExpedicion].concat((e.otrasEtiquetas || []).map(x => x.expedicion + " " + x.referencia)).join(" ").toLowerCase().includes(q)) &&
     (!estado || (e.estadoSeur || "__sin__") === estado) &&
     (!reclamado || (reclamado === "si" ? e.reclamado : reclamado === "no" ? !e.reclamado : reclamado === "respuesta" ? e.correoNoLeidos > 0 : !!(e.correo && e.correo.mensajes && e.correo.mensajes.length))) &&
     (!pais || e.pais === pais));
