@@ -4046,12 +4046,11 @@ window.addEventListener("resize", () => {
 // la tabla, que sí filtra). Mismas columnas que ya se ven en pantalla, más
 // "Proveedor" para poder distinguirlos una vez mezclados en una sola hoja.
 document.getElementById("descargar-excel-pendientes-btn").addEventListener("click", async () => {
-  // Con "Ocultar ya recibidos de fábrica" marcado, el Excel tampoco los
-  // saca (Jennifer, 2026-10-16, BEZEN12154/12155: "ya están recibidos y me
-  // los sacas en el listado").
-  const sinRecibidos = document.getElementById("pendientes-ocultar-recibidos").checked;
+  // Solo lo que FALTA POR VENIR de fábrica (Jennifer, 2026-10-16,
+  // BEZEN12154/12155: "que el pedido siga pendiente de envío no quiere decir
+  // que siga pendiente de venir"): lo ya recibido nunca sale aquí.
   const lista = backorders
-    .filter(b => b.estado === "pendiente" && ["POLIVAL", "LUSO", "NEW"].includes(b.proveedor) && !(sinRecibidos && b.recibidoFabrica))
+    .filter(b => b.estado === "pendiente" && ["POLIVAL", "LUSO", "NEW"].includes(b.proveedor) && !b.recibidoFabrica)
     .sort((a, b) => (a.proveedor === b.proveedor ? parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha) : a.proveedor.localeCompare(b.proveedor)));
   // Coste de tarifa de los colchones de Luso/New (Jennifer, 2026-09-30:
   // "cuando descargue la tabla de proveedores esos precios se puedan
