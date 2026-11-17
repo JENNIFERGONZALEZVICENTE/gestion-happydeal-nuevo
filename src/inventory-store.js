@@ -1,3 +1,5 @@
+import { calcularPrecioReforman, anadirColumnaReforman } from "./reforman.js";
+import { CABECERAS_MIRAKL, CLIENTES_FICHERO_COMPLETO, filasDesdeCsvImport, toCsv, calcularPrecioOferta, STOCK_VIVO, esDescatalogado, skuDesdeNombreWorten } from "./ficheros-completos.js";
 const TYPE_MAP = {
   Colchones: "colchon",
   Almohada: "almohada",
@@ -660,7 +662,8 @@ const CANAPE_RECIPES = {
     },
   },
   space_extra: {
-    modelo: "SPACE GRAN CAPACIDAD",
+    // Polival lo llama SPACE MAX (Jennifer, 2026-10-27).
+    modelo: "SPACE MAX",
     tapaBase: "Tapa entera en rejilla",
     tirador: null,
     colores: {
@@ -750,6 +753,12 @@ const CANAPE_RECIPES = {
       "tela gris antracita": { color: "Duna Onix", rejilla: "Grafito", modelo: "INITIAL DELUXE" },
       "gris niebla": { color: "Duna Koala", rejilla: "Grafito", modelo: "INITIAL DELUXE" },
       "tela gris niebla": { color: "Duna Koala", rejilla: "Grafito", modelo: "INITIAL DELUXE" },
+      // Arena (pack "acabados en tela", Jennifer, 2026-10-19, BEZEN12320).
+      arena: { color: "Duna Alpaca", rejilla: "Tierra", modelo: "INITIAL DELUXE" },
+      "tela arena": { color: "Duna Alpaca", rejilla: "Tierra", modelo: "INITIAL DELUXE" },
+      // Oliva (Jennifer, 2026-11-10, N051FUR / BEZEN12259: rejilla negra).
+      oliva: { color: "Duna Oliva", rejilla: "Negra", modelo: "INITIAL DELUXE" },
+      "tela oliva": { color: "Duna Oliva", rejilla: "Negra", modelo: "INITIAL DELUXE" },
     },
   },
 };
@@ -776,6 +785,8 @@ const TELA_COLORES_UNIFICADOS = {
   rosa: { color: "Duna Flamingo", rejilla: "Negra" },
   lavanda: { color: "Duna Lavanda", rejilla: "Negra" },
   star: { color: "Duna Dijón", rejilla: "Negra" },
+  // Arena es Duna Alpaca (Jennifer, 2026-10-19, BEZEN12320).
+  arena: { color: "Duna Alpaca", rejilla: "Tierra" },
 };
 const TELA_RECIPE_BASE = {
   modelo: "SPACE DELUXE",
@@ -945,6 +956,8 @@ const CABECERO_ACABADOS_COMUNES = {
   rosa: "Duna Flamingo",
   lavanda: "Duna Lavanda",
   star: "Duna Dijón",
+  // Arena es Duna Alpaca (Jennifer, 2026-10-19, BEZEN12320).
+  arena: "Duna Alpaca",
 };
 // offset: cuánto se le suma al ancho que elige el cliente para pedir la
 // medida final a fábrica — Aura +30cm, el resto +10cm (confirmado con
@@ -954,7 +967,9 @@ const CABECERO_ACABADOS_COMUNES = {
 // en el SKU, solo el ancho del colchón/canapé — ver buildCabeceroMercancia).
 export const CABECERO_RECIPES = {
   aura: {
-    modelo: "SIENNA",
+    // Nuestro nombre delante y el de fábrica entre paréntesis (Polival lo
+    // pidió, Jennifer, 2026-10-19).
+    modelo: "AURA (VUESTRO SIENNA)",
     offset: 30,
     colores: {
       blanco: "Argos Blanco",
@@ -965,10 +980,10 @@ export const CABECERO_RECIPES = {
       negro: "Argos Negro",
     },
   },
-  aria: { modelo: "ASHLEY", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
-  atenea: { modelo: "MERYL", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
-  iris: { modelo: "MARGOT", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
-  gaia: { modelo: "GRETA", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
+  aria: { modelo: "ARIA (VUESTRO ASHLEY)", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
+  atenea: { modelo: "ATENEA (VUESTRO MERYL)", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
+  iris: { modelo: "IRIS (VUESTRO MARGOT)", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
+  gaia: { modelo: "GAIA (VUESTRO GRETA)", offset: 10, colores: CABECERO_ACABADOS_COMUNES },
 };
 
 export function matchCabeceroRecipeKey(title) {
@@ -1041,6 +1056,84 @@ const SIMPLE_FABRICA_NOMBRES = [
   { match: "latex natural", nombre: "ALMOHADA DE LATEX" },
 ];
 
+function nombreFabricaProducto(p) {
+  const tipo = p.product_type;
+  const titulo = p.title || p.stockModel || "";
+  if (tipo === "Canapé") {
+    const k = matchCanapeRecipeKey(titulo);
+    if (k === "initial") return "CANAPÉ INITIAL / INITIAL DELUXE (según color)";
+    return k && CANAPE_RECIPES[k] ? "CANAPÉ " + CANAPE_RECIPES[k].modelo : "";
+  }
+  if (tipo === "Canapé fijo") return CANAPE_FIJO_MODELO;
+  if (tipo === "Cabecero") {
+    const k = matchCabeceroRecipeKey(titulo);
+    return k ? "CABECERO " + CABECERO_RECIPES[k].modelo : "";
+  }
+  if (tipo === "Base") return "BASE TAPIZADA";
+  if (tipo === "Almohada" || tipo === "Topper") {
+    const t = normalizeKey(titulo);
+    const m = SIMPLE_FABRICA_NOMBRES.find((x) => t.includes(x.match));
+    return m ? m.nombre : "";
+  }
+  return "";
+}
+
+// Stock de tapicería (Jennifer, 2026-10-20): el estado de cada ficha sale
+// de los pendientes que la usan — si se cancela el pendiente, vuelve a estar
+// libre sola; si ya salió, queda como usada.
+function estadoStockTapiceria(s, backorders) {
+  const usos = backorders.filter((b) => (b.stockTapiceriaId === s.id || (b.piezasStock || []).includes(s.id)) && b.estado !== "cancelado");
+  const vivo = usos.find((b) => b.estado !== "servido");
+  const b = vivo || usos[0];
+  if (!b) return { estado: "disponible", asignadoA: null };
+  return { estado: vivo ? "asignado" : "salido", asignadoA: { orderId: b.orderId, orderNumber: b.orderNumber, orderRef: b.orderRef || null, platform: b.platform || null, backorderId: b.id } };
+}
+function colorTapiceriaKey(c) {
+  return normalizeColorKey(String(c || "").replace(/^(tela|polipiel)\s*-\s*/i, ""));
+}
+// La ficha libre más antigua del mismo modelo, medida y color (solo
+// canapés/tapicería completos; las piezas se usan a mano).
+function buscarStockTapiceria(lista, backorders, stockModel, talla, color) {
+  const t = normalizeTalla(talla) || String(talla || "").toUpperCase();
+  return lista
+    .filter((s) => s.completo && s.stockModel === stockModel && s.talla === t && colorTapiceriaKey(s.color) === colorTapiceriaKey(color)
+      && estadoStockTapiceria(s, backorders).estado === "disponible")
+    .sort((a, b) => String(a.fechaAlta).localeCompare(String(b.fechaAlta)))[0] || null;
+}
+// Piezas sueltas libres del mismo modelo, medida y color (una por pieza).
+function buscarPiezasStockTapiceria(lista, backorders, stockModel, talla, color) {
+  const t = normalizeTalla(talla) || String(talla || "").toUpperCase();
+  const vistas = new Set();
+  return lista
+    .filter((s) => !s.completo && s.stockModel === stockModel && s.talla === t && colorTapiceriaKey(s.color) === colorTapiceriaKey(color)
+      && estadoStockTapiceria(s, backorders).estado === "disponible")
+    .sort((a, b) => String(a.fechaAlta).localeCompare(String(b.fechaAlta)))
+    .filter((s) => { const k = normalizeKey(s.pieza || s.nota || s.id); if (vistas.has(k)) return false; vistas.add(k); return true; });
+}
+// Pieza suelta del almacén (Jennifer, 2026-10-20): el pedido a Polival va
+// como siempre y abajo esta línea, para que la revisen en fábrica.
+function lineaPiezaStock(s) {
+  const pieza = String(s.pieza || s.nota || "suelta").toUpperCase();
+  return "(LA PIEZA " + pieza + (s.referencia ? " (" + s.referencia + ")" : "") + " ESTÁ EN STOCK, ASÍ QUE SUBIR A FÁBRICA PARA REVISAR, SI ESTÁ BIEN NO FABRICAR ESA PIEZA)";
+}
+function usarPiezasStock(b, piezas) {
+  b.piezasStock = [...(b.piezasStock || []), ...piezas.map((s) => s.id)];
+  b.piezasStockTexto = [...(b.piezasStockTexto || []), ...piezas.map((s) => String(s.pieza || s.nota || "pieza").toUpperCase() + (s.referencia ? " (" + s.referencia + ")" : ""))];
+  // Para las etiquetas de Furniture: esa pieza sale con su referencia de stock.
+  b.piezasStockDetalle = [...(b.piezasStockDetalle || []), ...piezas.map((s) => ({ pieza: String(s.pieza || "").toUpperCase(), referencia: s.referencia || "" }))];
+  b.mercanciaFabrica = [b.mercanciaFabrica || "", ...piezas.map(lineaPiezaStock)].filter(Boolean).join(" · ");
+}
+
+// Base de Groupon (Jennifer, 2026-10-19): a fábrica va la base con su color
+// y medida y, siempre, 6 patas. El color sale del propio modelo de stock
+// ("Base tapizada con rejilla 3D y respiraderos | BEIGE - LIQUIDACION").
+function buildBaseGrouponMercancia(stockModel, talla) {
+  const partes = String(stockModel || "").split("|").map((x) => x.trim()).filter(Boolean);
+  const color = (partes.length > 1 ? partes[partes.length - 1] : "").replace(/\s*-\s*LIQUIDACI[OÓ]N\s*$/i, "").toUpperCase();
+  // En Groupon siempre 6 patas, sea cual sea la medida (Jennifer, 2026-10-27).
+  return { texto: "BASE TAPIZADA" + (color ? " · COLOR: " + color : "") + (talla ? " · MEDIDA: " + talla : "") + " · 6 PATAS", needsReview: false };
+}
+
 function buildSimpleMercancia(title, talla) {
   const t = normalizeKey(title);
   const found = SIMPLE_FABRICA_NOMBRES.find((r) => t.includes(r.match));
@@ -1099,8 +1192,12 @@ function normalizeTalla(text) {
   if (!text) return "";
   const m = text.match(/(\d{2,3})\s*[xX]\s*(\d{2,3})/);
   if (m) return `${m[1]}X${m[2]}`;
-  const bare = text.trim().match(/^\d{2,3}(\.\d+)?$/);
-  if (bare) return text.trim();
+  // Con coma decimal también (Jennifer, 2026-10-22, BEZEN12344: almohada
+  // Nordic "67,5" se quedaba sin medida al pedirla a fábrica). Se guarda
+  // con punto, como las Seafoam "67.5".
+  const t = text.trim().replace(/^(\d{2,3}),(\d+)$/, "$1.$2");
+  const bare = t.match(/^\d{2,3}(\.\d+)?$/);
+  if (bare) return t;
   return "";
 }
 
@@ -1165,6 +1262,8 @@ function separarUnidades(backorders, entry, n, etiqueta) {
 
 function nombreCortoModeloSrv(stockModel) {
   const partes = String(stockModel || "").split("|").map((x) => x.trim()).filter(Boolean);
+  // Base: nunca solo el color (Jennifer, 2026-10-19).
+  if (partes.length > 1 && /^base tapizada/i.test(partes[0])) return "BASE TAPIZADA " + partes[partes.length - 1];
   return partes[partes.length - 1] || stockModel || "";
 }
 function nextRefSuffix(current) {
@@ -1369,7 +1468,10 @@ function resolvePackSku(rawSku, products, packColor, packTalla) {
     const norMatch = seg.match(NOR_PILLOW_RE);
     const nordic = norMatch ? Object.values(products).find((p) => p.skuPrefix === "ALMNOR") : null;
     if (norMatch && nordic) {
-      componentes.push({ tipo: "almohada", product: nordic, talla: normalizeTalla(norMatch[2]), ambiguousMatch: false, color: "", qtyOverride: norMatch[1] ? Number(norMatch[1]) : 1 });
+      // La Nordic de 100 no existe (Jennifer, 2026-10-22: "tienen que ser de
+      // 90"): los packs 200X200 con "2NOR100" llevan 2 de 90.
+      const tallaNor = normalizeTalla(norMatch[2]) === "100" ? "90" : normalizeTalla(norMatch[2]);
+      componentes.push({ tipo: "almohada", product: nordic, talla: tallaNor, ambiguousMatch: false, color: "", qtyOverride: norMatch[1] ? Number(norMatch[1]) : 1 });
       continue;
     }
     const match = findBestPrefixMatch(seg, products);
@@ -1492,7 +1594,9 @@ function resolveStockModel(query, mode, products) {
 // tramo propio) — mismo tramo que 80/90, coherente con que su coste/envío
 // ya se sustituyen por los de 80X180 (ver TARIFA_SUSTITUTOS_GENERALES).
 const TARIFA_MARGEN_TRAMOS = [
-  { anchos: [67, 80, 90], margen: 12 },
+  // 70 y 75 añadidos 2026-11-04 (almohadas Nordic/Smooth de Polival,
+  // ALMNOR70/75: tenían coste pero no salían en plataformas) — tramo de 80/90.
+  { anchos: [67, 70, 75, 80, 90], margen: 12 },
   { anchos: [105, 120], margen: 15 },
   { anchos: [135, 140, 150], margen: 18 },
   { anchos: [160, 180], margen: 25 },
@@ -1567,8 +1671,56 @@ const TARIFA_TALLAS_EXTRA_MODELO = {
   "Colchón Viscoelástico | 21cm | Bellagio Deluxe": ["200X200"],
   "Colchón Muelles Ensacados | 31cm | Doble Cara | Zen Natural": ["105X180", "120X180", "140X180", "150X180", "160X180", "180X180"],
   "Colchón Muelles Ensacados | 33cm | Doble Cara | Efecto Nube | Spring Zen": ["105X180", "120X180", "140X180", "150X180", "160X180", "180X180"],
+  // Canapé Space polipiel, tarifa Polival (Jennifer, 2026-10-20): medidas de
+  // la tarifa que no son variante en Shopify, y el 160 en GEMELOS (precio
+  // propio; el 160 "normal" es el PARTIDO). El 180 siempre va en gemelos.
+  "Canape Abatible tapizado alta capacidad y resistencia": ["80X180", "105X180", "105X200", "140X180", "150X180", "160X180", "160X180 GEMELOS", "160X190 GEMELOS", "160X200 GEMELOS"],
+  // Space Deluxe polipiel (Jennifer, 2026-10-21): tallas de la tarifa ARGOS que no están en la web.
+  "Canapé Abatible tapizado gran capacidad con borde polipiel Premium": ["80X180", "105X180", "105X200", "140X180", "150X180", "160X180", "160X190 GEMELOS", "160X200 GEMELOS"],
+  // BASE SILVER (Jennifer, 2026-10-27): tallas de la tarifa que no están en la web.
+  "Base tapizada con rejilla 3D y respiraderos | BEIGE": ["140X180", "150X180", "160X180", "180X180", "180X190", "180X200"],
+  "Base tapizada con rejilla 3D y respiraderos | BLANCO": ["140X180", "150X180", "160X180", "180X180", "180X190", "180X200"],
+  "Base tapizada con rejilla 3D y respiraderos | NEGRO": ["140X180", "150X180", "160X180", "180X180", "180X190", "180X200"],
+  // Látex Natura (Jennifer, 2026-10-27): gemelos de la web.
+  "Colchón de Látex Natural Natura": ["80X180 GEMELOS", "80X200 GEMELOS", "90X190 GEMELOS", "90X200 GEMELOS"],
+  "Colchón de Látex Natural Natura Premium": ["80X180 GEMELOS", "80X190 GEMELOS", "80X200 GEMELOS", "90X190 GEMELOS", "90X200 GEMELOS"],
+  // MAGNUM (Jennifer, 2026-10-29): tallas de la tarifa ARGOS que no están en la web.
+  "Canapé Abatible tapizado gran capacidad con Ruedas": ["120X180", "120X190", "140X180", "150X180", "160X180", "160X190 GEMELOS", "160X200 GEMELOS", "180X180", "180X190", "200X190", "200X200"],
+  // SPACE MAX (Jennifer, 2026-10-27): tallas de la tarifa ARGOS que no están en la web.
+  "Canapé Abatible tapizado Extra Capacidad": ["120X180", "120X190", "120X200", "140X180", "150X180", "160X180", "160X180 GEMELOS", "160X190 GEMELOS", "160X200 GEMELOS"],
+  // Canapé INITIAL polipiel (Jennifer, 2026-10-21): tallas de la tarifa ARGOS que no están en la web.
+  "Canapé Abatible tapizado gran capacidad con patas": ["80X180", "90X180", "140X180", "150X180", "160X180", "160X190 GEMELOS", "160X200 GEMELOS",
+    // INITIAL DELUXE = las opciones de TELA del mismo producto (Jennifer,
+    // 2026-10-21): su coste va en tallas "… TELA" (ver tallaTarifaTela).
+    ...["80X180", "80X190", "80X200", "90X180", "90X190", "90X200", "105X180", "105X190", "105X200", "135X180", "135X190", "135X200", "140X180", "140X190", "140X200", "150X180", "150X190", "150X200", "160X180", "160X190", "160X200", "160X190 TELA GEMELOS", "160X200 TELA GEMELOS", "180X190", "180X200", "200X200"].map((t) => / GEMELOS$/.test(t) ? t : t + " TELA")],
+  // Cabecero Atenea (Jennifer, 2026-10-21): los cabeceros no tienen tallas en
+  // el Catálogo; la talla es el ancho de la cama (Cama 90 → "90").
+  "Cabecero Atenea de Tela": ["90", "105", "135", "150", "160", "180", "200"],
+  "Cabecero Iris de Tela": ["90", "105", "135", "150", "160", "180", "200"],
+  "Cabecero Aria de Tela": ["90", "105", "135", "150", "160", "180", "200"],
+  // Aura (Jennifer, 2026-10-27): tarifa ARGOS, cama 80 a 180 (+30 cm).
+  "Cabecero Aura": ["80", "90", "105", "120", "135", "140", "150", "160", "180", "200"],
+  "Cabecero Gaia de Tela": ["90", "105", "135", "150", "160", "180", "200"],
+  // Canapé ZENIT (Mónaco), madera esquinas curvas (Jennifer, 2026-10-22): tallas de la tarifa que no están en la web.
+  "Canape abatible de madera alta capacidad y resistencia - esquinas curvas": ["105X180", "150X180", "160X180", "180X180", "180X190", "200X180", "200X190"],
+  // Space Deluxe de tela (Jennifer, 2026-10-21): la misma tarifa ARGOS que la polipiel.
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores natural": ["140X180", "150X180", "160X180", "160X190 GEMELOS", "160X200 GEMELOS"],
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores tierras": ["140X180", "150X180", "160X180", "160X190 GEMELOS", "160X200 GEMELOS"],
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores vivos": ["140X180", "150X180", "160X180", "160X190 GEMELOS", "160X200 GEMELOS"],
 };
 const TARIFA_SUSTITUTOS_POR_MODELO = {
+  // Zenit (Jennifer, 2026-10-22): el 160 de la web ya es el gemelo "frente
+  // único"; en los packs llega como "160X… GEMELOS".
+  "Canape abatible de madera alta capacidad y resistencia - esquinas curvas": {
+    "160X190 GEMELOS": "160X190",
+    "160X200 GEMELOS": "160X200",
+  },
+  // Cabecero de cama 200 dentro de un pack (llega con la medida de la cama).
+  "Cabecero Iris de Tela": { "200X200": "200" },
+  "Cabecero Aria de Tela": { "200X200": "200" },
+  "Cabecero Aura": { "200X200": "200" },
+  "Cabecero Gaia de Tela": { "200X200": "200" },
+  "Cabecero Atenea de Tela": { "200X200": "200" },
   "Colchón Viscoelástico | 15cm | Pharma-Therapy Soja Slim - Cama Nido": {
     "80X180": "90X180",
     "80X190": "90X190",
@@ -1589,9 +1741,204 @@ const TARIFA_ENVIO_SUSTITUTO_MODELO = {
 // no tienen precio en la tabla de transporte (esa es de SEUR, por país) —
 // Furniture cobra un fijo por envío, igual para cualquier talla o país.
 // Spring Zen: 42€.
-const TARIFA_ENVIO_FIJO_MODELO = {
-  "Colchón Muelles Ensacados | 33cm | Doble Cara | Efecto Nube | Spring Zen": 42,
+// Base con montaje (SKU "MBASE…") en Precios BEZEN: Furniture cobra 19 € +
+// IVA por montarla (Jennifer, 2026-10-27); se suma al envío de 41 €.
+const MONTAJE_BASE_FURNITURE = 19;
+// Pata de la base (Jennifer, 2026-10-27): 1,16 € cada una; ya va sumada al
+// coste guardado (4 patas hasta 135x190, 6 desde 135x200).
+const PRECIO_PATA_BASE = 1.16;
+// Precio GROUPON (Jennifer, 2026-10-27): modelos y gastos fijos.
+const TARIFA_GROUPON_MODELOS = [
+  "Base tapizada con rejilla 3D y respiraderos | BEIGE",
+  "Base tapizada con rejilla 3D y respiraderos | BLANCO",
+  "Base tapizada con rejilla 3D y respiraderos | NEGRO",
+  // Canapé Space polipiel (Jennifer, 2026-11-06): misma fórmula, sin patas.
+  "Canape Abatible tapizado alta capacidad y resistencia",
+  // Colchón Bellagio Deluxe (Jennifer, 2026-11-10): misma fórmula.
+  "Colchón Viscoelástico | 21cm | Bellagio Deluxe",
+];
+const TARIFA_GROUPON_EXTRA = 9;
+// Groupon Bélgica (Jennifer, 2026-11-10): no hay tarifa de envío a BE, así que
+// se usa el envío más caro de los guardados para esa talla del modelo.
+const TARIFA_GROUPON_ENVIO_BE = ["Colchón Viscoelástico | 21cm | Bellagio Deluxe"];
+// Colchones de látex Natura (Jennifer, 2026-10-27): solo se venden en España,
+// y sus gemelos (dos colchones de esa medida) llevan tarifa propia en la
+// talla "90X190 GEMELOS".
+// Modelos que solo existen en Tarifas, no en el Catálogo (Jennifer,
+// 2026-10-27): el Somier Kilimanjaro (KEROS en Polival) no se tramita por
+// la app, pero quiere su tarifa. Mismo formato que un producto del Catálogo.
+const TARIFA_PRODUCTOS_SOLO_TARIFAS = [
+  {
+    productId: "tarifa-somier-kilimanjaro", stockModel: "Somier Kilimanjaro", title: "Somier Kilimanjaro", product_type: "Somier",
+    proveedor: "POLIVAL", skuPrefix: "SOMKIM", nombreFabrica: "SOMIER KEROS",
+    tallas: ["80X180", "80X190", "80X200", "90X180", "90X190", "90X200", "105X180", "105X190", "105X200", "120X180", "120X190", "120X200", "135X180", "135X190", "135X200", "150X180", "150X190", "150X200"],
+  },
+  // Singapur = ARTIC. MOTOR SICILIA Y PATAS de Polival (Jennifer, 2026-10-27).
+  {
+    productId: "tarifa-somier-singapur", stockModel: "Somier Articulado Eléctrico Singapur | Montaje incluído", title: "Somier Articulado Eléctrico Singapur | Montaje incluído", product_type: "Somier",
+    proveedor: "POLIVAL", skuPrefix: "SOMARTICULADOSINGAPUR", nombreFabrica: "ARTIC. MOTOR SICILIA Y PATAS",
+    tallas: ["90X180", "90X190", "105X180", "105X190", "135X180", "135X190", "150X180", "150X190"],
+  },
+];
+// Conjuntos somier + colchón de la web (Jennifer, 2026-10-27): van como los
+// demás packs en Precios BEZEN (ella elige precio y descuento por pieza y ve
+// el margen). No están en el Catálogo, así que sus piezas se dicen aquí.
+const CONJUNTOS_PACK_PIEZAS = {
+  "Conjunto Somier Articulado Natura Látex": [
+    { tipo: "somier", stockModel: "Somier Articulado Eléctrico Singapur | Montaje incluído" },
+    { tipo: "colchon", stockModel: "Colchón de Látex Natural Natura" },
+  ],
+  "Conjunto Somier Articulado Natura Premium Látex": [
+    { tipo: "somier", stockModel: "Somier Articulado Eléctrico Singapur | Montaje incluído" },
+    { tipo: "colchon", stockModel: "Colchón de Látex Natural Natura Premium" },
+  ],
 };
+function productoDeTarifa(products, stockModel) {
+  return activeProducts(products).find((p) => p.stockModel === stockModel) || TARIFA_PRODUCTOS_SOLO_TARIFAS.find((p) => p.stockModel === stockModel) || null;
+}
+const TARIFA_SOLO_ESPANA_MODELOS = ["Colchón de Látex Natural Natura", "Colchón de Látex Natural Natura Premium"];
+const TARIFA_COLCHON_GEMELOS_MODELOS = ["Colchón de Látex Natural Natura", "Colchón de Látex Natural Natura Premium"];
+const TARIFA_ENVIO_FIJO_MODELO = {
+  // Cabecero suelto por Furniture (Jennifer, 2026-10-21): 41€.
+  "Cabecero Atenea de Tela": 41,
+  "Cabecero Iris de Tela": 41,
+  "Cabecero Aria de Tela": 41,
+  "Cabecero Aura": 41,
+  // Base suelta por Furniture sin montaje (Jennifer, 2026-10-20): 41 €.
+  "Base tapizada con rejilla 3D y respiraderos | BEIGE": 41,
+  "Base tapizada con rejilla 3D y respiraderos | BLANCO": 41,
+  "Base tapizada con rejilla 3D y respiraderos | NEGRO": 41,
+  // Somier Kilimanjaro: por Furniture, como la base (Jennifer, 2026-10-27).
+  "Somier Kilimanjaro": 41,
+  // Singapur: montaje incluido → envío de base + montaje de Furniture (41 + 19).
+  "Somier Articulado Eléctrico Singapur | Montaje incluído": 60,
+  "Cabecero Gaia de Tela": 41,
+  // Canapé Fijo = BASE ALPHA (Jennifer, 2026-10-29): envío como una base.
+  "Canapé Fijo gama colores vivos": 41,
+  "Canapé Fijo gama colores natural": 41,
+  "Canapé Fijo gama colores tierra": 41,
+  // Canapé ZENIT (Jennifer, 2026-10-22): como el Space.
+  // En el Zenit el 160 es siempre gemelo "frente único" (no hay partido en la web).
+  "Canape abatible de madera alta capacidad y resistencia - esquinas curvas": { normal: 45, gemelos: 60, gemelosDesde: 160 },
+  "Colchón Muelles Ensacados | 33cm | Doble Cara | Efecto Nube | Spring Zen": 42,
+  // Látex Natura y Natura Premium: siempre por Furniture (Jennifer, 2026-10-27).
+  // Gemelos = dos colchones: Furniture cobra los dos (84 €); solo la talla
+  // "… GEMELOS", nunca por ancho.
+  "Colchón de Látex Natural Natura": { normal: 42, gemelos: 84, gemelosDesde: Infinity },
+  "Colchón de Látex Natural Natura Premium": { normal: 42, gemelos: 84, gemelosDesde: Infinity },
+  // Canapé por Furniture, sin montaje (Jennifer, 2026-10-20): 45€; en
+  // gemelos (160 GEMELOS y todo lo de 180 o más) 60€.
+  "Canape Abatible tapizado alta capacidad y resistencia": { normal: 45, gemelos: 60 },
+  // Space apertura lateral (Jennifer, 2026-10-21): mismo precio que el Space.
+  "Canapé Abatible tapizado gran capacidad con apertura Lateral": { normal: 45, gemelos: 60 },
+  "Canapé Abatible tapizado gran capacidad con borde polipiel Premium": { normal: 45, gemelos: 60 },
+  "Canapé Abatible tapizado gran capacidad con patas": { normal: 45, gemelos: 60 },
+  "Canapé Abatible tapizado Extra Capacidad": { normal: 45, gemelos: 60 },
+  // ASTRA (Jennifer, 2026-10-29).
+  "Canapé de madera esquinas rectas": { normal: 45, gemelos: 60 },
+  // MAGNUM (Jennifer, 2026-10-29): como el resto de canapés.
+  "Canapé Abatible tapizado gran capacidad con Ruedas": { normal: 45, gemelos: 60 },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores natural": { normal: 45, gemelos: 60 },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores tierras": { normal: 45, gemelos: 60 },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores vivos": { normal: 45, gemelos: 60 },
+};
+// Margen BEZEN propio por modelo (Jennifer, 2026-10-20): el canapé Space
+// lleva 25% (÷0,75) en vez del 30% de núcleo.
+const TARIFA_BEZEN_MARGEN_MODELO = {
+  // Canapé Fijo (Jennifer, 2026-10-29): 30%.
+  "Canapé Fijo gama colores vivos": { divisor: 0.70, label: "30%" },
+  "Canapé Fijo gama colores natural": { divisor: 0.70, label: "30%" },
+  "Canapé Fijo gama colores tierra": { divisor: 0.70, label: "30%" },
+  "Canape Abatible tapizado alta capacidad y resistencia": { divisor: 0.75, label: "25%" },
+  "Canapé Abatible tapizado gran capacidad con apertura Lateral": { divisor: 0.75, label: "25%" },
+  "Canape abatible de madera alta capacidad y resistencia - esquinas curvas": { divisor: 0.75, label: "25%" },
+  // MAGNUM (Jennifer, 2026-10-29): 30%.
+  "Canapé Abatible tapizado gran capacidad con Ruedas": { divisor: 0.70, label: "30%" },
+  // Space Deluxe polipiel (Jennifer, 2026-10-21): de primeras al 30%.
+  "Canapé Abatible tapizado gran capacidad con borde polipiel Premium": { divisor: 0.70, label: "30%" },
+  "Canapé Abatible tapizado gran capacidad con patas": { divisor: 0.70, label: "30%" },
+  "Canapé Abatible tapizado Extra Capacidad": { divisor: 0.70, label: "30%" },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores natural": { divisor: 0.70, label: "30%" },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores tierras": { divisor: 0.70, label: "30%" },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores vivos": { divisor: 0.70, label: "30%" },
+};
+// Plataformas con margen % en vez del margen fijo por ancho (Jennifer,
+// 2026-10-20, Space: (coste+envío) ÷0,75 ÷comisión ×1,21, redondeo .99).
+function TARIFA_CANAPE_PLATAFORMA_PUEDE_BAJAR(stockModel) {
+  return stockModel === "Canape Abatible tapizado alta capacidad y resistencia" || stockModel === "Canapé Abatible tapizado gran capacidad con apertura Lateral" || stockModel === "Canapé Abatible tapizado gran capacidad con borde polipiel Premium" || TARIFA_MAISON_BEZEN_MAS_MODELO[stockModel] != null || /madera/i.test(stockModel || "");
+}
+// Maison = BEZEN + X € (Jennifer, 2026-10-21, Space Deluxe): en estos
+// canapés el precio de Maison ES y del resto de plataformas es siempre el
+// de la web + 2 €.
+const TARIFA_MAISON_BEZEN_MAS_MODELO = {
+  "Canapé Abatible tapizado gran capacidad con borde polipiel Premium": 2,
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores natural": 2,
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores tierras": 2,
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores vivos": 2,
+  // MAGNUM (Jennifer, 2026-10-29).
+  "Canapé Abatible tapizado gran capacidad con Ruedas": 2,
+  // Space Max y Base Silver (Jennifer, 2026-10-27).
+  "Canapé Abatible tapizado Extra Capacidad": 2,
+  "Base tapizada con rejilla 3D y respiraderos | BEIGE": 2,
+  "Base tapizada con rejilla 3D y respiraderos | BLANCO": 2,
+  "Base tapizada con rejilla 3D y respiraderos | NEGRO": 2,
+  // Látex Natura y Natura Premium (Jennifer, 2026-10-27).
+  "Colchón de Látex Natural Natura": 2,
+  "Colchón de Látex Natural Natura Premium": 2,
+  "Somier Kilimanjaro": 2,
+  // Canapé Fijo (2026-10-29): como la base.
+  "Canapé Fijo gama colores vivos": 2,
+  "Canapé Fijo gama colores natural": 2,
+  "Canapé Fijo gama colores tierra": 2,
+  "Somier Articulado Eléctrico Singapur | Montaje incluído": 2,
+};
+const TARIFA_PLATAFORMAS_MARGEN_MODELO = {
+  // ASTRA (Jennifer, 2026-10-29): a coste, solo la comisión de la plataforma.
+  "Canapé de madera esquinas rectas": { divisor: 1, label: "sin" },
+  // Topper V5 y protectores (Jennifer, 2026-10-29): plataformas al 30%.
+  "Topper-sobrecolchón Viscoelástico V5": { divisor: 0.70, label: "30%" },
+  "Protector Impermeable Pronébula": { divisor: 0.70, label: "30%" },
+  "Protector Antibacteriano Bruner": { divisor: 0.70, label: "30%" },
+  "Cabecero Atenea de Tela": { divisor: 0.70, label: "30%" },
+  "Cabecero Iris de Tela": { divisor: 0.70, label: "30%" },
+  "Cabecero Aria de Tela": { divisor: 0.70, label: "30%" },
+  "Cabecero Aura": { divisor: 0.70, label: "30%" },
+  "Base tapizada con rejilla 3D y respiraderos | BEIGE": { divisor: 0.70, label: "30%" },
+  "Base tapizada con rejilla 3D y respiraderos | BLANCO": { divisor: 0.70, label: "30%" },
+  "Base tapizada con rejilla 3D y respiraderos | NEGRO": { divisor: 0.70, label: "30%" },
+  "Cabecero Gaia de Tela": { divisor: 0.70, label: "30%" },
+  // Canapé Fijo (2026-10-29): como la base.
+  "Canapé Fijo gama colores vivos": { divisor: 0.70, label: "30%" },
+  "Canapé Fijo gama colores natural": { divisor: 0.70, label: "30%" },
+  "Canapé Fijo gama colores tierra": { divisor: 0.70, label: "30%" },
+  "Canape Abatible tapizado alta capacidad y resistencia": { divisor: 0.75, label: "25%" },
+  "Canapé Abatible tapizado gran capacidad con apertura Lateral": { divisor: 0.75, label: "25%" },
+  "Canape abatible de madera alta capacidad y resistencia - esquinas curvas": { divisor: 0.75, label: "25%" },
+  // MAGNUM (Jennifer, 2026-10-29): 30%.
+  "Canapé Abatible tapizado gran capacidad con Ruedas": { divisor: 0.70, label: "30%" },
+  // Space Deluxe polipiel (Jennifer, 2026-10-21): de primeras al 30%.
+  "Canapé Abatible tapizado gran capacidad con borde polipiel Premium": { divisor: 0.70, label: "30%" },
+  "Canapé Abatible tapizado gran capacidad con patas": { divisor: 0.70, label: "30%" },
+  "Canapé Abatible tapizado Extra Capacidad": { divisor: 0.70, label: "30%" },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores natural": { divisor: 0.70, label: "30%" },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores tierras": { divisor: 0.70, label: "30%" },
+  "Canape abatible tapizado en tela alta capacidad y resistencia  gama colores vivos": { divisor: 0.70, label: "30%" },
+};
+// Modelos con dos tarifas según el acabado (Jennifer, 2026-10-21): el canapé
+// con patas en tela es el INITIAL DELUXE (más caro que el INITIAL de
+// polipiel). Su coste se guarda en la talla + " TELA" ("90X190 TELA",
+// "160X190 TELA GEMELOS"). Variante "Tela - …" o SKU BDCANINI… = tela.
+const TARIFA_MODELOS_TELA_APARTE = ["Canapé Abatible tapizado gran capacidad con patas"];
+function tallaTarifaTela(stockModel, talla, esTela) {
+  if (!esTela || !TARIFA_MODELOS_TELA_APARTE.includes(stockModel) || !talla || / TELA( |$)/.test(talla)) return talla;
+  return / GEMELOS$/.test(talla) ? talla.replace(/ GEMELOS$/, " TELA GEMELOS") : talla + " TELA";
+}
+function envioFijoDeTalla(fijo, talla) {
+  if (fijo == null || typeof fijo === "number") return fijo;
+  const t = String(talla || "");
+  const gemelos = /GEMELOS/i.test(t) || Number(t.split("X")[0]) >= (fijo.gemelosDesde || 180);
+  return gemelos ? fijo.gemelos : fijo.normal;
+}
 
 // Fórmula BEZEN (Jennifer, 2026-09-22): coste+envío ÷0,70 (30% margen)
 // ÷0,77 (23% publicidad) ×1,21 (IVA) ×1,04 (coste financieras). Cada paso
@@ -1603,6 +1950,24 @@ const TARIFA_ENVIO_FIJO_MODELO = {
 // `divisorMargen`/`margenLabel` parametrizan el primer margen (30% para
 // núcleo, ÷0,70) porque los modelos de muelles usan un 32% distinto
 // (÷0,68) — ver TARIFA_MODELOS_MUELLES, Jennifer 2026-09-23.
+// Canapé que se quiere quitar (Jennifer, 2026-10-29, ASTRA = madera esquinas
+// rectas): web = (coste + transporte) × IVA × financiera, sin margen comercial
+// ni publicidad; en plataformas solo se añade su comisión.
+const TARIFA_MODELOS_A_COSTE = ["Canapé de madera esquinas rectas"];
+function calcularPrecioACoste(coste, envio) {
+  const pasos = [];
+  pasos.push({ label: "Precio de coste", valor: round2(coste) });
+  pasos.push({ label: "Precio de envío", valor: round2(envio) });
+  const suma = coste + envio;
+  pasos.push({ label: "Coste + envío (sin margen ni publicidad: se quita)", valor: round2(suma) });
+  const conIva = suma * 1.21;
+  pasos.push({ label: "× 1,21 (IVA)", valor: round2(conIva) });
+  const final = conIva * 1.04;
+  pasos.push({ label: "× 1,04 (coste financieras)", valor: round2(final) });
+  const redondeado = Math.ceil(final);
+  pasos.push({ label: "Redondeo (al alza, € entero)", valor: redondeado });
+  return { precio: redondeado, pasos };
+}
 function calcularPrecioBezen(coste, envio, divisorMargen = 0.70, margenLabel = "30%") {
   const pasos = [];
   // Coste y envío como líneas propias (Jennifer, 2026-09-22: "que también
@@ -1649,8 +2014,10 @@ function calcularPrecioPlataforma(coste, envio, talla, divisorComision) {
   pasos.push({ label: "× 1,21 (IVA)", valor: round2(final) });
   // Redondeo a ".99" de la escala superior (Jennifer, 2026-09-22): sube al
   // siguiente euro entero y resta 1 céntimo (136,74€ → 137€ → 136,99€).
-  const redondeado = round2(Math.ceil(final) - 0.01);
-  pasos.push({ label: "Redondeo (.99 escala superior)", valor: redondeado });
+  // Euros justos (Jennifer, 2026-10-21: "los quiero en euros justos", en
+  // todas las plataformas): al alza, al euro entero, sin el ,99.
+  const redondeado = Math.ceil(final - 0.000001);
+  pasos.push({ label: "Redondeo (al alza, € entero)", valor: redondeado });
   return { precio: redondeado, pasos };
 }
 
@@ -1712,20 +2079,22 @@ const TARIFA_BEZEN_REFERENCIA_MODELO = {
 // envío ÷0,7 (30% margen, igual que BEZEN) ÷comisión de la plataforma que
 // corresponda (0,77 Maison / 0,80 Resto) ×1,21 IVA — SIN el margen fijo por
 // ancho de talla que sí llevan los modelos de núcleo.
-function calcularPrecioPlataformaMuellesResto(coste, envio, divisorComision) {
+function calcularPrecioPlataformaMuellesResto(coste, envio, divisorComision, divisorMargen = 0.70, margenLabel = "30%") {
   const pasos = [];
   pasos.push({ label: "Precio de coste", valor: round2(coste) });
   pasos.push({ label: "Precio de envío", valor: round2(envio) });
   const suma = coste + envio;
   pasos.push({ label: "Coste + envío", valor: round2(suma) });
-  const conMargen = suma / 0.70;
-  pasos.push({ label: "÷ 0,70 (30% margen)", valor: round2(conMargen) });
+  const conMargen = suma / divisorMargen;
+  pasos.push({ label: `÷ ${divisorMargen.toFixed(2).replace(".", ",")} (${margenLabel} margen)`, valor: round2(conMargen) });
   const conComision = conMargen / divisorComision;
   pasos.push({ label: `÷ ${divisorComision} (comisión plataforma)`, valor: round2(conComision) });
   const final = conComision * 1.21;
   pasos.push({ label: "× 1,21 (IVA)", valor: round2(final) });
-  const redondeado = round2(Math.ceil(final) - 0.01);
-  pasos.push({ label: "Redondeo (.99 escala superior)", valor: redondeado });
+  // Euros justos (Jennifer, 2026-10-21: "los quiero en euros justos", en
+  // todas las plataformas): al alza, al euro entero, sin el ,99.
+  const redondeado = Math.ceil(final - 0.000001);
+  pasos.push({ label: "Redondeo (al alza, € entero)", valor: redondeado });
   return { precio: redondeado, pasos };
 }
 
@@ -1952,6 +2321,66 @@ export class InventoryStore {
     if (url.pathname === "/abiertos/adjust" && method === "POST") {
       return this.adjustAbiertos(await request.json());
     }
+    // Stock de tapicería (Jennifer, 2026-10-20): canapés (o piezas) que ya
+    // están en el almacén, una ficha por unidad con su referencia de fábrica.
+    if (url.pathname === "/stock-tapiceria" && method === "GET") {
+      const lista = await this.load("stockTapiceria", []);
+      const backorders = await this.load("backorders", []);
+      return Response.json(lista.map((s) => ({ ...s, ...estadoStockTapiceria(s, backorders) })));
+    }
+    if (url.pathname === "/stock-tapiceria/alta" && method === "POST") {
+      const { stockModel, talla, color, referencia, nota, completo, pieza, usuario } = await request.json();
+      if (completo === false && !String(pieza || "").trim()) return Response.json({ ok: false, error: "Escribe qué pieza es (TAPA, CAJÓN, FONDO…)." }, { status: 400 });
+      const products = await this.load("products", {});
+      const p = activeProducts(products).find((x) => x.stockModel === stockModel);
+      if (!p || TYPE_MAP[p.product_type] !== "tapiceria") return Response.json({ ok: false, error: "Elige un modelo de tapicería del Catálogo." }, { status: 400 });
+      const t = normalizeTalla(talla) || String(talla || "").trim().toUpperCase().replace(/\s+/g, "");
+      if (!t) return Response.json({ ok: false, error: "Falta la medida." }, { status: 400 });
+      const lista = await this.load("stockTapiceria", []);
+      const ficha = { id: crypto.randomUUID(), stockModel, talla: t, color: String(color || "").trim(), referencia: String(referencia || "").trim().toUpperCase(), nota: String(nota || "").trim(), completo: completo !== false, pieza: completo === false ? String(pieza || "").trim().toUpperCase() : "", fechaAlta: new Date().toISOString(), usuario: usuario || null };
+      lista.push(ficha);
+      await this.state.storage.put("stockTapiceria", lista);
+      return Response.json({ ok: true, ficha });
+    }
+    if (url.pathname === "/stock-tapiceria/baja" && method === "POST") {
+      const { id } = await request.json();
+      const lista = await this.load("stockTapiceria", []);
+      const backorders = await this.load("backorders", []);
+      const s = lista.find((x) => x.id === id);
+      if (!s) return Response.json({ ok: false, error: "No encontrado." }, { status: 404 });
+      if (estadoStockTapiceria(s, backorders).estado === "asignado") return Response.json({ ok: false, error: "Está asignado a un pedido que aún no ha salido: cancela antes ese pendiente." }, { status: 409 });
+      await this.state.storage.put("stockTapiceria", lista.filter((x) => x.id !== id));
+      return Response.json({ ok: true });
+    }
+    // Asignar a mano una ficha a un pendiente que ya existía. Un canapé
+    // completo cubre el pendiente (sale con su referencia, sin pedir a
+    // fábrica); una pieza solo se apunta, el resto se sigue pidiendo.
+    if (url.pathname === "/stock-tapiceria/asignar" && method === "POST") {
+      const { id, backorderId } = await request.json();
+      const lista = await this.load("stockTapiceria", []);
+      const backorders = await this.load("backorders", []);
+      const s = lista.find((x) => x.id === id);
+      const b = backorders.find((x) => x.id === backorderId);
+      if (!s || !b) return Response.json({ ok: false, error: "No encontrado." }, { status: 404 });
+      if (estadoStockTapiceria(s, backorders).estado !== "disponible") return Response.json({ ok: false, error: "Esta ficha ya está usada." }, { status: 409 });
+      if (b.tipo !== "tapiceria" || b.estado !== "pendiente") return Response.json({ ok: false, error: "Solo se puede asignar a tapicería pendiente." }, { status: 409 });
+      const avisos = [];
+      if (b.pedidoGenerado) avisos.push("⚠ Este artículo YA ESTABA PEDIDO a " + (b.proveedor || "fábrica") + (b.referencia ? " con la referencia " + b.referencia : "") + ": avisa para anularlo.");
+      if (s.completo) b.stockTapiceriaId = s.id;
+      if (s.completo) {
+        b.referenciaAntesDeStock = b.referencia || null;
+        if (s.referencia) b.referencia = s.referencia;
+        b.mercanciaFabrica = "DEL STOCK DE TAPICERÍA" + (s.referencia ? " (" + s.referencia + ")" : "") + " — ya en el almacén, no pedir a fábrica" + (s.nota ? " · " + s.nota : "");
+        b.estado = "cubierto";
+        b.recibidoFabrica = true;
+        b.fechaRecibido = new Date().toISOString();
+      } else {
+        if (b.stockTapiceriaId === s.id) b.stockTapiceriaId = null;
+        usarPiezasStock(b, [s]);
+      }
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, backorder: b, avisos });
+    }
     const usarAbiertoMatch = url.pathname.match(/^\/backorders\/([^/]+)\/usar-abierto$/);
     if (usarAbiertoMatch && method === "POST") {
       return this.usarAbierto(decodeURIComponent(usarAbiertoMatch[1]), await request.json().catch(() => ({})));
@@ -1965,13 +2394,34 @@ export class InventoryStore {
     // salido — pasa a servido. Un colchón enviado aparte que no es
     // reposición libera su "vendido pendiente", igual que settleShipment.
     if (url.pathname === "/backorders/cerrar-carga" && method === "POST") {
-      const { cargaId } = await request.json();
+      // idsPedidos (Jennifer, 2026-10-27): los artículos de los pedidos que
+      // iban en la carga, los mismos que salen en el fichero de Furniture —
+      // lo que quedó fuera (envío aparte, colchón FPK…) sigue pendiente.
+      const { cargaId, idsPedidos } = await request.json();
       if (!cargaId) return Response.json({ ok: false, error: "Falta la carga." }, { status: 400 });
       const backorders = await this.load("backorders", []);
       const stock = await this.load("stock", {});
       const servidos = [];
+      const delPedido = new Set(idsPedidos || []);
       for (const b of backorders) {
-        if (b.cargaId !== cargaId || (b.estado !== "pendiente" && b.estado !== "cubierto")) continue;
+        if (b.estado !== "pendiente" && b.estado !== "cubierto") continue;
+        if (delPedido.has(b.id)) {
+          if (!(b.gestoComercial && b.gcFurniture)) {
+            const key = stockKey(b.stockModel, b.talla);
+            const row = stock[key];
+            if (row) {
+              const antes = row.vendidoPendiente || 0;
+              row.vendidoPendiente = Math.max(0, antes - b.cantidad);
+              await this.logMovement({ stockModel: b.stockModel, talla: b.talla, campo: "vendidoPendiente", delta: row.vendidoPendiente - antes, resultante: row.vendidoPendiente, origen: "envio", orderNumber: b.orderNumber, platform: b.platform, orderRef: b.orderRef });
+            }
+          }
+          b.estado = "servido";
+          b.fechaServido = new Date().toISOString();
+          b.servidoEnCarga = cargaId;
+          servidos.push(b.id);
+          continue;
+        }
+        if (b.cargaId !== cargaId) continue;
         if (!b.envioAparte && !b.reposicion && !b.gestoComercial) continue;
         if (b.tipo === "colchon" && !b.reposicion && !b.gestoComercial && b.estado === "pendiente") {
           const key = stockKey(b.stockModel, b.talla);
@@ -2019,7 +2469,14 @@ export class InventoryStore {
     }
     const resolveMatch = url.pathname.match(/^\/backorders\/([^/]+)\/resolver$/);
     if (resolveMatch && method === "POST") {
-      return this.resolveBackorder(decodeURIComponent(resolveMatch[1]));
+      let deseado;
+      try { const body = JSON.parse((await request.text()) || "{}"); if (typeof body.recibido === "boolean") deseado = body.recibido; } catch (e) { /* sin cuerpo: alterna como antes */ }
+      return this.resolveBackorder(decodeURIComponent(resolveMatch[1]), deseado);
+    }
+    const parcialMatch = url.pathname.match(/^\/backorders\/([^/]+)\/recibir-parcial$/);
+    if (parcialMatch && method === "POST") {
+      const { unidades } = await request.json();
+      return this.recibirParcial(decodeURIComponent(parcialMatch[1]), unidades);
     }
     const cancelarMatch = url.pathname.match(/^\/backorders\/([^/]+)\/cancelar$/);
     if (cancelarMatch && method === "POST") {
@@ -2211,7 +2668,10 @@ export class InventoryStore {
     }
     const referenciaMatch = url.pathname.match(/^\/backorders\/([^/]+)\/referencia$/);
     if (referenciaMatch && method === "POST") {
-      const { referencia } = await request.json();
+      const { referencia, siguienteReposicion } = await request.json();
+      // Volver a numerar una reposición con el siguiente "I-XXX" del
+      // contador, como si se pidiera hoy (Jennifer, 2026-10-29, REP10002269275-A).
+      if (siguienteReposicion) return this.setBackorderReferencia(decodeURIComponent(referenciaMatch[1]), await nextReposicionReferencia(this.state));
       return this.setBackorderReferencia(decodeURIComponent(referenciaMatch[1]), referencia);
     }
     // Formato GEMELOS/PARTIDO de un canapé de 160 (Jennifer, 2026-09-28).
@@ -2237,6 +2697,10 @@ export class InventoryStore {
       const entry = backorders.find((b) => b.id === decodeURIComponent(reservaMatch[1]));
       if (!entry) return new Response("not found", { status: 404 });
       const { fecha } = await request.json().catch(() => ({}));
+      // Historial de etiquetas de reserva (Jennifer, 2026-10-28, REPBEZEN12022:
+      // una se mandó al reservar la unidad de stock y otra al llegar la de
+      // fábrica): la anterior no se pierde.
+      if (entry.reservaEnviada) entry.reservasAnteriores = [...(entry.reservasAnteriores || []), entry.reservaEnviada];
       entry.reservaEnviada = fecha && !isNaN(Date.parse(fecha)) ? new Date(fecha).toISOString() : new Date().toISOString();
       await this.state.storage.put("backorders", backorders);
       return Response.json(entry);
@@ -2314,10 +2778,19 @@ export class InventoryStore {
     }
 
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
-      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, cuarentena, previsionEntrega, cantidad, enStock, refSuffix, desdeStock } = await request.json();
+      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, cuarentena, previsionEntrega, cantidad, enStock, refSuffix, desdeStock, serviciosReposicion, paraTenerEnCuenta, color, cambioColorUsuario, nacex, desdeDevolucion, devolucionFabrica, mercanciaCliente, talla, proveedor, recogidaQue } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return new Response("not found", { status: 404 });
+      // Qué hay que recoger en un colchón con recogida (Jennifer, 2026-11-12):
+      // puede no ser lo que se repone (se envió mal).
+      if (recogidaQue !== undefined) entry.recogidaQue = String(recogidaQue || "").trim() || null;
+      // Proveedor a mano de UN pendiente (Jennifer, 2026-11-05: 3 Generación
+      // Zen de LUSO pasan a NEW). No toca la ficha ni el stock.
+      if (proveedor !== undefined && String(proveedor).trim()) entry.proveedor = String(proveedor).trim().toUpperCase();
+      // Medida a mano (Jennifer, 2026-11-05, BEZEN12344: almohadas Nordic
+      // 67,5 → 75; el 📏 solo admite medidas de cama tipo 150X190).
+      if (talla !== undefined && String(talla).trim()) entry.talla = String(talla).trim().toUpperCase();
       // Corrección a mano del estado (Jennifer, 2026-09-30: cabeceros dados
       // por servidos sin haber salido).
       if (estado !== undefined && ["pendiente", "cubierto", "servido"].includes(estado)) entry.estado = estado;
@@ -2334,21 +2807,43 @@ export class InventoryStore {
       // cancela. Sigue en la lista del proveedor, marcado, y no se puede
       // pedir a fábrica hasta quitarlo. { motivo, usuario } o null.
       if (cuarentena !== undefined) entry.cuarentena = cuarentena ? { motivo: String(cuarentena.motivo || ""), usuario: cuarentena.usuario || null, desde: new Date().toISOString() } : null;
+      // Colchón asignado desde una devolución (Jennifer, 2026-10-28): { ref, fecha, usuario }.
+      if (desdeDevolucion !== undefined) entry.desdeDevolucion = desdeDevolucion ? { ref: String(desdeDevolucion.ref || ""), fecha: desdeDevolucion.fecha || new Date().toISOString(), usuario: desdeDevolucion.usuario || null } : null;
+      // Devolución a fábrica de la pieza dañada de una reposición (Jennifer,
+      // 2026-10-28): { estado, nota, fecha, usuario, historial } o null.
+      if (devolucionFabrica !== undefined) entry.devolucionFabrica = devolucionFabrica && typeof devolucionFabrica === "object" ? devolucionFabrica : null;
+      // ¿Tiene el cliente la mercancía en casa? (Jennifer, 2026-10-28): "en-casa" | "juntar" (va con BIS y se junta con el resto del pedido).
+      if (mercanciaCliente !== undefined) entry.mercanciaCliente = ["en-casa", "juntar"].includes(mercanciaCliente) ? mercanciaCliente : null;
       // Sufijo de la referencia de SEUR a mano (Jennifer, 2026-10-15,
       // 002-26246L38546-A: la "-A2" ya se usó y se anuló en SEUR).
       if (refSuffix !== undefined) entry.refSuffix = String(refSuffix || "");
       // Sale del stock del almacén aunque el pendiente sea de proveedor: en
       // el listado de la carga de SEUR sale como STOCK.
       if (desdeStock !== undefined) entry.desdeStock = !!desdeStock;
+      // "Pedidos para tener en cuenta" también para reposiciones / envíos
+      // aparte (Jennifer, 2026-10-21, REP10002269275-A).
+      if (paraTenerEnCuenta !== undefined) entry.paraTenerEnCuenta = !!paraTenerEnCuenta;
+      // Color de las etiquetas de Furniture a mano (Jennifer, 2026-10-21,
+      // REP BEZEN11905: reposición, que no pasa por el botón 🎨). Queda
+      // apuntado como cambio de color del cliente.
+      if (color !== undefined && String(color).trim() && String(color).trim() !== (entry.color || "")) {
+        entry.cambioColor = { de: (entry.cambioColor && entry.cambioColor.de) || entry.color || "", a: String(color).trim(), fabrica: null, fecha: new Date().toISOString(), usuario: cambioColorUsuario || null };
+        entry.color = String(color).trim();
+      }
       if (referencia !== undefined) entry.referencia = referencia;
       if (mercanciaFabrica !== undefined) entry.mercanciaFabrica = mercanciaFabrica;
       // Tapa del canapé que ya está en el almacén (Jennifer, 2026-09-30,
       // BEZEN12211): la TAPA sale con referencia "STOCK" en Furniture y el
       // resto de piezas con la referencia nueva de Polival.
       if (tapaStock !== undefined) entry.tapaStock = !!tapaStock;
+      // Servicios adicionales de una reposición por Furniture (2026-10-20).
+      if (serviciosReposicion !== undefined) entry.serviciosReposicion = Array.isArray(serviciosReposicion) ? serviciosReposicion.map((s) => String(s || "").trim()).filter(Boolean) : [];
       // Previsión de entrega del proveedor (Jennifer, 2026-10-02), solo
       // informativa: a diferencia de fechaEstimadaLlegada no cambia FUR/FPK.
       if (previsionEntrega !== undefined) entry.previsionEntrega = previsionEntrega || null;
+      // Envío por NACEX (Jennifer, 2026-10-28): { documentado, threadId,
+      // direccion, recogida, expedicion, enviado } — se van sumando campos.
+      if (nacex && typeof nacex === "object") entry.nacex = { ...(entry.nacex || {}), ...nacex };
       await this.state.storage.put("backorders", backorders);
       return Response.json(entry);
     }
@@ -2357,17 +2852,75 @@ export class InventoryStore {
     if (url.pathname === "/backorders/cambiar-medida" && method === "POST") {
       return this.cambiarMedidaPedido(await request.json());
     }
+    if (url.pathname === "/backorders/cambiar-color" && method === "POST") {
+      return this.cambiarColorPedido(await request.json());
+    }
 
     if (url.pathname === "/backorders/set-carga" && method === "POST") {
-      const { id, cargaId } = await request.json();
+      const { id, cargaId, retenido } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return Response.json({ ok: false, error: "Artículo no encontrado." }, { status: 404 });
       entry.cargaId = cargaId;
+      // Con día ya puesto deja de estar retenido (Jennifer, 2026-10-22).
+      if (cargaId) delete entry.retenidoCliente;
+      // Sacado de la carga a la espera de que el cliente diga la fecha
+      // (Jennifer, 2026-10-28): pasa a Retenidos sin fecha.
+      else if (retenido && entry.estado === "listo-seur") entry.retenidoCliente = true;
       await this.state.storage.put("backorders", backorders);
       return Response.json({ ok: true, backorder: entry });
     }
 
+    // Pendiente de Polival para un artículo sin ficha en el Catálogo (Jennifer,
+    // 2026-10-16: colchón PLANET 20 cm sin visco de los ECO-NATURE de
+    // Groupon). Referencia N<nº>FUR del contador normal; no toca stock.
+    // Bloquear los pendientes vivos de un pedido hasta que se conteste su
+    // campana (needsDecision + pendingDecision: salen en "Pendiente de
+    // decisión", no en la carpeta del proveedor).
+    if (url.pathname === "/admin/bloquear-decision" && method === "POST") {
+      const { orderId } = await request.json();
+      const backorders = await this.load("backorders", []);
+      let n = 0;
+      for (const b of backorders) {
+        if (b.orderId !== orderId || !["pendiente", "cubierto"].includes(b.estado)) continue;
+        b.needsDecision = true;
+        b.pendingDecision = true;
+        n++;
+      }
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, bloqueados: n });
+    }
+    if (url.pathname === "/admin/crear-pendiente-polival" && method === "POST") {
+      const { orderId, orderNumber, platform, orderRef, orderDate, stockModel, talla, cantidad, mercanciaFabrica, tipo } = await request.json();
+      if (!orderId || !stockModel || !talla) return Response.json({ ok: false, error: "Faltan datos." }, { status: 400 });
+      const backorders = await this.load("backorders", []);
+      const id = `${orderId}-${stockKey(stockModel, talla)}`;
+      if (backorders.some((b) => b.id === id)) return Response.json({ ok: true, yaExistia: true, id });
+      const { referencia } = buildReferencia(await nextReferenciaNumero(this.state), "fur", "", true);
+      pushBackorder(backorders, { id, orderId, orderNumber, stockModel, talla, tipo: tipo || "colchon", cantidad: cantidad || 1, orderDate, esPack: false, proveedor: "POLIVAL", referencia, mercanciaFabrica, platform, orderRef, refSuffix: "", tipoEnvio: "FUR" });
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, id, referencia });
+    }
+    if (url.pathname === "/admin/renombrar-pedido" && method === "POST") {
+      const { cambios } = await request.json();
+      const backorders = await this.load("backorders", []);
+      const movements = await this.load("movements", []);
+      let n = 0;
+      for (const { from, to, orderRef, orderNumber } of cambios || []) {
+        for (const b of backorders) {
+          if (b.orderId !== from) continue;
+          b.orderId = to;
+          b.id = String(b.id).split(from).join(to);
+          b.orderRef = orderRef;
+          b.orderNumber = orderNumber;
+          n++;
+        }
+        for (const m of movements) if (m.orderId === from) { m.orderId = to; if (m.orderRef !== undefined) m.orderRef = orderRef; }
+      }
+      await this.state.storage.put("backorders", backorders);
+      await this.state.storage.put("movements", movements);
+      return Response.json({ ok: true, pendientes: n });
+    }
     if (url.pathname === "/admin/crear-pendiente-manual" && method === "POST") {
       return this.crearPendienteManual(await request.json());
     }
@@ -2509,6 +3062,15 @@ export class InventoryStore {
     if (url.pathname === "/tarifas/coste" && method === "POST") {
       return this.setTarifaCoste(await request.json());
     }
+    if (url.pathname === "/tarifas/envios-piezas" && method === "POST") {
+      return this.enviosDePiezas((await request.json()).piezas);
+    }
+    if (url.pathname === "/tarifas/envio-historial" && method === "GET") {
+      return Response.json(await this.load("tarifasEnvioHistorial", []));
+    }
+    if (url.pathname === "/tarifas/envio-deshacer" && method === "POST") {
+      return this.deshacerCambioEnvio(await request.json());
+    }
     if (url.pathname === "/tarifas/envio" && method === "POST") {
       return this.setTarifaEnvio(await request.json());
     }
@@ -2537,6 +3099,10 @@ export class InventoryStore {
     if (url.pathname === "/precios-bezen/subir" && method === "POST") {
       return this.subirPreciosBezen(await request.json());
     }
+    if (url.pathname === "/margen-pedidos" && method === "POST") {
+      const { pedidos } = await request.json();
+      return this.margenPedidos(pedidos);
+    }
     if (url.pathname === "/precios-bezen/ver" && method === "GET") {
       return this.verPreciosBezen(url.searchParams.get("id"));
     }
@@ -2564,6 +3130,25 @@ export class InventoryStore {
     // PRECIOS FIJOS (Jennifer, 2026-10-15): la subida del 15/10 queda como
     // precio de referencia desde el que trabajar. No se puede borrar ni la
     // sustituye ninguna subida posterior (cada subida se guarda aparte).
+    // Añadir filas que faltaban a una subida (Jennifer, 2026-10-21: las 80
+    // variantes de tela del Initial no vinieron en el Excel del 15/10). Solo
+    // SKU que no estén ya; van en trozos nuevos al final.
+    if (url.pathname === "/precios-bezen/anadir-filas" && method === "POST") {
+      const { id, filas } = await request.json();
+      const index = await this.load("preciosBezenIndex", []);
+      const s = index.find((x) => x.id === id);
+      if (!s) return Response.json({ ok: false, error: "Subida no encontrada." }, { status: 404 });
+      const ya = new Set((await this.leerSubidaPreciosBezen(s)).map((f) => String(f[2] || "").toUpperCase()).filter(Boolean));
+      const nuevas = (filas || []).map((f) => [String(f[0] || "").trim(), String(f[1] || "").trim(), String(f[2] || "").trim(), f[3] === "" || f[3] == null ? null : Number(f[3])])
+        .filter((f) => f[2] && !ya.has(f[2].toUpperCase()));
+      for (let i = 0; i < nuevas.length; i += 300) {
+        await this.state.storage.put("preciosBezen:" + s.id + ":" + s.chunks, nuevas.slice(i, i + 300));
+        s.chunks++;
+      }
+      s.filas += nuevas.length;
+      await this.state.storage.put("preciosBezenIndex", index);
+      return Response.json({ ok: true, anadidas: nuevas.length, yaEstaban: (filas || []).length - nuevas.length });
+    }
     if (url.pathname === "/precios-bezen/fijar" && method === "POST") {
       const { id, usuario } = await request.json();
       const index = await this.load("preciosBezenIndex", []);
@@ -2585,6 +3170,22 @@ export class InventoryStore {
       for (let i = 0; i < claves.length; i += 100) await this.state.storage.delete(claves.slice(i, i + 100));
       await this.state.storage.put("preciosBezenIndex", index.filter((x) => x.id !== id));
       return Response.json({ ok: true });
+    }
+    // Nombre de fábrica de cada producto (Jennifer, 2026-10-20: "una
+    // correlación entre el nombre que le damos en la web con el nombre de
+    // fábrica", p. ej. este canapé en fábrica es CANAPÉ SPACE).
+    if (url.pathname === "/tarifas/nombres-fabrica" && method === "GET") {
+      const products = await this.load("products", {});
+      const out = {};
+      for (const p of activeProducts(products)) {
+        const n = nombreFabricaProducto(p);
+        if (n && !out[p.stockModel]) out[p.stockModel] = n;
+      }
+      for (const p of TARIFA_PRODUCTOS_SOLO_TARIFAS) out[p.stockModel] = p.nombreFabrica;
+      return Response.json(out);
+    }
+    if (url.pathname === "/tarifas/modelos-extra" && method === "GET") {
+      return Response.json(TARIFA_PRODUCTOS_SOLO_TARIFAS);
     }
     if (url.pathname === "/tarifas/tabla" && method === "GET") {
       return this.getTarifaTabla(url.searchParams.get("stockModel"));
@@ -2691,6 +3292,21 @@ export class InventoryStore {
     if (url.pathname === "/tarifas/plataforma/listar" && method === "GET") {
       return this.listarPlataformasExport();
     }
+    // Ficheros plataformas COMPLETOS por cliente (Jennifer, 2026-11-04) —
+    // ver ficheros-completos.js.
+    const fcMatch = url.pathname.match(/^\/fichero-completo\/([A-Z_]+)(\/cargar|\/csv)?$/);
+    if (fcMatch) {
+      const cliente = fcMatch[1];
+      if (!CLIENTES_FICHERO_COMPLETO[cliente]) return Response.json({ ok: false, error: "Cliente no configurado." }, { status: 404 });
+      if (!fcMatch[2] && method === "GET") return this.verFicheroCompleto(cliente);
+      if (fcMatch[2] === "/cargar" && method === "POST") return this.cargarFicheroCompleto(cliente, await request.json());
+      if (fcMatch[2] === "/csv" && method === "GET") return this.csvFicheroCompleto(cliente, url.searchParams.get("usuario"));
+    }
+
+    // Tarifa REFORMAN (Jennifer, 2026-11-17) — ver reforman.js.
+    if (url.pathname === "/reforman" && method === "GET") return this.verReforman();
+    if (url.pathname === "/reforman/cargar" && method === "POST") return this.cargarReforman(await request.json());
+    if (url.pathname === "/reforman/descargado" && method === "POST") return this.reformanDescargado(await request.json());
 
     // Plazos de entrega > Marketplace (Jennifer, 2026-09-23) — ver
     // cargarPlazosMarketplace/exportarPlazosMarketplace más abajo.
@@ -3169,11 +3785,17 @@ export class InventoryStore {
       if (furniturePendiente && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR")) continue;
       // Lo que aún no ha llegado del proveedor no puede haber salido
       // (BEZEN12260: colchón FPK de LUSO dado por enviado).
-      if (esFurniture && b.estado === "pendiente" && !b.recibidoFabrica) continue;
+      // Y en CUALQUIER pedido, no solo Furniture (Jennifer, 2026-11-04,
+      // BEZEN12279: París 140X200 y Zen Nirvana 180X200 de LUSO, sin recibir,
+      // quedaron "servidos" porque salieron por SEUR las almohadas de regalo).
+      if (b.estado === "pendiente" && !b.recibidoFabrica) continue;
       // Los artículos con envío propio no salen con el pedido (Jennifer,
       // 2026-09-30: los cabeceros "enviados aparte" de BEZEN12187 y
       // BEZEN12176 quedaron como servidos al enviarse el resto sin haber
       // salido): envío aparte, reposición y gesto comercial se cierran solos.
+      // Gesto comercial que va con Furniture (Jennifer, 2026-10-20): sale con
+      // el pedido; nunca sumó "vendido pendiente", así que no se toca.
+      if (b.gestoComercial && b.gcFurniture && !b.reposicion && !b.envioAparte) { b.estado = "servido"; settled++; continue; }
       if (b.envioAparte || b.reposicion || b.gestoComercial) continue;
       const key = stockKey(b.stockModel, b.talla);
       const row = stock[key];
@@ -3628,7 +4250,12 @@ export class InventoryStore {
   // cierra solo cuando el pedido del cliente se marca como enviado en
   // Shopify (ver settleShipment) — puede que lo recibido de fábrica tarde
   // en salir hacia el cliente.
-  async resolveBackorder(id) {
+  // deseado (Jennifer, 2026-11-04, REP10002269275-A: "lo marqué ayer como
+  // recibido pero no ha subido a la carga"): el cliente dice el estado que
+  // quiere (true/false). Antes solo alternaba, así que un doble clic, o
+  // marcarlo desde dos pantallas, lo dejaba otra vez SIN recibir. Si ya está
+  // en ese estado no se toca nada (ni la fecha).
+  async resolveBackorder(id, deseado) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
@@ -3636,13 +4263,49 @@ export class InventoryStore {
       if (entry.recibidoFabrica) return Response.json({ ok: false, error: "Este pedido para stock ya se recibió y sumó al stock." }, { status: 400 });
       return this.recibirPedidoStock(backorders, entry);
     }
-    entry.recibidoFabrica = !entry.recibidoFabrica;
+    if (typeof deseado === "boolean" && !!entry.recibidoFabrica === deseado) return Response.json(entry);
+    entry.recibidoFabrica = typeof deseado === "boolean" ? deseado : !entry.recibidoFabrica;
     // Fecha del cambio a recibido (Jennifer, 2026-08-26): la fila ya no
     // desaparece de Proveedores al marcarla, así que necesita mostrar
     // cuándo se marcó. Se borra si se desmarca por error.
     entry.fechaRecibido = entry.recibidoFabrica ? new Date().toISOString() : null;
     await this.state.storage.put("backorders", backorders);
     return Response.json(entry);
+  }
+
+  // Recepción parcial (Jennifer, 2026-11-03, BEZEN12235: "de un pedido que
+  // son dos unidades he recibido una"): la línea se parte en dos. La línea
+  // ORIGINAL (mismo id, misma referencia, sigue pedida a fábrica) se queda
+  // pendiente con las unidades que faltan; se crea una línea nueva, copia de
+  // la original, con las unidades que han llegado y marcada como recibida.
+  // No toca stock: igual que el "recibido" normal de Furniture.
+  async recibirParcial(id, unidades) {
+    const backorders = await this.load("backorders", []);
+    const entry = backorders.find((b) => b.id === id);
+    if (!entry) return new Response("not found", { status: 404 });
+    const total = Number(entry.cantidad) || 1;
+    const n = Math.floor(Number(unidades));
+    if (entry.paraStock) return Response.json({ ok: false, error: "Es un pedido para stock: se recibe entero." }, { status: 400 });
+    if (entry.recibidoFabrica) return Response.json({ ok: false, error: "Esta línea ya está marcada como recibida." }, { status: 409 });
+    if (total < 2) return Response.json({ ok: false, error: "Solo queda 1 unidad en esta línea: márcala como recibida normal." }, { status: 400 });
+    if (!(n >= 1 && n < total)) return Response.json({ ok: false, error: "Unidades recibidas no válidas (entre 1 y " + (total - 1) + ")." }, { status: 400 });
+    let nuevoId = id + "-rec1";
+    for (let i = 2; backorders.some((b) => b.id === nuevoId); i++) nuevoId = id + "-rec" + i;
+    const ahora = new Date().toISOString();
+    const recibida = {
+      ...entry,
+      id: nuevoId,
+      cantidad: n,
+      recibidoFabrica: true,
+      fechaRecibido: ahora,
+      parcialDe: id,
+    };
+    delete recibida.reservaEnviada;
+    entry.cantidad = total - n;
+    entry.recepcionesParciales = [...(entry.recepcionesParciales || []), { fecha: ahora, unidades: n, id: nuevoId }];
+    backorders.splice(backorders.indexOf(entry) + 1, 0, recibida);
+    await this.state.storage.put("backorders", backorders);
+    return Response.json(recibida);
   }
 
   // Llega el camión con el colchón que faltaba para un pedido SEUR
@@ -3668,9 +4331,27 @@ export class InventoryStore {
     if (previo.estado !== "pendiente") {
       return Response.json({ ok: false, error: "Este pendiente ya no está pendiente." }, { status: 409 });
     }
+    // Pedido cancelado / reembolsado (Jennifer, 2026-11-05, Carrefour
+    // 76441060-A: al dar de alta un París entró en la carga de SEUR).
+    if (!previo.reposicion && !previo.gestoComercial) {
+      try {
+        const stubO = this.env.ORDERS_STORE.get(this.env.ORDERS_STORE.idFromName("shopify"));
+        const orders = await (await stubO.fetch("https://do/orders")).json();
+        const o = orders.find((x) => String(x.id) === String(previo.orderId));
+        if (o && (o.cancelado || o.shopifyCancelado || /cancelad|reembolsad|rechazad|anulad/i.test(o.estado || ""))) {
+          return Response.json({ ok: false, error: "El pedido " + (previo.orderRef || previo.orderNumber || "") + " está CANCELADO" + (o.estado ? " (" + o.estado + ")" : "") + ": no entra en ninguna carga." }, { status: 409 });
+        }
+      } catch (e) {
+        // si no se puede comprobar, se sigue como siempre
+      }
+    }
 
-    const carga = await this.getOrCreateSeurCarga(fecha);
-    if (!carga) return Response.json({ ok: false, error: "Fecha de carga no válida." }, { status: 400 });
+    // Retenido sin fecha (Jennifer, 2026-10-22): "no enviar hasta que el
+    // cliente nos diga" — se da por recibido pero no entra en ninguna carga;
+    // queda en SEUR > "Retenidos sin fecha" hasta que se le ponga día.
+    const retenido = fecha === "retenido";
+    const carga = retenido ? null : await this.getOrCreateSeurCarga(fecha);
+    if (!carga && !retenido) return Response.json({ ok: false, error: "Fecha de carga no válida." }, { status: 400 });
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry || entry.estado !== "pendiente") return Response.json({ ok: false, error: "Este pendiente ya no está pendiente." }, { status: 409 });
@@ -3705,7 +4386,10 @@ export class InventoryStore {
     entry.estado = "listo-seur";
     entry.recibidoFabrica = true;
     entry.fechaRecibido = new Date().toISOString();
-    entry.cargaId = carga.id;
+    entry.cargaId = carga ? carga.id : null;
+    entry.recordatorioSeur = null;
+    if (retenido) entry.retenidoCliente = true;
+    else delete entry.retenidoCliente;
 
     await this.state.storage.put("backorders", backorders);
     return Response.json({ ok: true, entry, carga });
@@ -4044,6 +4728,120 @@ export class InventoryStore {
     return Response.json({ ok: true, cambios, avisos });
   }
 
+  // Cambiar el color de la tapicería (Jennifer, 2026-10-20): el cliente ya
+  // hizo el pedido y luego lo quiere en otro color. Dos colores: el de las
+  // etiquetas de Furniture (b.color, el nombre de la web) y el de fábrica,
+  // que es el que va en "Mercancía para pedir a fábrica" a Polival. Si no
+  // se escribe el de fábrica, se saca de la receta con el color nuevo.
+  // `porArticulo` (Jennifer, 2026-11-05, BEZEN12381: dos canapés y cada uno
+  // cambia a su color): [{ id? | talla+de, a, fabrica }]. Con id se aplica a
+  // ese pendiente; sin id (apuntado antes de tramitar) se busca por medida y
+  // color comprado.
+  async cambiarColorPedido({ orderId, ids, todos, colorFurniture, colorFabrica, porArticulo, services, usuario }) {
+    const cfGlobal = String(colorFurniture || "").trim();
+    const cfabGlobal = String(colorFabrica || "").trim();
+    const listaArt = Array.isArray(porArticulo) ? porArticulo.filter((x) => x && (String(x.a || "").trim() || String(x.fabrica || "").trim())) : null;
+    if (listaArt ? !listaArt.length : (!cfGlobal && !cfabGlobal)) return Response.json({ ok: false, error: "Escribe el color nuevo." }, { status: 400 });
+    const products = await this.load("products", {});
+    const activos = activeProducts(products);
+    const backorders = await this.load("backorders", []);
+    const prodDe = (b) => activos.find((p) => p.stockModel === b.stockModel) || null;
+    const delPedido = backorders.filter((b) => String(b.orderId) === String(orderId) && !b.reposicion && !b.gestoComercial && b.tipo === "tapiceria");
+    const conInitial = delPedido.some((b) => { const p = prodDe(b); return p && p.product_type === "Canapé" && matchCanapeRecipeKey(p.title) === "initial"; });
+    const fecha = new Date().toISOString();
+    const cambios = [];
+    const avisos = [];
+    // `todos`: cambio de color apuntado antes de tramitar el pedido, se
+    // aplica a toda su tapicería al tramitarlo (OrdersStore).
+    const objetivos = [];
+    if (listaArt) {
+      const normT = (t) => String(t || "").toUpperCase().split("CM").join("").split(" ").join("").split("*").join("X").split("×").join("X");
+      const usados = new Set();
+      for (const x of listaArt) {
+        const a = String(x.a || "").trim(), fab = String(x.fabrica || "").trim();
+        let b = null;
+        if (x.id) b = delPedido.find((y) => y.id === x.id);
+        else {
+          const libres = delPedido.filter((y) => !usados.has(y.id) && (y.estado === "pendiente" || y.estado === "cubierto") && normT(y.talla) === normT(x.talla));
+          const mismoColor = (y) => { const c1 = normalizeKey(y.color).trim(), c2 = normalizeKey(x.de).trim(); return !!(c1 && c2 && (c1 === c2 || c1.startsWith(c2) || c2.startsWith(c1))); };
+          b = libres.find((y) => x.de && mismoColor(y)) || libres[0] || null;
+          // Línea con cantidad>1 que quedó en un solo pendiente: ya cambiado.
+          if (!b && delPedido.some((y) => usados.has(y.id) && normT(y.talla) === normT(x.talla))) continue;
+          if (!b) { avisos.push("No encuentro la tapicería " + (x.talla || "") + (x.de ? " " + x.de : "") + " en Proveedores: no se ha cambiado su color."); continue; }
+        }
+        if (!b) continue;
+        usados.add(b.id);
+        objetivos.push({ b, cf: a, cfab: fab });
+      }
+    } else {
+      const objetivo = todos ? delPedido.filter((b) => b.estado === "pendiente" || b.estado === "cubierto").map((b) => b.id) : (ids || []);
+      for (const id of objetivo) {
+        const b = delPedido.find((x) => x.id === id);
+        if (b) objetivos.push({ b, cf: cfGlobal, cfab: cfabGlobal });
+      }
+    }
+    for (const { b, cf, cfab } of objetivos) {
+      const nombre = b.cantidad + "x " + b.stockModel + " " + b.talla;
+      if (b.estado !== "pendiente" && b.estado !== "cubierto") { avisos.push(nombre + ": ya " + (b.estado === "servido" ? "ha salido" : "está " + b.estado) + ", no se ha cambiado."); continue; }
+      const de = b.color || "";
+      const fabricaAntes = b.mercanciaFabrica || "";
+      if (cf) b.color = cf;
+      const p = prodDe(b);
+      if (b.proveedor === "POLIVAL" && p) {
+        let texto = b.mercanciaFabrica || "";
+        // Con el color nuevo de la web, la receta da el color y la rejilla de fábrica.
+        if (cf) {
+          let built = null;
+          if (p.product_type === "Canapé") built = buildCanapeMercancia(p.title, cf, b.talla, services || "");
+          else if (p.product_type === "Canapé fijo") built = buildCanapeFijoMercancia(cf, b.talla);
+          else if (p.product_type === "Cabecero") {
+            const k = matchCabeceroRecipeKey(p.title);
+            const recipe = k ? CABECERO_RECIPES[k] : null;
+            let acabado = recipe && recipe.colores ? recipe.colores[normalizeKey(cf)] : null;
+            if (acabado && normalizeKey(cf) === "beige" && recipe.colores === CABECERO_ACABADOS_COMUNES) acabado = conInitial ? "Duna Lino" : "Duna Alpaca";
+            if (acabado && /ACABADO:/i.test(texto)) built = { texto: texto.replace(/ACABADO:\s*[^·]+/i, "ACABADO: " + acabado).trim() };
+          }
+          if (built && built.texto) {
+            texto = built.texto;
+            if (b.formato160) texto = textoConFormato160(texto, b.formato160);
+          } else if (!cfab) {
+            avisos.push(nombre + ": no tengo el color \"" + cf + "\" en la receta de fábrica — escribe el color de fábrica o corrige \"Mercancía para pedir a fábrica\" a mano.");
+          }
+        }
+        // El color de fábrica escrito a mano manda sobre la receta.
+        if (cfab) {
+          const m = /(COLOR|ACABADO):\s*([^·]+)/i.exec(texto);
+          const viejo = m ? m[2].trim() : "";
+          if (viejo) texto = texto.split(viejo).join(cfab);
+          else texto = (texto ? texto + " · " : "") + "COLOR: " + cfab;
+          if (p.product_type === "Canapé" || p.product_type === "Canapé fijo") avisos.push(nombre + ": revisa la rejilla en \"Mercancía para pedir a fábrica\", por si cambia con el color " + cfab + ".");
+        }
+        b.mercanciaFabrica = texto || null;
+        // La referencia de los canapés de madera lleva la letra del color.
+        const refColor = p.referenciaTipo === "zenit" || p.referenciaTipo === "astra";
+        // Ya pedido (Jennifer, 2026-10-20): se avisa con la referencia de
+        // fábrica para que se lo diga a Polival; sigue como pedido y con la
+        // misma referencia (no se vuelve a pedir). Sin pedir: queda
+        // rectificado en el pedido a proveedor.
+        if (b.pedidoGenerado) {
+          avisos.push("⚠ " + nombre + " YA ESTABA PEDIDO a Polival" + (b.fechaPedidoFabrica ? " el " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : "") + " con la referencia " + (b.referencia || "(sin referencia)") + " en " + (de || "su color") + ": avisa a fábrica del cambio de color.");
+          b.pedidoAnterior = { color: de, mercancia: fabricaAntes, fecha: b.fechaPedidoFabrica || null, referencia: b.referencia || null };
+        } else if (refColor && cf && b.referencia) {
+          const num = (String(b.referencia).match(/(\d+)(FUR)?$/) || [])[1];
+          if (num) {
+            const built = buildReferencia(num, p.referenciaTipo, b.color, /FUR$/.test(b.referencia));
+            if (built.needsReview && built.reason) avisos.push(built.reason);
+            else if (built.referencia) b.referencia = built.referencia;
+          }
+        }
+      }
+      b.cambioColor = { de: (b.cambioColor && b.cambioColor.de) || de, a: b.color || de, fabrica: cfab || null, fecha, usuario: usuario || null };
+      cambios.push({ id: b.id, stockModel: b.stockModel, de, a: b.color, mercanciaFabrica: b.mercanciaFabrica });
+    }
+    await this.state.storage.put("backorders", backorders);
+    return Response.json({ ok: true, cambios, avisos });
+  }
+
   // El albarán decía que venía, pero al descargar el camión falta ese
   // colchón (Jennifer, 2026-09-08): deshace "Preparar para SEUR" — vuelve a
   // "pendiente" en Luso/New (se le suma de nuevo a "vendido pendiente", sin
@@ -4062,7 +4860,7 @@ export class InventoryStore {
     delete entry.tallaOriginal;
   }
 
-  async undoSeurBackorder(id, { mantenerRef } = {}) {
+  async undoSeurBackorder(id, { mantenerRef, mantenerCarga, nota } = {}) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
@@ -4101,10 +4899,20 @@ export class InventoryStore {
     }
 
     entry.estado = "pendiente";
-    entry.cargaId = null;
     entry.recibidoFabrica = false;
     entry.fechaRecibido = null;
-    if (!mantenerRef) entry.refSuffix = nextRefSuffix(entry.refSuffix);
+    // Su colchón se lo queda otro pedido (Jennifer, 2026-10-20,
+    // 2001801948-A): vuelve a Luso/New como ya pedido, pero sigue en su carga
+    // de SEUR como recordatorio de la fecha (no entra en el fichero de SEUR
+    // hasta que se vuelva a preparar). Sin etiqueta hecha: misma referencia.
+    if (mantenerCarga) {
+      entry.recordatorioSeur = { fecha: new Date().toISOString(), nota: nota || "" };
+      entry.pedidoGenerado = true;
+      if (!entry.fechaPedidoFabrica) entry.fechaPedidoFabrica = new Date().toISOString();
+    } else {
+      entry.cargaId = null;
+      if (!mantenerRef) entry.refSuffix = nextRefSuffix(entry.refSuffix);
+    }
 
     await this.state.storage.put("backorders", backorders);
     return Response.json({ ok: true, entry });
@@ -4305,6 +5113,8 @@ export class InventoryStore {
       } else if (proveedor === "POLIVAL" && resolved.product.product_type === "Colchones") {
         const built = buildColchonMercancia(resolved.product.stockModel, resolved.talla);
         mercanciaFabrica = built.texto;
+      } else if (proveedor === "POLIVAL" && resolved.product.product_type === "Base" && platform === "Groupon") {
+        mercanciaFabrica = buildBaseGrouponMercancia(resolved.product.stockModel, resolved.talla).texto;
       }
       this.addNoStockBackorder(backorders, resolved, orderId, orderNumber, !!esPack, orderDate, proveedor, false, referencia, mercanciaFabrica, platform, orderRef);
       await this.state.storage.put("backorders", backorders);
@@ -4359,7 +5169,43 @@ export class InventoryStore {
   // aparece: SEUR usa el mismo botón "Preparar para SEUR" que un colchón
   // suelto normal (ver esColchonSeur en index.js); FURNITURE usa la línea
   // independiente de Furniture, igual que una reposición de tapicería.
-  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades, piezas, piezasIdx, canapeCompleto, services, productoTexto, piezaManual }) {
+  async crearReposicion({ orderId, orderNumber, platform, orderRef, orderDate, item, piezaTexto, parte, agenciaReposicion, recogida, recogidaDestino, cambio, unidades, piezas, piezasIdx, canapeCompleto, services, productoTexto, piezaManual, serviciosReposicion, revisionMontaje, servicioMontaje, detalleMontaje }) {
+    // Revisión de montaje (Jennifer, 2026-10-22, BEZEN11036): Furniture va a
+    // casa del cliente sin llevar mercancía. Línea propia como una
+    // reposición (su propia carga), referencia "REVISIÓN" + pedido, artículo
+    // "REVISIÓN MONTAJE" y solo subida a piso. Sin proveedor: no se pide
+    // nada a fábrica ni sale en Proveedores, y ya está "recibida".
+    if (revisionMontaje) {
+      if (!orderId) return Response.json({ ok: false, error: "Falta el pedido." }, { status: 400 });
+      const backorders = await this.load("backorders", []);
+      const id = crypto.randomUUID();
+      pushBackorder(backorders, {
+        id, orderId, orderNumber, stockModel: "REVISIÓN MONTAJE", talla: "", color: "", tipo: "servicio", cantidad: 1,
+        orderDate: new Date().toISOString(), esPack: false, proveedor: null, needsDecision: false, referencia: null,
+        mercanciaFabrica: "REVISIÓN DE MONTAJE — no se lleva mercancía ni se pide a fábrica",
+        platform, orderRef, reposicion: true, piezaTexto: "REVISIÓN MONTAJE", recibidoFabrica: true, agenciaReposicion: "FURNITURE",
+      });
+      const b = backorders.find((x) => x.id === id);
+      b.piezaManual = "REVISIÓN MONTAJE";
+      b.revisionMontaje = true;
+      // Servicio de montaje (Jennifer, 2026-11-04, BEZEN12278): igual que la
+      // revisión (sin mercancía, sin fábrica) pero Furniture va a MONTAR:
+      // sale con "SUBIDA Y MONTAJE" y referencia "MONTAJE" + pedido.
+      if (servicioMontaje) {
+        const detalle = String(detalleMontaje || "").trim().toUpperCase();
+        b.servicioMontaje = true;
+        b.detalleMontaje = detalle || null;
+        b.stockModel = "SERVICIO MONTAJE" + (detalle ? " " + detalle : "");
+        b.piezaTexto = "SERVICIO MONTAJE";
+        b.piezaManual = "SERVICIO MONTAJE";
+        b.mercanciaFabrica = "SERVICIO DE MONTAJE — no se lleva mercancía ni se pide a fábrica";
+      }
+      await this.state.storage.put("backorders", backorders);
+      return Response.json({ ok: true, id, enStock: 0 });
+    }
+    // Servicios adicionales en Furniture (Jennifer, 2026-10-20): recoger y
+    // devolver a fábrica, retirada para desechar, montaje…
+    const servicios = Array.isArray(serviciosReposicion) ? serviciosReposicion.map((s) => String(s || "").trim()).filter(Boolean) : [];
     // Pieza escrita a mano (Jennifer, 2026-10-14): pletinas de unión, juego
     // de hidráulicos, bisagras... Es el "modelo" de la reposición, nunca se
     // descuenta stock de colchón por ella y no lleva desglose de piezas.
@@ -4389,6 +5235,7 @@ export class InventoryStore {
         platform, orderRef, reposicion: true, piezaTexto: piezaTexto || piezaManual, recibidoFabrica: false, agenciaReposicion,
       });
       backorders.find((b) => b.id === id).piezaManual = piezaManual;
+      if (servicios.length && agenciaReposicion === "FURNITURE") backorders.find((b) => b.id === id).serviciosReposicion = servicios;
       await this.state.storage.put("backorders", backorders);
       return Response.json({ ok: true, id, enStock: 0 });
     }
@@ -4530,6 +5377,8 @@ export class InventoryStore {
     // Reposición que en realidad es un CAMBIO (Jennifer, 2026-10-07): se
     // apunta qué artículo tenía el pedido antes.
     if (cambio) nuevo.cambio = { de: String(cambio.de || "") };
+    // Solo si sale por Furniture (tapicería siempre; colchón si se eligió).
+    if (servicios.length && (tipo !== "colchon" ? (!piezaManual || agenciaReposicion === "FURNITURE") : agenciaReposicion === "FURNITURE")) nuevo.serviciosReposicion = servicios;
     await this.state.storage.put("backorders", backorders);
     // Devuelve el id (Jennifer, 2026-09-21) — hace falta para poder subir
     // fotos justificando el motivo justo después de crear la reposición
@@ -4565,7 +5414,17 @@ export class InventoryStore {
   // colchones sueltos (ver resolveSeurBackorder). Cuando ya está cubierta
   // con stock real, ese botón queda disponible de inmediato — no hace falta
   // esperar ni marcar "recibido" primero.
-  async crearGestoComercial({ orderId, orderNumber, platform, orderRef, orderDate, productId, talla, cantidad, motivo }) {
+  // agencia "FURNITURE" (Jennifer, 2026-10-20): solo si al pedido le queda
+  // mercancía por salir por Furniture — la almohada se junta con ese envío
+  // (mismo pedido, sin línea propia ni carga de SEUR).
+  async crearGestoComercial({ orderId, orderNumber, platform, orderRef, orderDate, productId, talla, cantidad, motivo, agencia }) {
+    const porFurniture = agencia === "FURNITURE";
+    if (porFurniture) {
+      const bos = await this.load("backorders", []);
+      const quedaFurniture = bos.some((b) => String(b.orderId) === String(orderId) && (b.estado === "pendiente" || b.estado === "cubierto")
+        && !b.reposicion && !b.gestoComercial && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
+      if (!quedaFurniture) return Response.json({ ok: false, error: "Este pedido no tiene nada pendiente de enviar por Furniture: el gesto comercial tiene que ir por SEUR." }, { status: 400 });
+    }
     const cantidadNum = Number(cantidad);
     if (!Number.isInteger(cantidadNum) || cantidadNum < 1 || cantidadNum > 2) {
       return Response.json({ ok: false, error: "La cantidad debe ser 1 o 2." }, { status: 400 });
@@ -4640,8 +5499,15 @@ export class InventoryStore {
       gestoComercial: true,
       piezaTexto: motivo || "",
     });
+    if (porFurniture) {
+      const nb = backorders.find((x) => x.id === id);
+      nb.gcFurniture = true;
+      nb.tipoEnvio = "FUR";
+      if (falta === 0) { nb.estado = "cubierto"; nb.recibidoFabrica = true; }
+    }
     await this.state.storage.put("stock", stock);
     await this.state.storage.put("backorders", backorders);
+    if (porFurniture) return Response.json({ ok: true, id, referencia, cubiertoConStock: covered, carga: null, furniture: true });
     // Todo en stock (Jennifer, 2026-10-15, GCBEZEN12211): no pasa por
     // Polival — directo a la carga de SEUR (antes de las 15:00 la de hoy,
     // después la de mañana). Solo almohadas: nunca por Furniture.
@@ -4678,16 +5544,44 @@ export class InventoryStore {
   // Precio de envío por modelo+talla+país (Jennifer, 2026-09-22, tabla de
   // transporte) — `precios` = { stockModel: { talla: { ES, FR, IT, DE } } },
   // también con merge, nunca reemplazo entero.
-  async setTarifaEnvio({ precios }) {
+  async setTarifaEnvio({ precios, usuario, origen }) {
     if (!precios) return Response.json({ ok: false, error: "Faltan precios." }, { status: 400 });
     const envios = await this.load("tarifasEnvio", {});
+    // Historial de cambios de porte (Jennifer, 2026-11-06): qué, de cuánto a
+    // cuánto, quién y cuándo, para poder deshacerlo.
+    const historial = await this.load("tarifasEnvioHistorial", []);
+    const ahora = new Date().toISOString();
     for (const [stockModel, porTalla] of Object.entries(precios)) {
       if (!envios[stockModel]) envios[stockModel] = {};
       for (const [talla, porPais] of Object.entries(porTalla)) {
-        envios[stockModel][talla] = { ...(envios[stockModel][talla] || {}), ...porPais };
+        const antes = envios[stockModel][talla] || {};
+        for (const [pais, valor] of Object.entries(porPais || {})) {
+          if (antes[pais] === valor) continue;
+          historial.push({ id: crypto.randomUUID(), fecha: ahora, usuario: usuario || null, origen: origen || null, stockModel, talla, pais, antes: antes[pais] == null ? null : antes[pais], despues: valor });
+        }
+        envios[stockModel][talla] = { ...antes, ...porPais };
       }
     }
     await this.state.storage.put("tarifasEnvio", envios);
+    await this.state.storage.put("tarifasEnvioHistorial", historial.slice(-3000));
+    return Response.json({ ok: true });
+  }
+  async deshacerCambioEnvio({ id, usuario }) {
+    const historial = await this.load("tarifasEnvioHistorial", []);
+    const h = historial.find((x) => x.id === id);
+    if (!h) return Response.json({ ok: false, error: "Cambio no encontrado." }, { status: 404 });
+    if (h.deshecho) return Response.json({ ok: false, error: "Ese cambio ya se deshizo." }, { status: 400 });
+    const envios = await this.load("tarifasEnvio", {});
+    const fila = (envios[h.stockModel] && envios[h.stockModel][h.talla]) || {};
+    if (fila[h.pais] !== h.despues) return Response.json({ ok: false, error: "El porte se ha vuelto a cambiar después (ahora " + fila[h.pais] + " €): deshaz primero el cambio más reciente." }, { status: 409 });
+    if (!envios[h.stockModel]) envios[h.stockModel] = {};
+    const nueva = { ...fila };
+    if (h.antes == null) delete nueva[h.pais]; else nueva[h.pais] = h.antes;
+    envios[h.stockModel][h.talla] = nueva;
+    h.deshecho = { fecha: new Date().toISOString(), usuario: usuario || null };
+    historial.push({ id: crypto.randomUUID(), fecha: h.deshecho.fecha, usuario: usuario || null, origen: "Deshacer", stockModel: h.stockModel, talla: h.talla, pais: h.pais, antes: h.despues, despues: h.antes });
+    await this.state.storage.put("tarifasEnvio", envios);
+    await this.state.storage.put("tarifasEnvioHistorial", historial.slice(-3000));
     return Response.json({ ok: true });
   }
 
@@ -4712,6 +5606,37 @@ export class InventoryStore {
   // modelo (ver setTarifaPeriodoActivo) — si no hay override, el periodo
   // más reciente (orden alfabético de "AAAA-MM") del proveedor del
   // Catálogo. El envío se busca por país en tarifasEnvio.
+  // Precio de envío de SEUR por país de cada pieza (Jennifer, 2026-11-06,
+  // Revisión de facturas de SEUR: "lo que SEUR nos tiene que cobrar"). Mismas
+  // reglas que calcularTarifaModelo (envío fijo, talla hermana, modelo
+  // hermano), pero sin necesitar el precio de coste.
+  async enviosDePiezas(piezas) {
+    const tarifasEnvio = await this.load("tarifasEnvio", {});
+    const salida = {};
+    for (const { stockModel: sm0, talla } of piezas || []) {
+      const k = sm0 + "|" + talla;
+      if (k in salida) continue;
+      const sust = TARIFA_MODELO_DESCATALOGADO_USA_PRECIO_DE[sm0];
+      const stockModel = sust ? sust.modelo : sm0;
+      if (TARIFA_ENVIO_FIJO_MODELO[stockModel] != null) {
+        const f = envioFijoDeTalla(TARIFA_ENVIO_FIJO_MODELO[stockModel], talla);
+        salida[k] = { ES: f, FR: f, IT: f, DE: f, fijo: true };
+        continue;
+      }
+      const de = (m, t) => (tarifasEnvio[m] && tarifasEnvio[m][t]) || null;
+      const tallaSust = sustitutoGeneralDeTalla(talla);
+      const modeloSust = TARIFA_ENVIO_SUSTITUTO_MODELO[stockModel];
+      const opciones = [de(stockModel, talla), tallaSust ? de(stockModel, tallaSust) : null, modeloSust ? de(modeloSust, talla) : null].filter(Boolean);
+      const r = {};
+      for (const p of ["ES", "FR", "IT", "DE", "PT"]) {
+        const o = opciones.find((x) => x[p] != null);
+        if (o) r[p] = o[p];
+      }
+      salida[k] = r;
+    }
+    return Response.json({ ok: true, envios: salida });
+  }
+
   async calcularTarifaModelo(stockModel, talla) {
     // Modelo descatalogado que usa el precio de OTRO modelo mientras sigue
     // apareciendo en algún fichero de plataforma (Jennifer, 2026-09-23,
@@ -4734,7 +5659,7 @@ export class InventoryStore {
     }
 
     const products = await this.load("products", {});
-    const product = activeProducts(products).find((p) => p.stockModel === stockModel);
+    const product = productoDeTarifa(products, stockModel);
     if (!product) return { error: "Modelo no encontrado en el Catálogo." };
     const proveedorProducto = product.proveedor;
 
@@ -4765,7 +5690,11 @@ export class InventoryStore {
       return { stockModel, talla, error: "Sin precio de coste guardado para esta talla (proveedor " + (proveedor || "?") + (periodo ? ", " + periodo : "") + ")." };
     }
 
-    const paises = ["ES", "FR", "IT", "DE"];
+    // La tapicería solo se envía a España (Jennifer, 2026-10-20): ni envío
+    // ni columnas de Francia/Italia/Alemania. Por tipo, no por proveedor:
+    // Polival también hace colchones (Látex Natura, Siberian Zen).
+    const soloEspana = ["Canapé", "Canapé fijo", "Base", "Cabecero", "Somier"].includes(product.product_type) || TARIFA_SOLO_ESPANA_MODELOS.includes(stockModel);
+    const paises = soloEspana ? ["ES"] : ["ES", "FR", "IT", "DE"];
     let envios;
     let faltaEnvio = [];
     let envioSustituto = null;
@@ -4774,7 +5703,7 @@ export class InventoryStore {
       // Solo sale por FURNITURE (Jennifer, 2026-09-23) — envío fijo, igual
       // para cualquier país/talla, no viene en la tabla de transporte (esa
       // es de SEUR).
-      envioFijo = TARIFA_ENVIO_FIJO_MODELO[stockModel];
+      envioFijo = envioFijoDeTalla(TARIFA_ENVIO_FIJO_MODELO[stockModel], talla);
       envios = { ES: envioFijo, FR: envioFijo, IT: envioFijo, DE: envioFijo };
     } else {
       const tarifasEnvio = await this.load("tarifasEnvio", {});
@@ -4811,9 +5740,14 @@ export class InventoryStore {
     // ÷0,70 (el margen del 30% de siempre) + comisión de plataforma, SIN
     // margen fijo por ancho.
     const esMuelles = TARIFA_MODELOS_MUELLES.includes(stockModel);
-    const bezenResult = esMuelles
+    const margenBezen = TARIFA_BEZEN_MARGEN_MODELO[stockModel];
+    const bezenResult = TARIFA_MODELOS_A_COSTE.includes(stockModel)
+      ? calcularPrecioACoste(coste, envios.ES)
+      : esMuelles
       ? calcularPrecioBezen(coste, envios.ES, 0.68, "32%")
-      : calcularPrecioBezen(coste, envios.ES);
+      : margenBezen
+        ? calcularPrecioBezen(coste, envios.ES, margenBezen.divisor, margenBezen.label)
+        : calcularPrecioBezen(coste, envios.ES);
 
     // BEZEN de Zen Nirvana = BEZEN de Zen Mandala + 15€, siempre (ver
     // TARIFA_BEZEN_REFERENCIA_MODELO) — se muestra el precio "de fórmula"
@@ -4831,7 +5765,18 @@ export class InventoryStore {
       }
     }
 
-    const columnas = esMuelles ? {
+    const margenPlat = TARIFA_PLATAFORMAS_MARGEN_MODELO[stockModel];
+    const plat = (envio, comision) => calcularPrecioPlataformaMuellesResto(coste, envio, comision, margenPlat.divisor, margenPlat.label);
+    const columnas = !esMuelles && margenPlat ? {
+      BEZEN: bezenResult,
+      MAISON_ES: plat(envios.ES, 0.77),
+      RESTO_ES: plat(envios.ES, 0.80),
+      MAISON_FR: plat(envios.FR, 0.77),
+      RESTO_FR: plat(envios.FR, 0.80),
+      MAISON_IT: plat(envios.IT, 0.77),
+      RESTO_IT: plat(envios.IT, 0.80),
+      RESTO_AL: plat(envios.DE, 0.80),
+    } : esMuelles ? {
       BEZEN: bezenResult,
       MAISON_ES: calcularPrecioPlataformaMuellesEs(bezenResult.precio),
       RESTO_ES: calcularPrecioPlataformaMuellesEs(bezenResult.precio),
@@ -4850,6 +5795,70 @@ export class InventoryStore {
       RESTO_IT: calcularPrecioPlataforma(coste, envios.IT, talla, 0.80),
       RESTO_AL: calcularPrecioPlataforma(coste, envios.DE, talla, 0.80),
     };
+    if (soloEspana) for (const k of ["MAISON_FR", "RESTO_FR", "MAISON_IT", "RESTO_IT", "RESTO_AL"]) delete columnas[k];
+    // Canapés: la plataforma nunca más barata que nuestra web (Jennifer,
+    // 2026-10-20), salvo el Space polipiel y los de madera. Se sube al
+    // euro entero que no baje del precio BEZEN.
+    const tipoProducto = String(product.product_type || "");
+    if (/^canap/i.test(tipoProducto) && !TARIFA_CANAPE_PLATAFORMA_PUEDE_BAJAR(stockModel)) {
+      const minimo = bezenResult.precio;
+      for (const [k, col] of Object.entries(columnas)) {
+        if (k === "BEZEN" || !col || col.precio == null || col.precio >= minimo) continue;
+        const subido = Math.ceil(minimo);
+        col.pasos.push({ label: "Sube a nuestro precio web: la plataforma no puede ser más barata que BEZEN (" + minimo + " €)", valor: subido });
+        col.precio = subido;
+      }
+    }
+    const maisonMas = TARIFA_MAISON_BEZEN_MAS_MODELO[stockModel];
+    // También el resto de plataformas (Jennifer, 2026-10-21: "la regla de
+    // Maison y del resto de plataformas va solo para el space deluxe").
+    if (maisonMas != null && bezenResult.precio != null) {
+      const precio = round2(bezenResult.precio + maisonMas);
+      for (const [k, col] of Object.entries(columnas)) {
+        if (k === "BEZEN" || !col || !col.pasos) continue;
+        col.pasos.push({ label: "Precio según fórmula (informativo)", valor: col.precio });
+        col.pasos.push({ label: "Precio final aplicado (BEZEN " + bezenResult.precio + " € + " + maisonMas + " €)", valor: precio });
+        col.precio = precio;
+      }
+    }
+    // GROUPON (Jennifer, 2026-10-27; por ahora solo la Base Silver): coste
+    // de fábrica con 6 patas siempre + envío + 9 €, con el 25% de margen.
+    if (TARIFA_GROUPON_MODELOS.includes(stockModel) && coste != null && envios.ES != null) {
+      // 6 patas siempre solo en la base; el canapé, su coste tal cual.
+      const esBase = /^Base tapizada/i.test(stockModel);
+      const [ancho, largo] = String(talla).split("X").map(Number);
+      const patasTalla = ancho < 135 || (ancho === 135 && largo <= 190) ? 4 : 6;
+      const coste6 = esBase ? coste + (6 - patasTalla) * PRECIO_PATA_BASE : coste;
+      const pasos = [];
+      pasos.push({ label: esBase ? "Precio de coste (con 6 patas)" : "Precio de coste", valor: round2(coste6) });
+      let envioG = envios.ES;
+      if (TARIFA_GROUPON_ENVIO_BE.includes(stockModel)) {
+        const [paisMax, envMax] = Object.entries(envios).filter(([, v]) => v != null).sort((x, y) => y[1] - x[1])[0];
+        envioG = envMax;
+        pasos.push({ label: "Envío Bélgica (sin tarifa: el más caro guardado, " + paisMax + ")", valor: round2(envioG) });
+      } else {
+        pasos.push({ label: "Precio de envío", valor: round2(envios.ES) });
+      }
+      pasos.push({ label: "Gastos Groupon", valor: TARIFA_GROUPON_EXTRA });
+      const suma = coste6 + envioG + TARIFA_GROUPON_EXTRA;
+      pasos.push({ label: "Coste + envío + gastos", valor: round2(suma) });
+      const conMargen = suma / 0.75;
+      pasos.push({ label: "÷ 0,75 (25% margen)", valor: round2(conMargen) });
+      // Sin IVA: así va en las tarifas de Groupon (Jennifer).
+      const precio = round2(conMargen);
+      pasos.push({ label: "Precio GROUPON (sin IVA)", valor: precio });
+      columnas.GROUPON = { precio, pasos };
+    }
+    // Los colchones de NEW sí siguen con ,99 en plataformas (Jennifer,
+    // 2026-10-21); el resto, en euros justos.
+    if (/^NEW( |$)/i.test(proveedor || "") || proveedorProducto === "NEW") {
+      for (const [k, col] of Object.entries(columnas)) {
+        const ult = k !== "BEZEN" && col && col.pasos ? col.pasos[col.pasos.length - 1] : null;
+        if (!ult || ult.label !== "Redondeo (al alza, € entero)" || col.precio == null) continue;
+        ult.label = "Redondeo (.99 escala superior, colchones NEW)";
+        ult.valor = col.precio = round2(col.precio - 0.01);
+      }
+    }
     // Deja constancia en el propio desglose (Jennifer quiere poder revisar
     // de dónde sale cada número) cuando el coste y/o el envío no son los
     // reales de esta talla/modelo, sino un sustituto o un fijo de Furniture.
@@ -4860,7 +5869,7 @@ export class InventoryStore {
         if (!col.pasos || col.pasos[0]?.label === "Precio BEZEN") continue;
         if (costeSustituto && col.pasos[0]) col.pasos[0].label += " (sustituto de " + costeSustituto + ", sin precio real para " + talla + ")";
         if (envioSustituto && col.pasos[1]) col.pasos[1].label += " (" + envioSustituto + ")";
-        if (envioFijo != null && col.pasos[1]) col.pasos[1].label += " (fijo FURNITURE, igual para cualquier talla/país)";
+        if (envioFijo != null && col.pasos[1]) col.pasos[1].label += typeof TARIFA_ENVIO_FIJO_MODELO[stockModel] === "number" ? " (fijo FURNITURE, igual para cualquier talla/país)" : " (fijo FURNITURE sin montaje" + (envioFijo === TARIFA_ENVIO_FIJO_MODELO[stockModel].gemelos ? ", en gemelos" : "") + ")";
       }
     }
     return { stockModel, talla, coste, costeProveedor: proveedor, costePeriodo: periodo, envios, columnas, costeSustituto, envioSustituto, envioFijo };
@@ -4926,10 +5935,12 @@ export class InventoryStore {
     const blacks = await this.state.storage.list({ prefix: "preciosBezenBlack2026:" });
     const precioBlack = new Map([...blacks].map(([k, v]) => [k.slice("preciosBezenBlack2026:".length), v]));
 
-    // Precio de Tarifas (columna BEZEN): solo colchones, que es lo que
-    // calcula Tarifas. Se cruza por SKU (prefijo del Catálogo + medida) y,
-    // si no, por el nombre del producto y la medida de la variante.
-    const products = activeProducts(await this.load("products", {})).filter((p) => p.product_type === "Colchones");
+    // Precio de Tarifas (columna BEZEN): colchones y, desde el 2026-10-20,
+    // también la tapicería con tarifa (Jennifer: "hemos calculado la tarifa
+    // pero no sale en los precios Bezen", canapé Space). Se cruza por SKU
+    // (prefijo del Catálogo + medida) y, si no, por el nombre del producto y
+    // la medida de la variante. Variante en gemelos → talla "… GEMELOS".
+    const products = [...activeProducts(await this.load("products", {})), ...TARIFA_PRODUCTOS_SOLO_TARIFAS].filter((p) => ["Colchones", "Canapé", "Canapé fijo", "Base", "Cabecero", "Somier"].includes(p.product_type));
     const norm = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
     const tallaDe = (v) => { const m = /(\d{2,3})\s*[x×]\s*(\d{2,3})/i.exec(v || ""); return m ? m[1] + "X" + m[2] : null; };
     const modeloDe = (producto, variante, sku) => {
@@ -4943,13 +5954,20 @@ export class InventoryStore {
       }
       if (mejor) return mejor;
       const p = products.find((x) => norm(x.title) === norm(producto));
+      // Cabeceros: "Cama 90 – Medida final 100cm / Beige" → talla "90".
+      if (p && p.product_type === "Cabecero") {
+        const mc = /cama\s*(\d{2,3})/i.exec(variante || "");
+        return mc ? { stockModel: p.stockModel, talla: mc[1] } : null;
+      }
       const t = tallaDe(variante) || tallaDe(sku);
       return p && t ? { stockModel: p.stockModel, talla: t } : null;
     };
     const tarifaCache = new Map();
     const salida = [];
     for (const [producto, variante, sku, precio] of filas) {
-      const m = modeloDe(producto, variante, sku);
+      const m0 = modeloDe(producto, variante, sku);
+      const m1 = m0 && /gemelo/i.test((variante || "") + " " + (sku || "")) && (/^160X/.test(m0.talla) || TARIFA_COLCHON_GEMELOS_MODELOS.includes(m0.stockModel)) ? { ...m0, talla: m0.talla + " GEMELOS" } : m0;
+      const m = m1 ? { ...m1, talla: tallaTarifaTela(m1.stockModel, m1.talla, /^tela/i.test(variante || "") || /^BDCANINI/i.test(sku || "")) } : m1;
       let tarifa = null;
       let tarifaInfo = null;
       if (m) {
@@ -4964,13 +5982,22 @@ export class InventoryStore {
               // calcular el margen que deja otro precio (precio Black).
               const base = (col.pasos || []).find((p) => p.label === "Coste + envío");
               const mm = (col.pasos || []).map((p) => /\((\d+(?:[.,]\d+)?)% margen\)/.exec(p.label)).find(Boolean);
-              v = { precio: col.precio, base: base ? base.valor : null, margenPct: mm ? Number(mm[1].replace(",", ".")) : null };
+              const env = (col.pasos || []).find((p) => p.label.startsWith("Precio de envío"));
+              v = { precio: col.precio, base: base ? base.valor : null, envio: env ? env.valor : null, margenPct: mm ? Number(mm[1].replace(",", ".")) : null };
             }
           } catch (e) { v = null; }
           tarifaCache.set(k, v);
         }
         tarifaInfo = tarifaCache.get(k);
         tarifa = tarifaInfo ? tarifaInfo.precio : null;
+        // Base CON montaje (SKU "MBASE…", Jennifer 2026-10-27): misma fórmula
+        // con el montaje de Furniture sumado al envío (41 + 19 €).
+        if (tarifa != null && /^MBASE/i.test(sku || "") && tarifaInfo.base != null && tarifaInfo.envio != null && tarifaInfo.margenPct != null) {
+          const envio = tarifaInfo.envio + MONTAJE_BASE_FURNITURE;
+          const r = calcularPrecioBezen(tarifaInfo.base - tarifaInfo.envio, envio, 1 - tarifaInfo.margenPct / 100, tarifaInfo.margenPct + "%");
+          tarifaInfo = { ...tarifaInfo, precio: r.precio, base: round2(tarifaInfo.base + MONTAJE_BASE_FURNITURE), envio };
+          tarifa = r.precio;
+        }
       }
       const nuevo = sku ? precioNuevo.get(sku) : null;
       salida.push({
@@ -4978,19 +6005,622 @@ export class InventoryStore {
         precioAnterior: anterior && sku ? (precioAntes.has(sku.toUpperCase()) ? precioAntes.get(sku.toUpperCase()) : undefined) : undefined,
         tarifa: tarifa ?? null,
         // Para abrir el desglose del cálculo, como en Tarifas.
-        tarifaBase: tarifaInfo ? tarifaInfo.base : null, tarifaMargenPct: tarifaInfo ? tarifaInfo.margenPct : null,
+        tarifaBase: tarifaInfo ? tarifaInfo.base : null, tarifaMargenPct: tarifaInfo ? tarifaInfo.margenPct : null, tarifaEnvio: tarifaInfo ? tarifaInfo.envio : null,
         tarifaModelo: tarifa != null && m ? m.stockModel : null, tarifaTalla: tarifa != null && m ? m.talla : null,
         precioNuevo: nuevo ? nuevo.precio : null, precioNuevoFecha: nuevo ? nuevo.fecha : null,
         precioBlack: sku && precioBlack.has(sku) ? precioBlack.get(sku).precio : null,
         precioFijo: sku && precioFijo.has(sku.toUpperCase()) ? precioFijo.get(sku.toUpperCase()) : null,
       });
+      if (m) Object.defineProperty(salida[salida.length - 1], "_m", { value: m, enumerable: false });
+    }
+    // PACKS (Jennifer, 2026-10-20): cada variante de pack se descompone en
+    // sus piezas (mismas reglas que al tramitar un pedido) y a cada pieza se
+    // le buscan sus precios (fijo, BLACK, nuevo, web) en su propia fila de
+    // esta subida. La suma y la columna a usar se eligen en la pantalla.
+    const todos = await this.load("products", {});
+    const activosTodos = activeProducts(todos);
+    const tipoDe = (stockModel) => { const p = activosTodos.find((x) => x.stockModel === stockModel); return p ? p.product_type : ""; };
+    // La base lleva el color en el propio modelo; el cabecero va por ancho
+    // de cama; los canapés de tela comparten SKU entre gamas (natural/
+    // tierras/vivos), así que también se busca por "familia" sin la gama.
+    const familia = (stockModel) => String(stockModel || "").replace(/\s*gama colores.*$/i, "").trim();
+    const tallaPieza = (stockModel, talla) => tipoDe(stockModel) === "Cabecero" ? String(talla || "").split("X")[0] : String(talla || "").replace(",", ".").toUpperCase();
+    const claveFila = (stockModel, talla, color) => {
+      const t = tipoDe(stockModel);
+      const conColor = TYPE_MAP[t] === "tapiceria" && t !== "Base";
+      return stockModel + "|" + tallaPieza(stockModel, talla) + "|" + (conColor ? colorTapiceriaKey(color) : "");
+    };
+    const claveFamilia = (stockModel, talla, color) => "F|" + familia(stockModel) + "|" + tallaPieza(stockModel, talla) + "|" + colorTapiceriaKey(color);
+    const porPieza = new Map();
+    const porMedidas = new Map();
+    const guardar = (k, f) => { if (!porPieza.has(k)) porPieza.set(k, f); };
+    for (const f of salida) {
+      if (/^pack/i.test(f.producto || "")) continue;
+      const partes = String(f.variante || "").split("/").map((x) => x.trim());
+      let sm = f._m ? f._m.stockModel : null;
+      let talla = f._m ? f._m.talla : null;
+      let color = partes.length > 1 ? partes[0] : "";
+      // Cabecero ya cruzado con Tarifas ("Cama 90 – … / Beige"): el color va al final.
+      if (sm && tipoDe(sm) === "Cabecero") color = partes.length > 1 ? partes[partes.length - 1] : "";
+      if (!sm) {
+        // Cabeceros ("Cama 90 – Medida final 100cm / Beige") y almohadas
+        // ("67,5"), que el cruce de tarifas no reconoce.
+        const p = activosTodos.find((x) => ["Cabecero", "Almohada"].includes(x.product_type) && norm(x.title) === norm(f.producto));
+        if (!p) continue;
+        sm = p.stockModel;
+        if (p.product_type === "Cabecero") {
+          const mc = /cama\s*(\d{2,3})/i.exec(f.variante || "");
+          if (!mc) continue;
+          talla = mc[1];
+          color = partes.length > 1 ? partes[partes.length - 1] : "";
+        } else {
+          talla = String(f.variante || "").trim();
+          color = "";
+        }
+      }
+      guardar(claveFila(sm, talla, color), f);
+      // Misma medida en cualquier color (para colores que no se venden sueltos).
+      if (TYPE_MAP[tipoDe(sm)] === "tapiceria") {
+        guardar("T|" + sm + "|" + tallaPieza(sm, talla), f);
+        if (!porMedidas.has("T|" + sm)) porMedidas.set("T|" + sm, []);
+        porMedidas.get("T|" + sm).push({ talla: tallaPieza(sm, talla), fila: f });
+      }
+      if (TYPE_MAP[tipoDe(sm)] === "tapiceria") guardar(claveFamilia(sm, talla, color), f);
+      // Para buscar la medida más cercana por encima (ver más abajo).
+      const kMed = claveFila(sm, "", color);
+      if (!porMedidas.has(kMed)) porMedidas.set(kMed, []);
+      porMedidas.get(kMed).push({ talla: tallaPieza(sm, talla), fila: f });
+      if (TYPE_MAP[tipoDe(sm)] === "tapiceria") {
+        const kF = claveFamilia(sm, "", color);
+        if (!porMedidas.has(kF)) porMedidas.set(kF, []);
+        porMedidas.get(kF).push({ talla: tallaPieza(sm, talla), fila: f });
+      }
+    }
+    // Pieza en una medida que no se vende suelta (Jennifer, 2026-10-20: Space
+    // 80X180): se usa la medida más cercana que sí está en la web, SIEMPRE por
+    // encima (ancho y largo iguales o mayores; la de menor superficie). En
+    // gemelos, solo entre gemelos.
+    const medidaPorEncima = (lista, talla) => {
+      // Tela (INITIAL DELUXE) solo con tela, polipiel solo con polipiel.
+      const gem = / GEMELOS$/.test(talla);
+      const tela = / TELA( |$)/.test(talla);
+      const limpia = (t) => t.replace(/ GEMELOS$/, "").replace(/ TELA$/, "");
+      const [w, l] = limpia(talla).split("X").map(Number);
+      if (!w) return null;
+      return (lista || [])
+        .map((x) => { const g = / GEMELOS$/.test(x.talla); const [a, b] = limpia(x.talla).split("X").map(Number); return { ...x, g, tela: / TELA( |$)/.test(x.talla), a, b: b || 0 }; })
+        .filter((x) => x.g === gem && x.tela === tela && x.a >= w && (l ? x.b >= l : true) && x.talla !== talla)
+        .sort((x, y) => x.a * (x.b || 1) - y.a * (y.b || 1) || x.a - y.a)[0] || null;
+    };
+    for (const f of salida) {
+      if (!/^pack/i.test(f.producto || "") || !f.sku) continue;
+      const packTalla = normalizeTalla(f.variante) || normalizeTalla(f.sku);
+      const r = resolvePackSku(f.sku, todos, extractColor(f.variante), packTalla);
+      const gemelos = /gemelo/i.test((f.variante || "") + " " + f.sku);
+      f.packPiezas = r.componentes.map((c) => {
+        let talla = c.talla;
+        // La base de 160 del pack "GEMELOS" usa la base de 160 normal (Jennifer, 2026-10-27).
+        if (c.tipo === "tapiceria" && gemelos && /^160X/.test(talla || "") && tipoDe(c.product.stockModel) !== "Base") talla += " GEMELOS";
+        if (c.tipo === "tapiceria") talla = tallaTarifaTela(c.product.stockModel, talla, /(^|\+)BDCANINI/i.test(f.sku));
+        let fila = porPieza.get(claveFila(c.product.stockModel, talla, c.color))
+          || (c.tipo === "tapiceria" ? porPieza.get(claveFamilia(c.product.stockModel, talla, c.color)) : null);
+        let medidaUsada = null;
+        if (!fila) {
+          const tp = tallaPieza(c.product.stockModel, talla);
+          const cerca = medidaPorEncima(porMedidas.get(claveFila(c.product.stockModel, "", c.color)), tp)
+            || (c.tipo === "tapiceria" ? medidaPorEncima(porMedidas.get(claveFamilia(c.product.stockModel, "", c.color)), tp) : null);
+          if (cerca) { fila = cerca.fila; medidaUsada = cerca.talla; }
+        }
+        // Color del pack que no se vende suelto (Jennifer, 2026-10-21: packs
+        // de canapé con patas en Oliva/Oceanic/Menta/Arena): precios de la
+        // misma medida en otro color (todos los colores valen lo mismo).
+        let colorUsado = null;
+        if (!fila && c.tipo === "tapiceria") {
+          fila = porPieza.get("T|" + c.product.stockModel + "|" + tallaPieza(c.product.stockModel, talla)) || null;
+          // Ni el color ni la medida (cabecero Arena de cama 80): la medida por encima en otro color.
+          if (!fila) {
+            const cerca = medidaPorEncima(porMedidas.get("T|" + c.product.stockModel), tallaPieza(c.product.stockModel, talla));
+            if (cerca) { fila = cerca.fila; medidaUsada = cerca.talla; }
+          }
+          if (fila) colorUsado = String(fila.variante || "").split("/").map((x) => x.trim()).filter((x) => !/\d/.test(x))[0] || "otro color";
+        }
+        return {
+          tipo: c.tipo, stockModel: c.product.stockModel, talla, color: c.color || "", cantidad: c.qtyOverride || 1, medidaUsada, colorUsado,
+          sku: fila ? fila.sku : null, nombre: fila ? fila.producto + (fila.variante ? " · " + fila.variante : "") : null, precioFijo: fila ? fila.precioFijo : null, precioBlack: fila ? fila.precioBlack : null,
+          precioNuevo: fila ? fila.precioNuevo : null, precio: fila ? fila.precio : null,
+          // Coste + envío y tarifa de la pieza, para el margen en la calculadora de pack.
+          // Con otra medida, el coste sigue siendo el de la medida real del pack.
+          // Cabecero de cama 80: es el mismo cabecero de 90 (Jennifer, 2026-10-21), así que su tarifa vale.
+          tarifa: fila && (!medidaUsada || tipoDe(c.product.stockModel) === "Cabecero") ? fila.tarifa : null, tarifaBase: fila && (!medidaUsada || tipoDe(c.product.stockModel) === "Cabecero") ? fila.tarifaBase : null, tarifaMargenPct: fila && (!medidaUsada || tipoDe(c.product.stockModel) === "Cabecero") ? fila.tarifaMargenPct : null, tarifaEnvio: fila && (!medidaUsada || tipoDe(c.product.stockModel) === "Cabecero") ? fila.tarifaEnvio : null,
+        };
+      });
+      // Pieza que no se vende suelta en la web (Jennifer, 2026-10-20, Space
+      // 80X180 del pack CANPOLBLA+COLGEZ): su precio de tarifa, si tiene costes.
+      for (const p of f.packPiezas) {
+        if (p.tarifa != null) continue;
+        const k = p.stockModel + "|" + p.talla;
+        if (!tarifaCache.has(k)) {
+          let v = null;
+          try {
+            const t = await this.calcularTarifaModelo(p.stockModel, p.talla);
+            const col = t && t.columnas && t.columnas.BEZEN;
+            if (col && col.precio != null) {
+              const base = (col.pasos || []).find((x) => x.label === "Coste + envío");
+              const env = (col.pasos || []).find((x) => x.label.startsWith("Precio de envío"));
+              v = { precio: col.precio, base: base ? base.valor : null, envio: env ? env.valor : null, margenPct: null };
+            } else if (p.tipo === "almohada" && t && t.coste != null) {
+              // Almohada dentro de un pack (Jennifer, 2026-10-22, Nordic): no
+              // tiene envío propio (viaja con el pack), así que para el margen
+              // cuenta solo su coste de fábrica.
+              v = { precio: null, base: t.coste, envio: 0, margenPct: null };
+            }
+          } catch (e) { v = null; }
+          tarifaCache.set(k, v);
+        }
+        const v = tarifaCache.get(k);
+        if (v) { p.tarifa = v.precio; if (p.tarifaBase == null) p.tarifaBase = v.base; if (p.tarifaEnvio == null) p.tarifaEnvio = v.envio; }
+      }
+      if (r.needsReview || !f.packPiezas.length) f.packError = r.ambiguousNotes.join(" ") || "No he podido descomponer este pack.";
+    }
+    // Conjuntos somier + colchón (ver CONJUNTOS_PACK_PIEZAS): cada pieza con
+    // los precios de su propia fila de la web, en la misma medida.
+    for (const f of salida) {
+      const piezas = CONJUNTOS_PACK_PIEZAS[f.producto];
+      if (!piezas || !f.sku) continue;
+      const talla = tallaDe(f.variante) || tallaDe(f.sku);
+      f.packPiezas = piezas.map((c) => {
+        const fila = salida.find((x) => x._m && x._m.stockModel === c.stockModel && x._m.talla === talla) || null;
+        return {
+          tipo: c.tipo, stockModel: c.stockModel, talla, color: "", cantidad: 1, medidaUsada: null, colorUsado: null,
+          sku: fila ? fila.sku : null, nombre: fila ? fila.producto + (fila.variante ? " · " + fila.variante : "") : null, precioFijo: fila ? fila.precioFijo : null, precioBlack: fila ? fila.precioBlack : null,
+          precioNuevo: fila ? fila.precioNuevo : null, precio: fila ? fila.precio : null,
+          tarifa: fila ? fila.tarifa : null, tarifaBase: fila ? fila.tarifaBase : null, tarifaMargenPct: fila ? fila.tarifaMargenPct : null, tarifaEnvio: fila ? fila.tarifaEnvio : null,
+        };
+      });
+      if (f.packPiezas.some((p) => !p.sku)) f.packError = "No encuentro en la web " + f.packPiezas.filter((p) => !p.sku).map((p) => p.stockModel + " " + talla).join(" ni ") + ".";
     }
     return Response.json({ ok: true, subida, anterior: anterior ? { id: anterior.id, fecha: anterior.fecha } : null, fija: fija ? { id: fija.id, fecha: fija.fecha } : null, filas: salida });
   }
 
+  // MARGEN BRUTO DE CADA VENTA DE LA WEB (Jennifer, 2026-10-20): lo pagado
+  // ÷ 1,04 ÷ 1,21 × 0,77 (como la fórmula BEZEN) − coste de cada pieza
+  // (Tarifas) − el transporte REAL de ese pedido. El precio de la web lleva
+  // el envío suelto de cada pieza; si el pedido va junto (o es de Madrid),
+  // el transporte real es menor y esa diferencia es margen. Precios de
+  // Furniture SIN montaje.
+  async margenPedidos(pedidos) {
+    const products = await this.load("products", {});
+    const cache = new Map();
+    const tarifaPieza = async (stockModel, talla) => {
+      const k = stockModel + "|" + talla;
+      if (!cache.has(k)) {
+        let v = null;
+        try {
+          const t = await this.calcularTarifaModelo(stockModel, talla);
+          const pasos = (t && t.columnas && t.columnas.BEZEN && t.columnas.BEZEN.pasos) || [];
+          const coste = pasos.find((p) => p.label === "Precio de coste");
+          const envio = pasos.find((p) => p.label.startsWith("Precio de envío"));
+          const precioTarifa = t && t.columnas && t.columnas.BEZEN && t.columnas.BEZEN.precio != null ? t.columnas.BEZEN.precio : null;
+          if (coste) v = { coste: coste.valor, envio: envio ? envio.valor : 0, precio: precioTarifa };
+        } catch (e) { v = null; }
+        cache.set(k, v);
+      }
+      return cache.get(k);
+    };
+    const nombreTipo = (p) => ({ "Canapé": "Canapé", "Canapé fijo": "Canapé", Base: "Base", Cabecero: "Cabecero", Colchones: "Colchón", Almohada: "Almohada" })[p.product_type] || "Otro";
+    const salida = {};
+    for (const ped of pedidos || []) {
+      const piezas = [];
+      const faltan = [];
+      for (const it of ped.items || []) {
+        const r = resolveItem(it, products);
+        const gem = /gemelo/i.test(it.variantTitle || "");
+        const add = (product, talla, qty) => {
+          let t = talla || "";
+          if (gem && ["Canapé"].includes(product.product_type) && /^160X/.test(t)) t += " GEMELOS";
+          piezas.push({ stockModel: product.stockModel, talla: t, tipo: nombreTipo(product), qty });
+        };
+        if (r.tipo === "pack") {
+          for (const c of r.componentes) add(c.product, c.talla, (c.qtyOverride || 1) * (it.qty || 1));
+          if (r.needsReview) faltan.push("pieza de pack sin identificar (" + (it.sku || "") + ")");
+        } else if (r.product) add(r.product, r.talla, it.qty || 1);
+        else faltan.push("artículo sin identificar (" + (it.sku || it.variantTitle || "") + ")");
+      }
+      let costes = 0, enviosSueltos = 0, tarifaTotal = 0, sinPrecioTarifa = false;
+      for (const p of piezas) {
+        const v = await tarifaPieza(p.stockModel, p.talla);
+        if (!v) { faltan.push("sin coste en Tarifas: " + p.stockModel + " " + p.talla); continue; }
+        p.coste = v.coste; p.envioSuelto = v.envio;
+        p.precioTarifa = v.precio;
+        if (v.precio == null) sinPrecioTarifa = true; else tarifaTotal += v.precio * p.qty;
+        costes += v.coste * p.qty;
+        enviosSueltos += v.envio * p.qty;
+      }
+      // Transporte real según lo que va junto y el destino.
+      const madrid = /^28/.test(String(ped.postalCode || ""));
+      const n = (t) => piezas.filter((p) => p.tipo === t).reduce((s, p) => s + p.qty, 0);
+      const sueltoDe = (t) => piezas.filter((p) => p.tipo === t).reduce((s, p) => s + (p.envioSuelto || 0) * p.qty, 0);
+      // Tarifas de Furniture (Jennifer, 2026-10-20), sin y con montaje. El
+      // cabecero no lleva montaje. El canapé suelto fuera de Madrid sin
+      // montaje usa su envío de tarifa (45 €, 60 € en gemelos).
+      const montaje = /montaje/i.test(ped.services || "");
+      const FUR = {
+        madrid: { sin: { canape: 23, canapeColchon: 28, base: 18, baseColchon: 23, cabecero: 18 }, con: { canape: 30, canapeColchon: 39, base: 22, baseColchon: 29, cabecero: 18 } },
+        fuera: { sin: { canape: null, canapeColchon: 65, base: 41, baseColchon: 54, cabecero: 41 }, con: { canape: 67, canapeColchon: 82, base: 60, baseColchon: 73, cabecero: 41 } },
+      }[madrid ? "madrid" : "fuera"][montaje ? "con" : "sin"];
+      const gemelosCanape = piezas.some((p) => p.tipo === "Canapé" && / GEMELOS$|^(18|20)0X/.test(p.talla));
+      let envio = 0;
+      const detalle = [];
+      const avisosEnvio = [];
+      if (n("Canapé") && n("Colchón")) { envio += FUR.canapeColchon; detalle.push("canapé + colchón " + FUR.canapeColchon + " €"); }
+      else if (n("Base") && n("Colchón")) { envio += FUR.baseColchon; detalle.push("base + colchón " + FUR.baseColchon + " €"); }
+      else {
+        if (n("Canapé")) {
+          // Gemelos con montaje fuera de Madrid: 67 + 15 = 82 € (Jennifer, 2026-10-20).
+          const e = FUR.canape != null ? (montaje && !madrid && gemelosCanape ? 82 : FUR.canape) * n("Canapé") : sueltoDe("Canapé");
+          envio += e; detalle.push("canapé " + Math.round(e * 100) / 100 + " €");
+        }
+        if (n("Base")) { const e = FUR.base * n("Base"); envio += e; detalle.push("base " + e + " €"); }
+        if (n("Colchón")) { envio += sueltoDe("Colchón"); detalle.push("colchón " + Math.round(sueltoDe("Colchón") * 100) / 100 + " €"); }
+      }
+      if (montaje) detalle.push("con montaje");
+      if (n("Cabecero")) { const e = FUR.cabecero * n("Cabecero"); envio += e; detalle.push("cabecero " + e + " €"); }
+      if (n("Otro")) { envio += sueltoDe("Otro"); }
+      if (n("Almohada") && (n("Canapé") || n("Base"))) detalle.push("almohadas 0 €");
+      else if (n("Almohada")) envio += sueltoDe("Almohada");
+      const conLineas = (ped.items || []).length && (ped.items || []).every((it) => typeof it.pagado === "number");
+      const ingresos = conLineas ? ped.items.reduce((s, it) => s + it.pagado, 0) : Number(ped.price || 0);
+      // Montaje (Jennifer, 2026-10-20): el cliente paga 39 € (IVA incl.).
+      // Ingreso aparte, sin publicidad (solo IVA y financieras). El coste del
+      // montaje en Furniture aún no lo tenemos.
+      const ingresoMontaje = montaje ? 39 : 0;
+      // Jennifer (2026-10-20): los 39 € cuentan enteros como dinero para pagar
+      // el servicio de Furniture (canapé: 45 contemplados + 39 = 84 frente a 67).
+      // Corrección de Jennifer: el IVA de los 39 € no cuenta → 39 ÷ 1,21 = 32,23 €
+      // (45 contemplados + 32,23 frente a 67 de Furniture).
+      const netoMontaje = round2(ingresoMontaje / 1.21);
+      const neto = ingresos / 1.04 / 1.21 * 0.77 + netoMontaje;
+      const margen = neto - costes - envio;
+      salida[ped.id] = {
+        ok: !faltan.length, faltan, avisosEnvio, madrid, montaje, ingresoMontaje, aprox: !conLineas,
+        ingresos: round2(ingresos), neto: round2(neto), costes: round2(costes), envioReal: round2(envio), envioIncluidoEnPrecio: round2(enviosSueltos),
+        ahorroTransporte: round2(enviosSueltos + netoMontaje - envio), montajeSinIva: netoMontaje, envioDetalle: detalle.join(" + "), margen: round2(margen),
+        pct: neto > 0 ? round2(margen / neto * 100) : null,
+        tarifa: sinPrecioTarifa ? null : round2(tarifaTotal),
+        piezas: piezas.map((p) => ({ stockModel: p.stockModel, talla: p.talla, qty: p.qty, coste: p.coste ?? null, envioSuelto: p.envioSuelto ?? null })),
+      };
+    }
+    return Response.json(salida);
+  }
+
+  // ---- Tarifa REFORMAN (Jennifer, 2026-11-17) ----
+  // El Excel del catálogo se guarda tal cual (filas como listas de valores,
+  // en trozos de < 100 KB); al verlo se recalcula la columna Precio con
+  // (coste + transporte ES) ÷ 0,7 (reforman.js). El Excel se lee y se
+  // escribe en el navegador (SheetJS), aquí solo viajan las filas.
+  async cargarReforman({ filas, usuario, nombre }) {
+    if (!Array.isArray(filas) || filas.length < 2) return Response.json({ ok: false, error: "El Excel está vacío." }, { status: 400 });
+    const cabeceras = filas[0].map((h) => String(h === null || h === undefined ? "" : h));
+    const iPrecio = cabeceras.findIndex((h) => h.trim().toLowerCase() === "precio");
+    if (iPrecio < 0) return Response.json({ ok: false, error: "No encuentro la columna Precio en la primera fila del Excel." }, { status: 400 });
+    const datos = filas.slice(1).filter((r) => Array.isArray(r) && String(r[0] === null || r[0] === undefined ? "" : r[0]).trim() !== "");
+    if (!datos.length) return Response.json({ ok: false, error: "El Excel no trae ningún SKU en la columna A." }, { status: 400 });
+    const antes = await this.load("reforman:meta", null);
+    const trozos = [];
+    let actual = [], bytes = 0;
+    for (const f of datos) {
+      const n = JSON.stringify(f).length * 2;
+      if (actual.length && bytes + n > 100000) { trozos.push(actual); actual = []; bytes = 0; }
+      actual.push(f);
+      bytes += n;
+    }
+    if (actual.length) trozos.push(actual);
+    for (let i = 0; i < trozos.length; i++) await this.state.storage.put("reforman:" + i, trozos[i]);
+    for (let i = trozos.length; antes && i < antes.chunks; i++) await this.state.storage.delete("reforman:" + i);
+    const meta = { cabeceras, iPrecio, total: datos.length, chunks: trozos.length, cargado: new Date().toISOString(), cargadoPor: usuario || null, nombre: nombre || "", ultimaDescarga: null };
+    await this.state.storage.put("reforman:meta", meta);
+    return Response.json({ ok: true, meta: { total: meta.total, nombre: meta.nombre } });
+  }
+
+  async reformanDescargado({ usuario }) {
+    const meta = await this.load("reforman:meta", null);
+    if (!meta) return Response.json({ ok: false }, { status: 404 });
+    meta.ultimaDescarga = { fecha: new Date().toISOString(), usuario: usuario || null };
+    await this.state.storage.put("reforman:meta", meta);
+    return Response.json({ ok: true });
+  }
+
+  async verReforman() {
+    const meta = await this.load("reforman:meta", null);
+    if (!meta) return Response.json({ ok: true, meta: null, filas: [] });
+    const valores = [];
+    for (let i = 0; i < meta.chunks; i++) valores.push(...((await this.state.storage.get("reforman:" + i)) || []));
+    // Artículos de la web: si un SKU sale dos veces (ficha LIQUIDACIÓN), vale
+    // la que tiene tarifa.
+    const index = (await this.load("preciosBezenIndex", [])).slice().sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const pb = new Map();
+    if (index.length) {
+      const d = await (await this.verPreciosBezen(index[index.length - 1].id)).json();
+      for (const f of d.filas || []) {
+        if (!f.sku) continue;
+        const k = String(f.sku).toUpperCase();
+        if (!pb.has(k) || (!pb.get(k).tarifaModelo && f.tarifaModelo)) pb.set(k, f);
+      }
+    }
+    const tablas = new Map();
+    const tabla = async (m) => {
+      if (!tablas.has(m)) {
+        let mapa = {};
+        try {
+          const j = await (await this.getTarifaTabla(m)).json();
+          mapa = Object.fromEntries((j.filas || []).map((f) => [String(f.talla).replace(",", "."), anadirColumnaReforman(f)]));
+        } catch (e) { mapa = {}; }
+        tablas.set(m, mapa);
+      }
+      return tablas.get(m);
+    };
+    const iNombre = meta.cabeceras.findIndex((h) => /^descripci/i.test(h.trim()));
+    const filas = [];
+    for (const v of valores) {
+      const sku = String(v[0]).trim();
+      let r;
+      try { r = await calcularPrecioReforman(sku, { tabla, pb }); }
+      catch (e) { r = { precio: null, como: "ERROR: " + e.message, pasos: [] }; }
+      const g = Number(v[meta.iPrecio]);
+      filas.push({ sku, descripcion: iNombre >= 0 ? String(v[iNombre] || "") : "", precioGuardado: v[meta.iPrecio] === "" || isNaN(g) ? null : g, precio: r.precio, como: r.como, pasos: r.pasos, valores: v });
+    }
+    return Response.json({ ok: true, meta, filas });
+  }
+
+  // ---- Ficheros plataformas COMPLETOS (Jennifer, 2026-11-04) ----
+  // meta: { cabeceras (las del fichero del market, en su orden), sep, total,
+  // chunks, cargado, cargadoPor, nombre, ultimaDescarga }. Las filas se
+  // guardan como listas de valores, en trozos de menos de ~100 KB (cada
+  // valor del almacenamiento tiene un límite de tamaño).
+  async leerFicheroCompleto(cliente) {
+    const meta = await this.load("ficheroCompleto:" + cliente + ":meta", null);
+    if (!meta) return { meta: null, cabeceras: [], filas: [] };
+    let filas = [];
+    for (let i = 0; i < meta.chunks; i++) filas.push(...((await this.state.storage.get("ficheroCompleto:" + cliente + ":" + i)) || []));
+    let cabeceras = meta.cabeceras;
+    // Formato del primer día (objetos con las cabeceras de Carrefour).
+    if (!cabeceras) {
+      cabeceras = CABECERAS_MIRAKL;
+      filas = filas.map((o) => cabeceras.map((h) => (o[h] === undefined || o[h] === null ? "" : String(o[h]))));
+    }
+    return { meta: { ...meta, cabeceras, sep: meta.sep || CLIENTES_FICHERO_COMPLETO[cliente].sep }, cabeceras, filas };
+  }
+
+  async guardarFilasFicheroCompleto(cliente, meta, filas) {
+    const antes = await this.load("ficheroCompleto:" + cliente + ":meta", null);
+    const trozos = [];
+    let actual = [], bytes = 0;
+    for (const f of filas) {
+      const n = JSON.stringify(f).length * 2;
+      if (actual.length && bytes + n > 100000) { trozos.push(actual); actual = []; bytes = 0; }
+      actual.push(f);
+      bytes += n;
+    }
+    if (actual.length) trozos.push(actual);
+    for (let i = 0; i < trozos.length; i++) await this.state.storage.put("ficheroCompleto:" + cliente + ":" + i, trozos[i]);
+    for (let i = trozos.length; antes && i < antes.chunks; i++) await this.state.storage.delete("ficheroCompleto:" + cliente + ":" + i);
+    const nuevo = { ...meta, total: filas.length, chunks: trozos.length };
+    await this.state.storage.put("ficheroCompleto:" + cliente + ":meta", nuevo);
+    return nuevo;
+  }
+
+  // Reemplazo completo con el CSV de importación del market (la primera vez,
+  // o cuando haya artículos nuevos).
+  async cargarFicheroCompleto(cliente, { csv, usuario, nombre }) {
+    const r = filasDesdeCsvImport(csv, cliente);
+    if (r.error) return Response.json({ ok: false, error: r.error }, { status: 400 });
+    if (!r.filas.length) return Response.json({ ok: false, error: "El fichero no trae ningún artículo." }, { status: 400 });
+    const meta = await this.guardarFilasFicheroCompleto(cliente, {
+      cabeceras: r.cabeceras, sep: r.sep, cargado: new Date().toISOString(), cargadoPor: usuario || null, nombre: nombre || "", ultimaDescarga: null,
+    }, r.filas);
+    return Response.json({ ok: true, meta: { ...meta, cabeceras: undefined } });
+  }
+
+  // Precio al día de cada fila y canal (país) con las reglas de
+  // ficheros-completos.js. salida = { columna: valor nuevo } para el CSV.
+  async calcularFicheroCompleto(cliente, cabeceras, filas) {
+    const cfg = CLIENTES_FICHERO_COMPLETO[cliente];
+    const ix = new Map(cabeceras.map((h, i) => [h.toLowerCase(), i]));
+    const val = (fila, col) => { const i = ix.get(col.toLowerCase()); return i === undefined ? "" : fila[i]; };
+    const num = (v) => (v === "" || v === null || v === undefined || isNaN(Number(v)) ? null : Number(v));
+    const decimales = filas.some((f) => cfg.canales.some((c) => /\.\d\d$/.test(val(f, c.colOferta))));
+    const fmt = (n) => (decimales ? Number(n).toFixed(2) : String(n));
+
+    const index = (await this.load("preciosBezenIndex", [])).slice().sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const pb = new Map();
+    if (index.length) {
+      const d = await (await this.verPreciosBezen(index[index.length - 1].id)).json();
+      for (const f of d.filas || []) if (f.sku) pb.set(String(f.sku).toUpperCase(), f);
+    }
+    const tablas = new Map();
+    const tabla = async (m) => {
+      if (!tablas.has(m)) {
+        let mapa = {};
+        try {
+          const j = await (await this.getTarifaTabla(m)).json();
+          mapa = Object.fromEntries((j.filas || []).map((f) => [String(f.talla).replace(",", "."), f]));
+        } catch (e) { mapa = {}; }
+        tablas.set(m, mapa);
+      }
+      return tablas.get(m);
+    };
+    const plataformas = await this.load("plataformaExportaciones", {});
+    const calcCache = new Map();
+    // columnaForzada: Alemania de Maison usa el listado de colchones de
+    // MAISON_ES (qué modelo/medida es cada SKU) pero con la columna RESTO_AL.
+    const colchonDe = (nombrePlataforma, columnaForzada) => {
+      const pc = plataformas[nombrePlataforma];
+      const colPrecio = columnaForzada || (pc && pc.columnaPrecio);
+      const colchFilas = new Map(((pc && pc.filas) || []).map((f) => [String(f.sku || "").toUpperCase(), f]));
+      return async (sku) => {
+        const f = colchFilas.get(sku);
+        if (!f) return null;
+        if (f.stockModel && f.talla) {
+          const k = f.stockModel + "|" + f.talla;
+          if (!calcCache.has(k)) calcCache.set(k, await this.calcularTarifaModelo(f.stockModel, f.talla));
+          const c = calcCache.get(k);
+          const col = c && c.columnas && c.columnas[colPrecio];
+          if (col && col.precio != null) return { precio: Number(col.precio), pasos: col.pasos || [], origen: "Fichero colchones API " + nombrePlataforma + (columnaForzada ? " (columna " + columnaForzada + ")" : "") + ": " + f.stockModel + " " + f.talla };
+        }
+        if (columnaForzada) return null;
+        return f.precioOfertaManual != null ? { precio: Number(f.precioOfertaManual), pasos: [], origen: "Precio fijo del fichero colchones API " + nombrePlataforma + " (sin fórmula en Tarifas)" } : null;
+      };
+    };
+    const claveColch = (c) => (c.colchonesDe ? c.colchonesDe + "|" + c.columna : c.plataformaColchones);
+    const colchones = new Map(cfg.canales.map((c) => [claveColch(c), c.colchonesDe ? colchonDe(c.colchonesDe, c.columna) : colchonDe(c.plataformaColchones)]));
+    const resCache = new Map();
+    const salida = [];
+    const colCantidad = cfg.colCantidad || "quantity";
+    for (const fila of filas) {
+      const skuFichero = val(fila, cfg.colSku || "sku");
+      // Worten: el SKU de oferta es el EAN → nuestro código por el nombre.
+      // (internal-description en Worten; si va vacía, el propio sku).
+      const skuNuestro = cfg.colSkuNuestro ? (String(val(fila, cfg.colSkuNuestro) || "").trim().toUpperCase() || String(skuFichero).toUpperCase())
+        : cfg.skuDesdeNombre ? skuDesdeNombreWorten(skuFichero, val(fila, cfg.colDescripcion || "description")) : null;
+      const sku = skuNuestro || skuFichero;
+      const canales = {};
+      const out = {};
+      // Artículo que gestiona Jennifer a mano: se deja tal cual.
+      if ((cfg.noTocar || []).includes(sku)) { salida.push({ sku: skuFichero, canales: {}, general: null, salida: {}, cambios: [], noTocar: true, stockGuardado: num(val(fila, colCantidad)) }); continue; }
+      for (const c of cfg.canales) {
+        // Solo los países donde la oferta ya está (Portugal sin tapicería…).
+        if (cfg.canales.length > 1 && val(fila, c.colOferta) === "") continue;
+        const k = sku + "|" + c.columna + "|" + claveColch(c);
+        if (!resCache.has(k)) {
+          let r;
+          try { r = cfg.skuDesdeNombre && !skuNuestro ? { oferta: null, tachado: null, como: "SIN TARIFA: no se reconoce el modelo por el nombre", pasos: [{ label: "No se ha podido saber qué modelo/medida es este EAN por el nombre del producto: se queda el último precio guardado", valor: null }] } : await calcularPrecioOferta(sku, { columna: c.columna, tabla, pb, colchon: colchones.get(claveColch(c)), tachado: cfg.tachado, redondeo: cfg.redondeo }); }
+          catch (e) { r = { oferta: null, tachado: null, como: "ERROR: " + e.message, pasos: [] }; }
+          resCache.set(k, r);
+        }
+        const r = { ...resCache.get(k), pasos: [...(resCache.get(k).pasos || [])] };
+        const tachadoGuardado = num(val(fila, c.colTachado));
+        // Nunca más barato que otros países (Jennifer, 2026-11-04: "los precios
+        // de Alemania no pueden ser en ningún caso más baratos que los de
+        // Francia o de Italia").
+        if (r.oferta != null && c.noMenosQue) {
+          const refs = c.noMenosQue.map((id) => [id, canales[id]]).filter(([, x]) => x).map(([id, x]) => [id, x.oferta != null ? x.oferta : x.ofertaGuardada]).filter(([, p]) => p != null);
+          const top = refs.reduce((m, x) => (m && m[1] >= x[1] ? m : x), null);
+          if (top && r.oferta < top[1]) {
+            const pais = (cfg.canales.find((x) => x.id === top[0]) || {}).pais || top[0];
+            r.pasos = r.pasos.filter((p) => !p.destacado);
+            r.pasos.push({ label: "Tarifas da " + r.oferta + ", más barato que " + pais + ": nunca puede ser más barato que " + c.noMenosQue.map((id) => (cfg.canales.find((x) => x.id === id) || {}).pais || id).join(" ni ") + " → se iguala a " + pais, valor: top[1], destacado: true });
+            r.oferta = top[1];
+            r.como = (r.como || "") + " · igualado a " + pais;
+          }
+        }
+        // Tachado según la norma actual del fichero (Leroy, Jennifer 2026-11-04).
+        if (r.oferta != null && cfg.tachado === "fuera") {
+          const minimo = Math.ceil(r.oferta / 0.7 - 1e-6);
+          const m = /(\d{2,3})X\d{3}/i.exec(sku) || /(\d{2,3})$/.exec(sku);
+          const esColchon = !/^(M?)(CAN|BASE|PACK|CAB|2?ALM|TOPPER)/i.test(sku);
+          const div = (c.tachadoModo === "ancho" || (c.tachadoModo === "anchoColchones" && esColchon)) && m ? tarifaTachadoDivisor(m[1]) : null;
+          if (div) {
+            r.tachado = Math.max(round2(r.oferta / div), minimo);
+            r.pasos.push({ label: "Precio tachado = oferta ÷ " + String(div).replace(".", ",") + " (regla por ancho, como el fichero de colchones API)" + (r.tachado === minimo && round2(r.oferta / div) < minimo ? ", subido para que la oferta quede un 30 % por debajo" : ""), valor: r.tachado, destacado: true });
+          } else if (tachadoGuardado != null && tachadoGuardado >= minimo) {
+            r.tachado = tachadoGuardado;
+            r.pasos.push({ label: "Precio tachado: se mantiene el actual (la oferta queda un " + Math.round((1 - r.oferta / tachadoGuardado) * 100) + " % por debajo)", valor: r.tachado, destacado: true });
+          } else {
+            r.tachado = minimo;
+            r.pasos.push({ label: "Precio tachado = oferta ÷ 0,70, redondeado al alza" + (tachadoGuardado != null ? " (el actual, " + tachadoGuardado + ", dejaba menos de un 30 % de descuento)" : ""), valor: r.tachado, destacado: true });
+          }
+        }
+        if (skuNuestro && skuNuestro !== String(skuFichero).toUpperCase() && r.pasos.length) r.pasos = [{ label: "EAN " + skuFichero + " = " + skuNuestro + (cfg.colSkuNuestro ? " (columna " + cfg.colSkuNuestro + ")" : " (por el nombre del producto)"), valor: null }, ...r.pasos];
+        canales[c.id] = { ...r, ofertaGuardada: num(val(fila, c.colOferta)), tachadoGuardado };
+        if (r.oferta != null) {
+          out[c.colTachado] = fmt(r.tachado); out[c.colOferta] = fmt(r.oferta);
+          // Worten: precio por canal y de descuento = la oferta.
+          for (const col of c.colIguales || []) out[col] = fmt(r.oferta);
+          for (const col of c.colIgualesSiHay || []) if (val(fila, col) !== "") out[col] = fmt(r.oferta);
+        }
+      }
+      let general = null;
+      if (cfg.general) {
+        const g = cfg.general;
+        // Se mantiene el precio general actual; solo sube si alguna oferta
+        // quedaría a menos de un 30 % por debajo.
+        const ofertas = cfg.canales.filter((c) => canales[c.id]).map((c) => (canales[c.id].oferta != null ? canales[c.id].oferta : canales[c.id].ofertaGuardada)).filter((x) => x != null);
+        const minimo = ofertas.length ? Math.ceil(Math.max(...ofertas) / 0.7 - 1e-6) : null;
+        const tachadoGuardado = num(val(fila, g.colTachado));
+        const base = canales[g.canalOferta];
+        general = {
+          tachadoGuardado, ofertaGuardada: num(val(fila, g.colOferta)), minimo,
+          tachado: tachadoGuardado != null && (minimo == null || tachadoGuardado >= minimo) ? tachadoGuardado : minimo,
+          oferta: base && base.oferta != null ? base.oferta : null,
+        };
+        // Conforama: el precio general es siempre el tachado de su canal.
+        if (g.igualAlCanal && canales[g.igualAlCanal]) {
+          const cc = canales[g.igualAlCanal];
+          general.tachado = cc.oferta != null ? cc.tachado : cc.tachadoGuardado;
+          general.igualAlCanal = true;
+        }
+        if (general.tachado != null) out[g.colTachado] = fmt(general.tachado);
+        // Maison: sin oferta general (la columna va vacía en su fichero).
+        if (g.sinOferta) general.oferta = null;
+        // Worten: la oferta general solo donde ya la hay (almohadas sin ella).
+        else if (general.oferta != null && !(g.ofertaSiHay && val(fila, g.colOferta) === "")) out[g.colOferta] = fmt(general.oferta);
+        // Precio sin IVA (Maison, Jennifer 2026-11-04): "es el precio sin IVA
+        // de la columna W" = price[channel=ES] ÷ 1,21. Siempre (en tapicería
+        // el fichero traía valores que no cuadraban).
+        if (g.colSinIva && canales.ES) {
+          const tES = canales.ES.oferta != null ? canales.ES.tachado : canales.ES.tachadoGuardado;
+          if (tES != null) out[g.colSinIva] = (Math.round(tES / 1.21 * 100) / 100).toFixed(2);
+        }
+      }
+      // Stock: vivos siempre a 100, descatalogados a 0 (Jennifer, 2026-11-04).
+      // stockCero: no se venden en este market aunque estén vivos en otros
+      // (Conforama Francia: COLGRA a 0, como en su fichero API).
+      const descatalogado = esDescatalogado(sku) || (cfg.stockCero || []).some((p) => String(sku).toUpperCase().startsWith(p));
+      if (ix.has(colCantidad.toLowerCase())) out[colCantidad] = String(descatalogado ? 0 : STOCK_VIVO);
+      const cambios = Object.entries(out).filter(([col, v]) => num(val(fila, col)) !== num(v)).map(([col]) => (col === colCantidad ? "quantity" : col));
+      salida.push({ sku: skuFichero, skuNuestro: skuNuestro && skuNuestro !== String(skuFichero).toUpperCase() ? skuNuestro : null, canales, general, salida: out, cambios, descatalogado, stockGuardado: num(val(fila, colCantidad)) });
+    }
+    return salida;
+  }
+
+  async verFicheroCompleto(cliente) {
+    const cfg = CLIENTES_FICHERO_COMPLETO[cliente];
+    const base = { ok: true, cliente, nombre: cfg.nombre, canales: cfg.canales.map((c) => ({ id: c.id, pais: c.pais, columna: c.columna })), general: !!cfg.general };
+    const { meta, cabeceras, filas } = await this.leerFicheroCompleto(cliente);
+    if (!meta) return Response.json({ ...base, meta: null, filas: [] });
+    const calculo = await this.calcularFicheroCompleto(cliente, cabeceras, filas);
+    const colDesc = (cfg.colDescripcion || "description").toLowerCase();
+    const iDesc = cabeceras.findIndex((h) => h.toLowerCase() === colDesc);
+    return Response.json({
+      ...base, meta: { ...meta, cabeceras: undefined }, cabeceras,
+      filas: filas.map((f, i) => ({ valores: f, description: iDesc >= 0 ? f[iDesc] : "", ...calculo[i] })),
+    });
+  }
+
+  // CSV de importación con los precios al día (sin tarifa → último precio
+  // guardado). Lo descargado pasa a ser el "último descargado" de cada fila.
+  async csvFicheroCompleto(cliente, usuario) {
+    const cfg = CLIENTES_FICHERO_COMPLETO[cliente];
+    const { meta, cabeceras, filas } = await this.leerFicheroCompleto(cliente);
+    if (!meta) return Response.json({ ok: false, error: "Todavía no hay fichero guardado para este cliente." }, { status: 404 });
+    const calculo = await this.calcularFicheroCompleto(cliente, cabeceras, filas);
+    const ix = new Map(cabeceras.map((h, i) => [h.toLowerCase(), i]));
+    const nuevas = filas.map((f, i) => {
+      const n = f.slice();
+      for (const [col, v] of Object.entries(calculo[i].salida)) { const j = ix.get(col.toLowerCase()); if (j !== undefined) n[j] = v; }
+      return n;
+    });
+    const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+    await this.guardarFilasFicheroCompleto(cliente, { ...meta, ultimaDescarga: { fecha: new Date().toISOString(), usuario: usuario || null } }, nuevas);
+    const nombre = cfg.nombre.toUpperCase() + " ofertas (import) " + hoy + ".csv";
+    return new Response(toCsv([cabeceras, ...nuevas], meta.sep || cfg.sep), {
+      headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": "attachment; filename=\"" + nombre + "\"" },
+    });
+  }
+
   async getTarifaTabla(stockModel) {
     const products = await this.load("products", {});
-    const product = activeProducts(products).find((p) => p.stockModel === stockModel);
+    const product = productoDeTarifa(products, stockModel);
     if (!product) return Response.json({ ok: false, error: "Modelo no encontrado." }, { status: 404 });
     // Unión con TARIFA_TALLAS_EXTRA_MODELO (tallas que no son variante real
     // de Shopify pero sí se venden en otros marketplaces, ver arriba).
@@ -5158,7 +6788,7 @@ export class InventoryStore {
     });
   }
 
-  async processSale({ orderId, orderNumber, platform, orderRef, items, force, orderDate, services, paymentStatus, seurSplitDecision }) {
+  async processSale({ orderId, orderNumber, platform, orderRef, items, force, orderDate, services, paymentStatus, seurSplitDecision, agenciaForzada }) {
     // Mientras el catálogo/stock no esté configurado del todo, Jennifer
     // pidió no tocar los pedidos que van entrando (ni agencia ni stock).
     // Cuando esté todo listo, un POST a /admin/resume lo reactiva y los
@@ -5229,6 +6859,10 @@ export class InventoryStore {
     // puede salir con Seur". Y los complementos (almohadas, protector) van
     // en el mismo envío, que Furniture no los cobra aparte.
     if (tieneServicioSubidaRetirada(services)) agencia = "FURNITURE";
+    // Pedido de un envío conjunto (Jennifer, 2026-11-05, BEZEN12395 junto
+    // con BEZEN12381): sale con el otro pedido por Furniture, así que no hay
+    // decisión de SEUR (dividir/esperar) que tomar.
+    if (agenciaForzada === "FURNITURE") agencia = "FURNITURE";
 
     // Caso sin regla fija posible (Jennifer, 2026-08-25): un colchón suelto
     // (no parte del pack) que comparte pedido con tapicería. No hay forma
@@ -5280,6 +6914,7 @@ export class InventoryStore {
     // stock). El "mixto" que para y pregunta sigue siendo solo de colchones
     // (colchonesSueltos, más arriba) — eso no cambia.
     let seurCubierto = 0;
+    const stockTapiceria = await this.load("stockTapiceria", []);
 
     for (const item of flat) {
       const isStockTracked = STOCK_TYPES.has(item.tipo);
@@ -5311,6 +6946,21 @@ export class InventoryStore {
         // siempre crea un pendiente, así que se genera aquí sin riesgo de
         // desperdiciar números.
         let referencia = null;
+        // Ya está en el almacén (stock de tapicería, Jennifer, 2026-10-20):
+        // se coge esa unidad con su referencia y no se pide a fábrica.
+        const deStockTap = item.tipo === "tapiceria" && item.qty === 1
+          ? buscarStockTapiceria(stockTapiceria, backorders, item.product.stockModel, item.talla, item.color) : null;
+        if (deStockTap) {
+          this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, deStockTap.referencia || null, "DEL STOCK DE TAPICERÍA" + (deStockTap.referencia ? " (" + deStockTap.referencia + ")" : "") + " — ya en el almacén, no pedir a fábrica" + (deStockTap.nota ? " · " + deStockTap.nota : ""), platform, orderRef);
+          const bo = backorders.find((b) => b.id === `${orderId}-${stockKey(item.product.stockModel, item.talla)}`);
+          if (bo) {
+            bo.estado = "cubierto";
+            bo.recibidoFabrica = true;
+            bo.fechaRecibido = new Date().toISOString();
+            bo.stockTapiceriaId = deStockTap.id;
+          }
+          continue;
+        }
         if (proveedor === "POLIVAL") {
           const numero = await nextReferenciaNumero(this.state);
           const vaFurniture = item.tipo === "tapiceria" || item.product.exceptionFurniture || agencia === "FURNITURE";
@@ -5356,6 +7006,8 @@ export class InventoryStore {
             needsReview = true;
             reviewReasons.push(built.reason);
           }
+        } else if (proveedor === "POLIVAL" && item.product.product_type === "Base" && platform === "Groupon") {
+          mercanciaFabrica = buildBaseGrouponMercancia(item.product.stockModel, item.talla).texto;
         }
         this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica, platform, orderRef);
         // Canapé de 160 que no es de madera: Polival necesita saber si va en
@@ -5375,6 +7027,17 @@ export class InventoryStore {
               bo.formato160 = "PARTIDO";
               bo.mercanciaFabrica = textoConFormato160(bo.mercanciaFabrica, "PARTIDO");
             }
+          }
+        }
+        // Pieza suelta del almacén (Jennifer, 2026-10-20): se usa, se avisa
+        // en el pedido y en el pedido a Polival va la nota para revisarla.
+        if (item.tipo === "tapiceria" && item.qty === 1) {
+          const piezas = buscarPiezasStockTapiceria(stockTapiceria, backorders, item.product.stockModel, item.talla, item.color);
+          const bo = piezas.length ? backorders.find((b) => b.id === `${orderId}-${stockKey(item.product.stockModel, item.talla)}`) : null;
+          if (bo) {
+            usarPiezasStock(bo, piezas);
+            needsReview = true;
+            reviewReasons.push("OJO: he usado una pieza suelta del almacén para " + item.product.stockModel + " " + item.talla + (item.color ? " " + item.color : "") + ": " + bo.piezasStockTexto.join(", ") + ". En el pedido a Polival va la nota para que la revisen en fábrica y no la fabriquen si está bien.");
           }
         }
         if (item.tipo === "colchon" && item.fromPack && hasTapiceria) {

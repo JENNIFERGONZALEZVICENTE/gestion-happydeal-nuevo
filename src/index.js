@@ -1,9 +1,12 @@
 export { OrdersStore } from "./orders-store.js";
 export { InventoryStore } from "./inventory-store.js";
 import { parseCabeceroVariant, matchCabeceroRecipeKey, CABECERO_RECIPES, findBestPrefixMatch, PREGUNTA_FORMATO_160 } from "./inventory-store.js";
-import { etiquetaTransformacionPdf, resumenSeurPdf } from "./etiqueta-pdf.js";
+import { etiquetaTransformacionPdf, resumenSeurPdf, base64DeBytes, etiquetaNacexPdf } from "./etiqueta-pdf.js";
 import { CP_MONTANA, CP_REMOTA } from "./cp-montana.js";
 import { enviarEmailAlmacen, llamarScriptSeur, enviarReservaAlmacen, bultosPorUnidad, lineaTextoReserva, fechaHoyEs, referenciaPedidoAlmacen, modeloCorto } from "./avisos-almacen.js";
+import { LOGO_PRESUPUESTO_PNG_BASE64 } from "./presupuesto-logo.js";
+import { PLANTILLA_MATERIAL_SEUR_B64, PLANTILLA_MATERIAL_SEUR_NOMBRE } from "./plantilla-material-seur.js";
+import { paginaPresupuesto, paginaNoDisponible, elegirResena, resenasDeHtml } from "./presupuesto-publico.js";
 
 // Interruptor de Fase 2 de cada "marketplace" (Carrefour, Jennifer,
 // 2026-09-17, activado parcialmente 2026-09-19; generalizado el mismo día
@@ -70,6 +73,9 @@ const PROCESAMIENTO_DESDE = {
   // metió a mano. Antes: "2099-12-31" (desactivado ese mismo día) y antes
   // "2026-06-24".
   "Leroy Merlin": "2026-09-28",
+  // Groupon (Jennifer, 2026-10-16): "SI TRAMITARLOS TODOS" — activado con el
+  // primer fichero (pedidos del 24/09 al 01/10, sin enviar).
+  Groupon: "2026-09-24",
 };
 // Prefijo del id interno por plataforma (para no chocar entre sí ni con los
 // pedidos de Shopify, que usan el id numérico real de Shopify tal cual).
@@ -80,6 +86,7 @@ const MARKETPLACE_ID_PREFIX = {
   Conforama: "CFM",
   "Conforama ES": "CFES",
   "Leroy Merlin": "LM",
+  Groupon: "GRP",
 };
 // id de PLATFORMS (y de las rutas /api/<id>/...) -> nombre real de
 // plataforma tal como se guarda en order.platform.
@@ -90,6 +97,7 @@ const MARKETPLACE_PLATFORM_BY_ID = {
   conforama: "Conforama",
   "conforama-es": "Conforama ES",
   "leroy-merlin": "Leroy Merlin",
+  groupon: "Groupon",
 };
 function marketplaceFechaDesde(orderDateStr, cutoffIso) {
   const m = String(orderDateStr || "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
@@ -213,11 +221,53 @@ function mapOrder(order, catalogMap) {
     // product_id null. Solo la línea real (con product_id) sirve para
     // resolver categoría/stock/agencia.
     if (item.product_id != null) {
+      // Lo pagado por la línea, con IVA y descuentos ya restados (Jennifer,
+      // 2026-10-20: margen bruto de cada venta de la web).
+      const descuento = (item.discount_allocations || []).reduce((s, d) => s + Number(d.amount || 0), 0);
       items.push({
         productId: item.product_id,
         sku: item.sku || "",
         variantTitle: item.variant_title || "",
         qty: item.quantity || 1,
+        pagado: Math.round((Number(item.price || 0) * (item.quantity || 1) - descuento) * 100) / 100,
+      });
+    }
+  }
+  // Pedidos antiguos cuyo producto se borró después de Shopify (Jennifer,
+  // 2026-11-13, BEZEN4474 de 01/2024): TODAS las líneas llegan con
+  // product_id null y el pedido se quedaba sin artículos (no se podía
+  // reponer). Solo si no hay ninguna línea real, se resuelve cada línea
+  // contra el Catálogo actual: primero por SKU, si no por el nombre del
+  // modelo contenido en el título de la línea (el más largo que case).
+  if (catalogMap && !items.some((it) => it.productId != null)) {
+    const catalogo = Object.values(catalogMap);
+    const norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    for (const item of order.line_items || []) {
+      if (item.product_id != null) continue;
+      let productId = null;
+      let talla = "";
+      if (item.sku) {
+        const m = findBestPrefixMatch(item.sku, catalogMap);
+        if (m) { productId = m.product.productId; talla = m.talla || ""; }
+      }
+      if (productId == null) {
+        const tituloLinea = norm(item.title);
+        let mejor = null;
+        for (const p of catalogo) {
+          const modelo = norm(String(p.title || p.stockModel || "").split("|").pop());
+          if (modelo.length >= 6 && tituloLinea.includes(modelo) && (!mejor || modelo.length > mejor.len)) mejor = { p, len: modelo.length };
+        }
+        if (mejor) productId = mejor.p.productId;
+      }
+      if (productId == null) continue;
+      const descuento = (item.discount_allocations || []).reduce((s, d) => s + Number(d.amount || 0), 0);
+      items.push({
+        productId,
+        sku: item.sku || "",
+        variantTitle: item.variant_title || talla || "",
+        qty: item.quantity || 1,
+        pagado: Math.round((Number(item.price || 0) * (item.quantity || 1) - descuento) * 100) / 100,
+        productoBorradoShopify: true,
       });
     }
   }
@@ -487,6 +537,30 @@ async function shopifyFulfillOrder(env, { orderId, trackingNumber, trackingUrl, 
   const abierto = (fulfillment_orders || []).find(
     (fo) => fo.status === "open" && fo.line_items.some((li) => !(lineItemsInfo.get(li.line_item_id) || {}).esFantasma)
   );
+  // Producto borrado de Shopify (Jennifer, 2026-10-28, caso real BEZEN12298,
+  // canapé de LIQUIDACIÓN): su línea queda sin product_id y parecía una línea
+  // "fantasma", así que el pedido nunca se marcaba como enviado. Si el pedido
+  // no tiene NINGUNA línea con producto, la fulfillment order abierta es la
+  // de verdad y se marca entera.
+  if (!abierto && lineItemsInfo.size && ![...lineItemsInfo.values()].some((i) => !i.esFantasma)) {
+    const unica = (fulfillment_orders || []).find((fo) => fo.status === "open");
+    if (unica) {
+      const r = await fetch(`https://${env.SHOPIFY_SHOP_DOMAIN}/admin/api/2026-07/fulfillments.json`, {
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN, "content-type": "application/json" },
+        body: JSON.stringify({
+          fulfillment: {
+            line_items_by_fulfillment_order: [{ fulfillment_order_id: unica.id }],
+            tracking_info: { number: trackingNumber, url: trackingUrl, company },
+            notify_customer: true,
+          },
+        }),
+      });
+      if (!r.ok) return { ok: false, orderId, reason: "fulfillment_create_error", detail: await r.text() };
+      const { fulfillment } = await r.json();
+      return { ok: true, orderId, fulfillmentId: fulfillment && fulfillment.id };
+    }
+  }
   if (!abierto) return { ok: false, orderId, reason: "sin_fulfillment_order_abierto" };
 
   const realLineItems = abierto.line_items.filter((li) => !(lineItemsInfo.get(li.line_item_id) || {}).esFantasma);
@@ -705,7 +779,54 @@ function referenceDigits(ref) {
 // Carrefour 76257042-A) para poder llamarlo una vez por artículo cuando un
 // mismo pedido trae varios colchones distintos, en vez de una sola vez
 // para todo el pedido.
+// Código de color dentro del SKU del canapé de tela ("MCANTEL" + color +
+// medida). Solo los códigos confirmados por Jennifer.
+const COLOR_SKU_CANAPE_TELA = { BEIGE: "Beige" };
+function colorDesdeSkuCanapeTela(sku) {
+  const m = String(sku || "").toUpperCase().match(/^M?CANTEL([A-Z]+?)\d{2,3}X\d{2,3}/);
+  return (m && COLOR_SKU_CANAPE_TELA[m[1]]) || "";
+}
+
+// Packs de marketplace (Jennifer, 2026-11-11, Carrefour 76758034-A,
+// "MPACKCANPOLNEGN+COLLOU+ALMNOR135X200"): un código con "+" son varias
+// piezas. findBestPrefixMatch salta las fichas Pack y se quedaba con UNA
+// pieza suelta (la almohada); ahora el artículo apunta a una ficha Pack del
+// catálogo con el código entero, y processSale lo descompone igual que un
+// pack de Shopify (resolvePackSku). La "M" delante = con montaje.
+const NOR_PACK_RE = /^(\d*)NOR(\d+)$/i;
+function resolverPackMarketplace(e, skuPack, catalogMap) {
+  const sku = String(skuPack).trim();
+  const segmentos = sku.split("-")[0].split("+").map((x) => x.trim()).filter(Boolean);
+  if (segmentos.length < 2) return null;
+  const piezas = segmentos.map((seg) => (NOR_PACK_RE.test(seg) ? { product: { product_type: "Almohada" }, talla: "" } : findBestPrefixMatch(seg, catalogMap)));
+  if (piezas.filter(Boolean).length < 2) return null;
+  const packs = Object.values(catalogMap).filter((p) => p.product_type === "Pack" && !p.excluido);
+  const skuUp = sku.toUpperCase();
+  const conPrefijo = packs.filter((p) => p.skuPrefix && skuUp.includes(String(p.skuPrefix).toUpperCase()));
+  // Entre las fichas de pack con ese prefijo, la que comparte más palabras
+  // con el colchón del código (ej. Ergo-Relax Plus → "...Colchón Viscoelástico Ergo Relax").
+  const palabras = (t) => new Set(String(t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !["colchon", "pack", "canape", "abatible", "tapizado", "doble", "cara", "gran", "capacidad", "hotel", "alta", "resistencia", "hibrido", "muelles", "ensacados"].includes(w)));
+  const colchon = piezas.find((m) => m && m.product.product_type === "Colchones");
+  const clave = colchon ? palabras(colchon.product.stockModel || colchon.product.title) : new Set();
+  const puntos = (p) => [...palabras(p.stockModel || p.title)].filter((w) => clave.has(w)).length;
+  const candidatos = conPrefijo.length ? conPrefijo : packs;
+  const pack = candidatos.slice().sort((a, b) => puntos(b) - puntos(a))[0];
+  if (!pack) return null;
+  const tallaPieza = (piezas.find((m) => m && m.product.product_type === "Colchones" && m.talla) || piezas.find((m) => m && m.talla) || {}).talla || "";
+  const talla = extractTallaFromText(e.product) || tallaPieza;
+  const color = extractColorFromText(e.product) || "";
+  const variantTitle = color ? color + " / " + talla : talla;
+  const TAPICERIA = new Set(["Canapé", "Canapé fijo", "Base", "Cabecero"]);
+  const montaje = /^M/i.test(sku) && piezas.some((m) => m && TAPICERIA.has(m.product.product_type));
+  return { item: { productId: pack.productId, sku, variantTitle, qty: e.qty || 1 }, skuMostrado: sku, matched: true, montaje };
+}
+
 function resolveMarketplaceItem(e, catalogMap) {
+  const skuPack = [e.sku, e.skuOferta].find((x) => x && String(x).includes("+"));
+  if (skuPack) {
+    const pack = resolverPackMarketplace(e, skuPack, catalogMap);
+    if (pack) return pack;
+  }
   let match = e.sku ? findBestPrefixMatch(e.sku, catalogMap) : null;
   let skuUsado = match ? e.sku : null;
   // Segundo intento por "SKU de la oferta" (Jennifer, 2026-09-21, Conforama:
@@ -736,7 +857,11 @@ function resolveMarketplaceItem(e, catalogMap) {
   // se antepone a la talla con el mismo formato "Color / Talla" que ya usa
   // Shopify en variant_title, para poder reusar tal cual extractColor() en
   // inventory-store.js sin duplicar esa lógica aquí.
-  const colorTexto = match ? extractColorFromText(e.product) : "";
+  // Si el texto no lo dice (Leroy Merlin: "Canapé abatible tela, gran
+  // capacidad…"), el color del canapé de tela va en el propio código:
+  // MCANTELBEIGE140X190 → Beige → SPACE DELUXE en Duna Alpaca (Jennifer,
+  // 2026-10-19).
+  const colorTexto = match ? (extractColorFromText(e.product) || colorDesdeSkuCanapeTela(skuUsado || e.sku)) : "";
   const variantTitle = colorTexto ? `${colorTexto} / ${match.talla || ""}` : (match ? match.talla || "" : "");
   const item = match
     ? { productId: match.product.productId, sku: skuMostrado || "", variantTitle, qty: e.qty || 1 }
@@ -807,6 +932,70 @@ function comprobarTiendaFichero(orders, platform, existentes) {
   };
 }
 
+// GROUPON — email "PEDIDOS EXCLUIDOS DE PENALIZACIÓN" (Jennifer, 2026-10-16):
+// un email por cada pedido de Groupon con tapicería, al subir el fichero, a
+// recoveries@groupon.com y contabilidad@colchonesbezen.com (destinatarios
+// fijos en el Apps Script, acción "groupon-penalizacion"), desde la cuenta de
+// Jennifer. Asunto: "PEDIDOS EXCLUIDOS DE PENALIZACIÓN <nº columna A>".
+// Columnas: ORDER ID, CH ORDER DATE, PRODUCT NAME, DEAL ID
+// (deal_opportunity_id), CHANNEL SKU, SHIP METHOD (Jennifer quitó STATUS y
+// SHIP STATUS). Solo pedidos con fecha >= GROUPON_EMAIL_DESDE que aún no lo
+// tengan (order.emailPenalizacion). "2099-12-31" = apagado.
+// Encendido 16/10 (Jennifer: "está perfecto" tras la prueba): pedidos desde
+// el 02/10, es decir, todo lo que no estaba ya metido (los 7 primeros son del
+// 24/09 al 01/10; pendiente de que diga si esos llevan email).
+const GROUPON_EMAIL_DESDE = "2026-10-02";
+const PREGUNTA_GROUPON_ECO = "Pedido ECO de Groupon: todavía NO se ha tramitado (ni stock ni proveedores). Revisa qué lleva y contesta aquí; al contestar se tramita. ECO-NATURE = canapé SPACE de Polival + colchón PLANET 20 cm sin visco de Polival, en la medida del pedido.";
+// CHANNEL SKU = groupon_sku (confirmado por Jennifer).
+const GROUPON_CHANNEL_SKU_CAMPO = "grouponSku";
+const TEXTO_PENALIZACION_GROUPON = "Buenos días,\n\nLos siguientes pedidos han de ser excluidos de penalización ya que serán enviados con agencia especial para productos voluminosos y los clientes son citados en una fecha en la que a ellos les convenga.\nSolicitamos por lo tanto que queden exentos de penalización tal y como llevamos haciendo desde 2022.";
+function pedidoConTapiceria(o, catalogMap) {
+  const tipos = new Set(["Canapé", "Canapé fijo", "Base", "Cabecero"]);
+  return (o.items || []).some((it) => {
+    const p = catalogMap[it.productId];
+    return p && (tipos.has(p.product_type) || (p.product_type === "Pack" && /canap|base|cabecer|somier/i.test(p.title || "")));
+  });
+}
+function fechaIsoMarketplace(s) {
+  const m = String(s || "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  return m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : "";
+}
+function emailPenalizacionGroupon(o) {
+  const g = o.grouponDatos || {};
+  const cols = [["ORDER ID", o.orderRef], ["CH ORDER DATE", g.orderDate], ["PRODUCT NAME", g.productName || o.product], ["DEAL ID", g.dealOpportunityId], ["CHANNEL SKU", g[GROUPON_CHANNEL_SKU_CAMPO]], ["SHIP METHOD", g.shipMethod]];
+  const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const celda = "border:1px solid #999;padding:4px 8px;font-family:Arial,sans-serif;font-size:13px";
+  const html = TEXTO_PENALIZACION_GROUPON.split("\n").map((l) => (l ? "<p style=\"margin:0 0 6px\">" + esc(l) + "</p>" : "")).join("")
+    + "<table style=\"border-collapse:collapse;margin-top:12px\"><tr>" + cols.map((c) => "<th style=\"" + celda + ";background:#eee\">" + c[0] + "</th>").join("") + "</tr><tr>"
+    + cols.map((c) => "<td style=\"" + celda + "\">" + esc(c[1]) + "</td>").join("") + "</tr></table>";
+  const texto = TEXTO_PENALIZACION_GROUPON + "\n\n" + cols.map((c) => c[0]).join("\t") + "\n" + cols.map((c) => c[1] || "").join("\t");
+  return { asunto: "PEDIDOS EXCLUIDOS DE PENALIZACIÓN " + o.orderRef, texto, html };
+}
+async function enviarEmailsPenalizacionGroupon(env, stub, catalogMap, desde) {
+  const todos = await (await stub.fetch("https://do/orders")).json();
+  const candidatos = todos.filter((o) => o.platform === "Groupon" && !o.cancelado && !(o.emailPenalizacion && o.emailPenalizacion.fecha)
+    && fechaIsoMarketplace(o.orderDate) >= (desde || GROUPON_EMAIL_DESDE) && pedidoConTapiceria(o, catalogMap));
+  const enviados = [];
+  const errores = [];
+  for (const o of candidatos) {
+    const r = await llamarScriptSeur(env, "groupon-penalizacion", emailPenalizacionGroupon(o));
+    if (r.ok && r.groupon) {
+      enviados.push(o.orderRef);
+      await stub.fetch("https://do/orders/meta", { method: "POST", body: JSON.stringify({ id: o.id, emailPenalizacion: { fecha: new Date().toISOString() } }) });
+    } else if (/^respuesta_no_json/.test(r.error || "")) {
+      // Google respondió raro pero el email suele haber salido (16/10, pedido
+      // 1182173613: sí estaba en Enviados). Se marca como enviado "dudoso"
+      // para NO mandarlo dos veces a Groupon; se avisa para comprobarlo.
+      errores.push(o.orderRef + ": respuesta rara de Google, seguramente SÍ se envió — compruébalo en Enviados (no se reenvía)");
+      await stub.fetch("https://do/orders/meta", { method: "POST", body: JSON.stringify({ id: o.id, emailPenalizacion: { fecha: new Date().toISOString(), dudoso: true } }) });
+    } else {
+      errores.push(o.orderRef + ": " + (r.error || "sin respuesta"));
+      if (r.error === "script_sin_actualizar" || r.error === "sin_configurar") break;
+    }
+  }
+  return { enviados, errores };
+}
+
 function mapMarketplaceOrder(entriesGrupo, catalogMap, platform) {
   const first = entriesGrupo[0];
   const items = [];
@@ -872,6 +1061,7 @@ function mapMarketplaceOrder(entriesGrupo, catalogMap, platform) {
     // "Fecha límite de envío" de Mirakl (Jennifer, 2026-09-29): hasta
     // cuándo hay que dar el seguimiento al cliente.
     limiteEnvio: first.limiteEnvio || "",
+    ...(first.grouponDatos ? { grouponDatos: first.grouponDatos } : {}),
   };
 }
 
@@ -957,10 +1147,14 @@ async function handleUpdateMeta(request, env) {
   const body = await request.json();
   const id = env.ORDERS_STORE.idFromName("shopify");
   const stub = env.ORDERS_STORE.get(id);
-  return stub.fetch("https://do/orders/meta", {
+  const res = await stub.fetch("https://do/orders/meta", {
     method: "POST",
     body: JSON.stringify(body),
   });
+  if (res.ok && body && typeof body.notas === "string" && RE_TODO_JUNTO.test(body.notas)) {
+    await aplicarNotasTodoJunto(env, body.id).catch(() => null);
+  }
+  return res;
 }
 
 async function handleReviewNote(request, env) {
@@ -1038,6 +1232,45 @@ async function reservarStockManual(env, entry, { agencia, fechaSalida } = {}) {
     bultos = bultosPorUnidad(entry);
   }
   return enviarReservaAlmacen(env, { pedido, cliente, lineasTexto: [lineaTextoReserva(entry)], bultos, agencia, fechaSalida });
+}
+
+// Fotos para SEUR (Jennifer, 2026-10-23): ya subidas con /api/seur/factura
+// (mismo almacén que las facturas); aquí se leen para adjuntarlas al correo.
+async function adjuntosSeur(env, ids) {
+  const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  const out = [];
+  for (const id of (Array.isArray(ids) ? ids : []).slice(0, 10)) {
+    const res = await stub.fetch("https://do/orders/factura?id=" + encodeURIComponent(id));
+    if (!res.ok) continue;
+    const nombre = ((res.headers.get("content-disposition") || "").match(/filename="([^"]*)"/) || [])[1] || "foto.jpg";
+    out.push({ id, nombre, tipo: res.headers.get("content-type") || "image/jpeg", base64: base64DeBytes(new Uint8Array(await res.arrayBuffer())) });
+  }
+  return out;
+}
+
+// ¿Le toca reserva automática al almacén a este artículo recién recibido?
+// Colchón FUR, o almohada/topper/protector (Jennifer, 2026-10-01 y 10-08).
+function esReservaAutomatica(entry) {
+  const tipoOk = entry.tipo === "colchon" ? entry.tipoEnvio === "FUR" : ["almohada", "topper", "protector"].includes(entry.tipo);
+  return tipoOk && entry.recibidoFabrica && !entry.reservaEnviada && !entry.reposicion && !entry.gestoComercial && !entry.envioAparte;
+}
+
+// Manda el email de reserva si el pedido todavía espera otro artículo
+// (incluida la otra parte de una recepción parcial).
+async function reservaAutomaticaTrasRecibir(env, entry) {
+  const backorders = await inventoryStub(env).fetch("https://do/backorders").then((r) => r.json());
+  const resto = backorders.filter((b) => String(b.orderId) === String(entry.orderId) && b.id !== entry.id
+    && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial && !b.envioAparte
+    && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
+  if (resto.some((b) => !b.recibidoFabrica)) {
+    const avisoReserva = await reservarStockManual(env, entry);
+    if (avisoReserva.ok) {
+      await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(entry.id) + "/reserva-enviada", { method: "POST", body: "{}" });
+      entry.reservaEnviada = new Date().toISOString();
+    }
+    entry.avisoReserva = avisoReserva;
+  }
+  return entry;
 }
 
 async function proxyInventory(env, path, request) {
@@ -1120,6 +1353,10 @@ const PLATFORMS = [
   // se llama simplemente "Conforama", sin sufijo, para no crear confusión.
   { id: "conforama", label: "Conforama", ready: true },
   { id: "leroy-merlin", label: "Leroy Merlin", ready: true },
+  // Groupon (Jennifer, 2026-10-16): fichero propio del Merchant Center (no
+  // Mirakl), ver parseGrouponFile. De momento solo tabla: no está en
+  // PROCESAMIENTO_DESDE, así que no toca stock ni proveedores.
+  { id: "groupon", label: "Groupon", ready: true },
 ];
 
 // Ariadna y Arantxa ya no trabajan en la empresa (Jennifer, 2026-09-16) —
@@ -1134,11 +1371,13 @@ const COLOR_META = {
   rojo: { label: "Cancelado", bg: "#fee2e2", text: "#991b1b", dot: "#ef4444" },
   verde: { label: "Entregado", bg: "#dcfce7", text: "#146138", dot: "#22c55e" },
   naranja: { label: "Enviado", bg: "#ffedd5", text: "#9a3412", dot: "#f97316" },
+  morado: { label: "Enviado parcialmente", bg: "#f3e8ff", text: "#6b21a8", dot: "#a855f7" },
   amarillo: { label: "No enviado", bg: "#fef9c3", text: "#854d0e", dot: "#eab308" },
   azul: { label: "Pendiente de pago", bg: "#dbeafe", text: "#1e40af", dot: "#3b82f6" },
 };
 
-function renderPage() {
+function renderPage(modo) {
+  const ventas = modo === "ventas";
   const navItems = PLATFORMS.map(
     (p) => `<li>
         <a href="#" class="nav-link${p.ready ? " active" : ""}" data-platform="${p.id}">
@@ -1153,8 +1392,12 @@ function renderPage() {
 <html lang="es">
 <head>
 <meta charset="utf-8" />
-<title>Gestión HappyDeal · Pedidos</title>
+<title>${ventas ? "Ventas · Bezen" : "Gestión HappyDeal · Pedidos"}</title>
+${ventas ? "<script>window.MODO_VENTAS = true;</script>" : ""}
 <style>
+  /* Pestaña aparte de Ventas (Jennifer, 2026-11-12): solo presupuestos y WhatsApp. */
+  body:not(.modo-ventas) .solo-ventas { display: none !important; }
+  body.modo-ventas .sidebar, body.modo-ventas #buscador-general, body.modo-ventas #avisos-cancelados-btn, body.modo-ventas .solo-gestion { display: none !important; }
   :root {
     --bg: #f3f6f4;
     --panel: #ffffff;
@@ -1216,7 +1459,7 @@ function renderPage() {
   }
   .sidebar .section-title.open .chevron { transform: rotate(90deg); }
   .sidebar ul { list-style: none; margin: 0; padding: 0; max-height: 0; overflow: hidden; transition: max-height 0.2s ease; }
-  .sidebar ul.open { max-height: 500px; }
+  .sidebar ul.open { max-height: 2000px; }
   .sidebar .nav-link {
     display: flex;
     align-items: center;
@@ -1312,7 +1555,7 @@ function renderPage() {
   /* Ratón encima: azul grisáceo, distinto del verde de "ya pedido" (Jennifer, 2026-10-08). */
   tbody tr:hover { background: #e6eef8; }
   #payment-filter, #estado-filter { text-transform: none; font-size: 11px; margin-top: 4px; padding: 2px 4px; font-weight: 400; letter-spacing: normal; }
-  #carrefour-table td:first-child, #maison-du-monde-table td:first-child, #worten-table td:first-child, #conforama-table td:first-child, #conforama-es-table td:first-child, #leroy-merlin-table td:first-child { white-space: nowrap; }
+  #carrefour-table td:first-child, #maison-du-monde-table td:first-child, #worten-table td:first-child, #conforama-table td:first-child, #conforama-es-table td:first-child, #leroy-merlin-table td:first-child, #groupon-table td:first-child { white-space: nowrap; }
   /* Tabla de Pedidos > Shopify más compacta (Jennifer, 2026-09-16): filas
      más estrechas para ver más pedidos de un vistazo sin scroll. */
   #orders th, #orders td { padding: 4px 12px; }
@@ -1337,7 +1580,11 @@ function renderPage() {
   /* La caja de la tabla se limita a la altura visible de la pantalla, para
      que su barra de scroll horizontal quede siempre a mano sin tener que
      bajar hasta el final de la página (Jennifer, 2026-09-16). */
-  #view-shopify .table-wrap, #view-carrefour .table-wrap, #view-maison-du-monde .table-wrap, #view-worten .table-wrap, #view-conforama .table-wrap, #view-conforama-es .table-wrap, #view-leroy-merlin .table-wrap { max-height: calc(100vh - 230px); }
+  #view-shopify .table-wrap, #view-carrefour .table-wrap, #view-maison-du-monde .table-wrap, #view-worten .table-wrap, #view-conforama .table-wrap, #view-conforama-es .table-wrap, #view-leroy-merlin .table-wrap, #view-groupon .table-wrap { max-height: calc(100vh - 230px); }
+  /* Revisión de facturas SEUR (Jennifer, 2026-11-06): altura fija para que el scroll lateral se vea siempre; cabecera fija. */
+  #view-revision-facturas-seur > .table-wrap { max-height: calc(100vh - 260px); }
+  #view-revision-facturas-seur #fs-wrap { max-height: 60vh; margin: 8px 0 0; }
+  #view-revision-facturas-seur thead th { position: sticky; top: 0; z-index: 2; background: var(--panel); }
   .badge {
     display: inline-block;
     padding: 3px 10px;
@@ -1428,6 +1675,9 @@ function renderPage() {
      "ya tenemos muchos iconos... ponerlos en dos líneas"). */
   .iconos-pedido { display: grid; grid-template-columns: repeat(3, auto); gap: 4px; justify-content: center; align-items: center; }
   .iconos-pedido > * { margin: 0 !important; }
+  /* Revisión de montaje (Jennifer, 2026-10-22): abajo del todo, ocupando
+     su propia fila, para no ensanchar la rejilla del resto de iconos. */
+  .iconos-pedido > .revision-montaje-btn { grid-column: 1 / -1; justify-self: stretch; font-size: 9.5px; padding: 0 6px; }
   .cancel-btn {
     display: inline-flex;
     align-items: center;
@@ -1534,6 +1784,32 @@ function renderPage() {
     z-index: 1000;
   }
   .modal-overlay.open { display: flex; }
+  .img-modelo-item { display: flex; justify-content: space-between; gap: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; border-bottom: 1px solid var(--border, #f1f5f9); }
+  .img-modelo-item:hover { background: #f0fdf4; }
+  .img-modelo-item.activo { background: #dcfce7; font-weight: 600; }
+  .img-cuenta { color: var(--muted); font-size: 12px; }
+  .img-card { border: 1px solid var(--border, #e5e7eb); border-radius: 8px; overflow: hidden; cursor: pointer; background: var(--panel, #fff); }
+  .img-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .img-card-thumb { aspect-ratio: 1 / 1; background: #f1f5f9; display: flex; align-items: center; justify-content: center; }
+  .img-card-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .img-card-nombre { font-size: 12.5px; padding: 6px 8px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .img-card-meta { font-size: 11px; color: var(--muted); padding: 0 8px 6px; }
+  .img-card.sel { outline: 3px solid #16a34a; outline-offset: -3px; }
+  .img-card.sel .img-card-thumb::after { content: "✔"; position: absolute; top: 6px; right: 8px; background: #16a34a; color: #fff; border-radius: 50%; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  .img-card-thumb { position: relative; }
+  .img-carpeta-card .img-card-thumb { font-size: 64px; background: #fefce8; }
+  .presu-sugerencias { position: absolute; left: 0; right: 0; top: 100%; z-index: 50; max-height: 360px; overflow-y: auto; background: var(--panel, #fff); border: 1px solid var(--border, #cbd5e1); border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.15); margin-top: 2px; }
+  .presu-sug { padding: 7px 10px; font-size: 13px; line-height: 1.35; cursor: pointer; border-bottom: 1px solid var(--border, #f1f5f9); white-space: normal; overflow-wrap: anywhere; }
+  .presu-sug:hover, .presu-sug.activa { background: #dcfce7; }
+  .presu-sug-vacia { padding: 8px 10px; font-size: 13px; color: var(--muted); }
+  .contacto-grupo { margin: 14px 0 8px; font-size: 16px; }
+  .contactos-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .contacto-card { border: 1px solid var(--border, #e5e7eb); border-radius: 8px; padding: 10px 12px; background: var(--panel, #fff); font-size: 13.5px; display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
+  .contacto-titulo { font-weight: 700; font-size: 15px; }
+  .contacto-empresa { color: var(--muted); margin-bottom: 2px; }
+  .contacto-notas { white-space: pre-wrap; color: #475569; background: #f8fafc; border-radius: 6px; padding: 6px 8px; margin-top: 4px; font-size: 12.5px; }
+  .contacto-pie { margin-top: auto; padding-top: 6px; text-align: right; }
+  .img-ruta-link { color: #15803d; cursor: pointer; text-decoration: underline; }
   .sacar-seur-opcion { display: block; border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 8px 10px; margin: 8px 0; cursor: pointer; }
   .sacar-seur-opcion input[type=date], .sacar-seur-opcion textarea { display: block; margin-top: 6px; width: 100%; box-sizing: border-box; font: inherit; }
   .sacar-seur-desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
@@ -1920,7 +2196,7 @@ function renderPage() {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
-<body>
+<body${ventas ? ' class="modo-ventas"' : ""}>
 <div id="user-gate" class="user-gate">
   <div class="user-gate-card">
     <h2>¿Quién eres?</h2>
@@ -1950,6 +2226,7 @@ function renderPage() {
     <li><a href="#" class="nav-link" data-inventario="catalogo">Catálogo</a></li>
     <li><a href="#" class="nav-link" data-inventario="stock">Stock</a></li>
     <li><a href="#" class="nav-link" data-inventario="abiertos">Colchones abiertos <span id="abiertos-badge" class="abiertos-badge" style="display:none" title="Pedidos de Furniture que pueden usar un colchón abierto"></span></a></li>
+    <li><a href="#" class="nav-link" data-inventario="stock-tapiceria">Stock de tapicería <span id="stock-tapiceria-badge" class="abiertos-badge" style="display:none;background:#b45309" title="Pedidos pendientes que pueden usar tapicería del almacén"></span></a></li>
     <li><a href="#" class="nav-link" data-inventario="historial">Historial de stock</a></li>
     <li><a href="#" class="nav-link" data-inventario="pesos">Pesos SEUR</a></li>
   </ul>
@@ -1970,15 +2247,23 @@ function renderPage() {
   </button>
   <ul id="logistica-list">
     <li><a href="#" class="nav-link" data-logistica="buscar-logistica">🔎 Buscar pedido en cargas</a></li>
+    <li><a href="#" class="nav-link" data-logistica="pendiente-recibir">📥 Mercancía pendiente de recibir <span id="pendiente-recibir-badge" class="plazo-badge" style="display:none"></span></a></li>
+    <li class="sublista-header">NACEX</li>
+    <li><a href="#" class="nav-link sublink" data-logistica="nacex">Envíos NACEX</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="nacex-historico">Histórico NACEX</a></li>
     <li class="sublista-header">FURNITURE</li>
     <li><a href="#" class="nav-link sublink" data-logistica="furniture">Pedidos pendientes</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas">Historial de cargas</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="casos-revisar">Casos a revisar</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="devoluciones-fabrica">Pendiente de devolución a fábrica</a></li>
     <li class="sublista-header">SEUR</li>
     <li><a href="#" class="nav-link sublink" data-logistica="seur">Pedidos pendientes</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas-seur">Historial de cargas</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="casos-revisar-seur">Envíos SEUR</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="devoluciones-seur">Devueltos</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="reclamaciones-seur">Casos abiertos de reclamación</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="revision-facturas-seur">Revisión de facturas</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="material-seur">Solicitud de material</a></li>
   </ul>
   <button class="section-title" id="historico-toggle">
     <span>Histórico</span>
@@ -1993,7 +2278,9 @@ function renderPage() {
   </button>
   <ul id="tarifas-list">
     <li><a href="#" class="nav-link" data-tarifas="consultar">Consultar tarifas</a></li>
-    <li><a href="#" class="nav-link" data-tarifas="plataformas">Ficheros plataformas</a></li>
+    <li><a href="#" class="nav-link" data-tarifas="plataformas">Ficheros plataformas colchones API</a></li>
+    <li><a href="#" class="nav-link" data-tarifas="completos">Ficheros plataformas completos</a></li>
+    <li><a href="#" class="nav-link" data-tarifas="reforman">Tarifa Reforman</a></li>
   </ul>
   <button class="section-title" id="precios-bezen-toggle">
     <span>Precios BEZEN</span>
@@ -2001,6 +2288,7 @@ function renderPage() {
   </button>
   <ul id="precios-bezen-list">
     <li><a href="#" class="nav-link" data-precios="bezen">Precios de la web</a></li>
+    <li><a href="#" class="nav-link" data-liquidacion="listado">Precios de la web liquidación</a></li>
   </ul>
   <button class="section-title" id="plazos-toggle">
     <span>Plazos de entrega</span>
@@ -2009,6 +2297,42 @@ function renderPage() {
   <ul id="plazos-list">
     <li><a href="#" class="nav-link" data-plazos="marketplace">Marketplace</a></li>
     <li><a href="#" class="nav-link" data-plazos="bezen">Bezen</a></li>
+  </ul>
+  <button class="section-title" id="publicidad-toggle">
+    <span>Publicidad</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="publicidad-list">
+    <li><a href="#" class="nav-link" data-publicidad="gasto">Gasto publicitario</a></li>
+  </ul>
+  <button class="section-title" id="presupuestos-toggle">
+    <span>Presupuestos</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="presupuestos-list">
+    <li><a href="#" class="nav-link" data-presupuestos="listado">Presupuestos a clientes</a></li>
+    <li><a href="/ventas" target="_blank" rel="noopener" class="nav-link" data-externo="1">🛍️ Ventas por WhatsApp ↗</a></li>
+  </ul>
+  <button class="section-title" id="boveda-toggle">
+    <span>Contraseñas</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="boveda-list">
+    <li><a href="#" class="nav-link" data-boveda="directorio">🔒 Directorio de contraseñas</a></li>
+  </ul>
+  <button class="section-title" id="imagenes-toggle">
+    <span>Imágenes</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="imagenes-list">
+    <li><a href="#" class="nav-link" data-imagenes="banco">🖼️ Banco de imágenes</a></li>
+  </ul>
+  <button class="section-title" id="contactos-toggle">
+    <span>Contactos</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="contactos-list">
+    <li><a href="#" class="nav-link" data-contactos="lista">📇 Contactos de interés</a></li>
   </ul>
 </nav>
 <div class="main">
@@ -2057,6 +2381,7 @@ function renderPage() {
 <div id="view-shopify">
   <div class="toolbar">
     <input id="search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <button type="button" id="campanas-filter-btn" class="secondary" title="Ver solo los pedidos con la campana pendiente de contestar">🔔 Campanas pendientes <span id="campanas-filter-count"></span></button>
     <span class="color-filter-wrap" id="color-filter-wrap" style="display:none">
       <label for="color-filter">Filtrar por estado:</label>
       <select id="color-filter">
@@ -2064,6 +2389,7 @@ function renderPage() {
         <option value="rojo">🔴 Cancelado</option>
         <option value="verde">🟢 Entregado</option>
         <option value="naranja">🟠 Enviado</option>
+        <option value="morado">🟣 Enviado parcialmente</option>
         <option value="amarillo">🟡 No enviado</option>
         <option value="azul">🔵 Pendiente de pago</option>
       </select>
@@ -2197,6 +2523,25 @@ function renderPage() {
   </div>
 </div>
 
+<div id="view-groupon" style="display:none">
+  <div class="toolbar">
+    <input id="groupon-search" type="text" placeholder="Buscar por nº de pedido o nombre..." />
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="groupon-orden-limite"> Primero los que vencen antes</label>
+    <button type="button" id="groupon-upload-btn" class="secondary">Subir fichero de Groupon</button>
+    <input type="file" id="groupon-upload-input" accept=".xlsx,.xls,.csv" style="display:none" />
+    <button type="button" class="secondary no-tramitar-btn" title="Pedidos que al subir el fichero NO se tramitan (se saltan del todo)">🚫 No tramitar</button>
+    <span id="groupon-upload-status" class="inventario-count" style="padding:0"></span>
+  </div>
+  <div id="groupon-sku-aviso" class="inventario-count" style="display:none;color:#991b1b;font-weight:600"></div>
+  <div id="groupon-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="groupon-table">
+      <thead><tr><th></th><th>Nº Pedido</th><th>Fecha pedido</th><th>Límite envío</th><th>Nombre</th><th>Dirección</th><th>CP</th><th>Población</th><th>Provincia</th><th>País</th><th>Teléfono</th><th>Producto</th><th>Cantidad</th><th>SKU</th><th>Precio</th><th>Seguimiento</th><th>Notas</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
 <div id="view-catalogo" style="display:none">
   <div class="toolbar">
     <button id="sync-catalogo">Sincronizar catálogo</button>
@@ -2273,6 +2618,37 @@ function renderPage() {
   <div class="table-wrap">
     <table id="abiertos-table">
       <thead><tr><th>Modelo</th><th>Talla</th><th>Abiertos</th><th>Nota</th><th>Ajustar</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-stock-tapiceria" style="display:none">
+  <div class="quickform">
+    <h3>Dar de alta tapicería en el almacén</h3>
+    <p style="margin:0 0 8px;color:var(--muted);font-size:13px">Una ficha por unidad. Cuando entra un pedido del mismo modelo, medida y color: un canapé completo se coge solo (sale por Furniture con su referencia, sin pedir a fábrica); una pieza suelta también se coge sola, se avisa en el pedido y en el pedido a Polival va "LA PIEZA X ESTÁ EN STOCK, ASÍ QUE SUBIR A FÁBRICA PARA REVISAR, SI ESTÁ BIEN NO FABRICAR ESA PIEZA".</p>
+    <div class="toolbar">
+      <input id="st-modelo" type="text" list="st-modelos-datalist" placeholder="Modelo de tapicería..." autocomplete="off" style="min-width:320px" />
+      <datalist id="st-modelos-datalist"></datalist>
+      <input id="st-talla" type="text" list="st-tallas-datalist" placeholder="Medida (150x190)" autocomplete="off" style="width:140px" />
+      <datalist id="st-tallas-datalist"></datalist>
+      <input id="st-color" type="text" placeholder="Color (ej. Cerezo)" autocomplete="off" style="width:150px" />
+      <input id="st-referencia" type="text" placeholder="Referencia (ej. NMC008FUR)" autocomplete="off" style="width:180px" />
+      <select id="st-completo"><option value="1">Canapé / artículo completo</option><option value="0">Solo una pieza</option></select>
+      <input id="st-pieza" type="text" list="st-piezas-datalist" placeholder="Pieza (TAPA, CAJÓN…)" autocomplete="off" style="width:170px;display:none" />
+      <datalist id="st-piezas-datalist"><option value="TAPA"></option><option value="TAPA ½"></option><option value="TAPA 2/2"></option><option value="CAJÓN"></option><option value="CAJÓN CABECERO"></option><option value="CAJÓN PIECERO"></option><option value="CAJÓN ½"></option><option value="CAJÓN 2/2"></option><option value="FONDO"></option><option value="JUEGO BISAGRAS E HIDRÁULICOS"></option><option value="JUEGO DE PATAS"></option></datalist>
+      <input id="st-nota" type="text" placeholder="Nota (ej. solo la tapa, tiene un roce…)" autocomplete="off" style="min-width:220px" />
+      <button id="st-alta" type="button">Dar de alta</button>
+    </div>
+    <div id="st-result" class="inventario-count"></div>
+  </div>
+  <div class="toolbar">
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="st-ver-salidos"> Ver también lo ya salido</label>
+  </div>
+  <div id="st-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="st-table">
+      <thead><tr><th>Modelo</th><th>Medida</th><th>Color</th><th>Referencia</th><th>Tipo</th><th>Nota</th><th>Estado</th><th>Pedidos que lo pueden usar</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -2432,6 +2808,29 @@ function renderPage() {
   <div id="historial-cargas-list"></div>
 </div>
 
+<div id="view-devoluciones-fabrica" style="display:none">
+  <p style="font-size:13px;color:var(--muted);margin:0 0 8px">Piezas dañadas que Furniture retira al hacer una reposición y que hay que devolver a la fábrica. Salen solas de las reposiciones de tapicería por Furniture y de las de colchón con recogida «vuelve a instalaciones».</p>
+  <div class="toolbar">
+    <select id="devfab-estado">
+      <option value="activas">Pendientes (sin devolver)</option>
+      <option value="recoger">Furniture tiene que recogerla</option>
+      <option value="devuelta">Devueltas al almacén</option>
+      <option value="no-devolver">No hay que devolver</option>
+      <option value="todas">Todas</option>
+    </select>
+    <select id="devfab-proveedor"><option value="">Todas las fábricas</option></select>
+    <input id="devfab-search" type="search" placeholder="Buscar pedido, cliente o pieza..." style="min-width:260px" autocomplete="off" />
+    <button type="button" id="devfab-anadir" class="secondary">➕ Añadir a mano</button>
+  </div>
+  <div id="devfab-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="devfab-table">
+      <thead><tr><th>Pedido</th><th>Cliente</th><th>Pieza dañada</th><th>Fábrica</th><th>Reposición</th><th>Devolución</th><th>Nota</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
 <div id="view-casos-revisar" style="display:none">
   <div class="toolbar">
     <select id="casos-revisar-estado"><option value="">Todos los estados de Furniture</option></select>
@@ -2446,6 +2845,118 @@ function renderPage() {
   </div>
 </div>
 
+<div id="view-revision-facturas-seur" style="display:none">
+  <p style="margin:0.75rem 2rem 0;color:var(--muted);font-size:13px">Todos los envíos de SEUR, una línea por expedición. Las líneas de carga llevan los bultos y kilos tal como se declaran en el fichero de SEUR (rehechos con los datos de hoy). Las de «Fuera de carga» salen del seguimiento de SEUR y sus kilos son estimados por el SKU (marcados con ≈).</p>
+  <div class="toolbar" style="margin:8px 2rem">
+    <input type="search" id="rf-seur-buscar" placeholder="Buscar referencia, pedido, cliente, expedición, CP..." style="min-width:280px" autocomplete="off" />
+    <label>Desde <input type="date" id="rf-seur-desde" /></label>
+    <label>Hasta <input type="date" id="rf-seur-hasta" /></label>
+    <select id="rf-seur-mes"><option value="">Todos los meses</option></select>
+    <select id="rf-seur-origen">
+      <option value="">Cargas y fuera de carga</option>
+      <option value="carga">Solo de cargas</option>
+      <option value="fuera-carga">Solo fuera de carga</option>
+      <option value="anulada">Solo anuladas en la app</option>
+    </select>
+    <select id="rf-seur-servicio"><option value="">Nacional e internacional</option><option value="Nacional">Nacional</option><option value="Internacional">Internacional</option></select>
+    <select id="rf-seur-pais"><option value="">Todos los países</option></select>
+    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="rf-seur-sin-exp" /> Solo sin nº de expedición</label>
+    <select id="rf-seur-facturado">
+      <option value="">Facturados y sin facturar</option>
+      <option value="doble">⚠ Solo FACTURADOS 2 VECES O MÁS</option>
+      <option value="facturado">Solo ya facturados</option>
+      <option value="sin-facturar">Solo sin facturar todavía</option>
+    </select>
+    <button type="button" id="rf-seur-excel" class="secondary">Descargar Excel</button>
+  </div>
+  <div style="margin:10px 2rem;padding:12px 14px;border:1px solid var(--border, #d1d5db);border-radius:10px">
+    <div class="toolbar" style="margin:0 0 8px">
+      <strong style="font-size:15px">Facturas de SEUR</strong>
+      <button type="button" id="fs-subir-btn">Subir factura de SEUR (Excel)</button>
+      <input type="file" id="fs-subir-input" accept=".xlsx,.xls" style="display:none" />
+      <select id="fs-select"><option value="">— Elige una factura subida —</option></select>
+      <select id="fs-filtro">
+        <option value="">Todas las líneas</option>
+        <option value="avisos">Solo con aviso</option>
+        <option value="mas">Solo cobran más que la tarifa</option>
+        <option value="sin-revisar">Solo sin revisar</option>
+        <option value="reclamar">Solo para reclamar</option>
+      </select>
+      <button type="button" id="fs-reclamacion" style="display:none;background:#b91c1c;border-color:#b91c1c;color:#fff">📄 Documento de reclamación</button>
+      <button type="button" id="fs-excel" class="secondary" style="display:none">Descargar Excel de la revisión</button>
+      <button type="button" id="fs-borrar" class="secondary" style="display:none">Borrar esta factura</button>
+    </div>
+    <div style="margin:4px 0 12px">
+      <div class="toolbar" style="margin:0 0 6px">
+        <strong>Resumen por mes</strong>
+        <select id="fs-mes"><option value="">Todos los meses</option></select>
+        <button type="button" id="fs-mes-reclamacion" style="display:none;background:#b91c1c;border-color:#b91c1c;color:#fff">📄 Reclamación del mes (PDF)</button>
+      </div>
+      <div class="table-wrap" style="margin:0">
+        <table id="fs-mes-table" style="min-width:0">
+          <thead><tr><th>FACTURA SEUR</th><th>REVISIÓN FACTURA</th><th>DOCUMENTO RECLAMACIÓN</th><th>IMPORTE DE DIFERENCIAS</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div id="fs-resumen" class="inventario-count" style="padding:0"></div>
+    <div class="table-wrap" id="fs-wrap" style="display:none">
+      <table id="fs-table">
+        <thead><tr><th>Línea</th><th>Fecha servicio</th><th>Referencia</th><th>Expedición</th><th>Destino</th><th>Servicio</th><th>Lo que enviamos</th><th>Bultos fact. / nuestros</th><th>Kilos fact. / declarados</th><th>Facturado sin IVA</th><th>Debe cobrar (Tarifas)</th><th title="Tarifa − cobrado: negativo = nos cobran de más">Diferencia</th><th>Aviso</th><th>Revisión</th><th style="min-width:180px">Nota</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <div style="margin:10px 2rem;padding:12px 14px;border:1px solid var(--border, #d1d5db);border-radius:10px">
+    <div class="toolbar" style="margin:0 0 8px">
+      <strong style="font-size:15px">📊 Análisis de portes por producto</strong>
+      <span style="color:var(--muted);font-size:12.5px">Con todas las facturas subidas · solo envíos de un único artículo</span>
+      <button type="button" id="ap-ver" class="secondary">Ver análisis</button>
+      <label style="display:none;align-items:center;gap:6px;white-space:nowrap" id="ap-solo-label"><input type="checkbox" id="ap-solo-encima" checked /> Solo los que cobran por encima</label>
+      <button type="button" id="ap-excel" class="secondary" style="display:none">Descargar Excel</button>
+      <button type="button" id="ap-historial" class="secondary">🕘 Historial de cambios de porte</button>
+    </div>
+    <div id="ap-historial-wrap" style="display:none;margin:6px 0 10px">
+      <div class="table-wrap" style="margin:0;max-height:50vh">
+        <table id="ap-historial-table" style="min-width:0">
+          <thead><tr><th>Fecha</th><th>Quién</th><th>Artículo</th><th>Medida</th><th>País</th><th>Antes</th><th>Ahora</th><th>Desde</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div id="ap-resumen" class="inventario-count" style="padding:0"></div>
+    <div class="table-wrap" id="ap-wrap" style="display:none;margin:8px 0 0;max-height:60vh">
+      <table id="ap-table">
+        <thead><tr><th>Artículo</th><th>País</th><th>Envíos</th><th>SEUR cobra (media)</th><th>Mín. – máx.</th><th>Porte en Tarifas</th><th>Diferencia media</th><th>% por encima</th><th>Sobrecoste total</th><th>Sugerencia</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <div id="rf-seur-count" class="inventario-count" style="margin:0 2rem"></div>
+  <div class="table-wrap">
+    <table id="rf-seur-table">
+      <thead><tr><th>Fecha</th><th>Carga</th><th>Referencia SEUR</th><th>Pedido</th><th>Plataforma</th><th>Cliente</th><th>CP</th><th>Población</th><th>País</th><th>Servicio</th><th>Bultos</th><th>Kilos</th><th>Contenido</th><th title="Envío de cada pieza según Tarifas y el país, por unidades">Debe cobrar SEUR</th><th>Nº expedición</th><th>Estado en SEUR</th><th>Facturado en</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-reclamaciones-seur" style="display:none">
+  <p style="margin:0.75rem 2rem 0;color:var(--muted);font-size:13px">Se registran solos cuando SEUR contesta que ha registrado una reclamación (con su nº de caso) en las conversaciones de Envíos SEUR. Cuando SEUR la resuelva o ya esté gestionada, pulsa «Cerrar caso».</p>
+  <div class="toolbar" style="margin:8px 2rem">
+    <input type="search" id="reclamaciones-seur-buscar" placeholder="Buscar caso, referencia, cliente, expedición, factura..." style="min-width:300px" autocomplete="off" />
+    <label class="ocultar-recibidos-label"><input type="checkbox" id="reclamaciones-seur-cerradas"> Mostrar también los cerrados</label>
+    <button type="button" id="reclamaciones-seur-actualizar" class="secondary">Mirar correos de SEUR ahora</button>
+    <span id="reclamaciones-seur-count" class="inventario-count" style="padding:0"></span>
+  </div>
+  <div class="table-wrap">
+    <table id="reclamaciones-seur-table">
+      <thead><tr><th>Nº de caso</th><th>Abierto</th><th>Referencia</th><th>Plataforma</th><th>Cliente</th><th>Expedición</th><th>Motivo (lo que reclamamos)</th><th>Estado</th><th>Indemnización</th><th>Notas</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
 <div id="view-casos-revisar-seur" style="display:none">
   <div class="toolbar" style="margin-bottom:6px">
     <button type="button" id="tracking-seur-upload-btn" class="secondary">Actualizar seguimiento SEUR</button>
@@ -2455,7 +2966,7 @@ function renderPage() {
   </div>
   <div class="toolbar">
     <button type="button" id="envios-seur-anadir-btn" title="Meter en esta lista un envío por SEUR que no salió en ninguna carga del sistema (ej. para reclamarlo)">+ Añadir pedido</button>
-    <input id="envios-seur-search" type="text" placeholder="Buscar por referencia, nombre u observaciones..." style="min-width:280px" />
+    <input id="envios-seur-search" type="text" placeholder="Buscar por referencia, plataforma, nombre u observaciones..." style="min-width:280px" />
     <select id="envios-seur-estado"><option value="">Todos los estados de SEUR</option></select>
     <select id="envios-seur-reclamado">
       <option value="">Reclamados y no reclamados</option>
@@ -2475,7 +2986,7 @@ function renderPage() {
   <div id="envios-seur-count" class="inventario-count"></div>
   <div class="table-wrap">
     <table id="envios-seur-table">
-      <thead><tr><th>Fecha de carga</th><th>Referencia pedido</th><th>Nombre</th><th>País</th><th>Observaciones</th><th>Estado en SEUR</th><th>Reclamado a SEUR</th><th style="min-width:320px">Notas</th><th>Archivar</th></tr></thead>
+      <thead><tr><th>Fecha de carga</th><th>Referencia pedido</th><th>Plataforma</th><th>Nombre</th><th>País</th><th>Observaciones</th><th>Estado en SEUR</th><th>Reclamado a SEUR</th><th style="min-width:320px">Notas</th><th>Archivar</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -2487,6 +2998,7 @@ function renderPage() {
     <input id="devoluciones-search" type="text" placeholder="Buscar por referencia, nombre o notas..." style="min-width:260px" />
     <select id="devoluciones-filtro">
       <option value="">Todas</option>
+      <option value="pendiente-devolucion">Pendientes de devolución (aún no devueltos por SEUR)</option>
       <option value="sin-llegar">Sin llegar al almacén</option>
       <option value="sin-decidir">Llegadas, sin decidir qué se hace</option>
       <option value="resueltas">Resueltas</option>
@@ -2522,22 +3034,293 @@ function renderPage() {
 
 <div id="view-tarifas" style="display:none">
   <div class="toolbar">
+    <label style="font-size:13px;color:var(--muted)">Categoría:</label>
+    <select id="tarifas-categoria-select">
+      <option value="colchones">Colchones</option>
+      <option value="tapiceria">Tapicería</option>
+      <option value="complementos">Complementos</option>
+    </select>
     <label style="font-size:13px;color:var(--muted)">Modelo:</label>
     <input id="tarifas-modelo-select" type="text" list="tarifas-modelos-datalist" placeholder="Escribe o elige un modelo..." autocomplete="off" style="min-width:280px" />
     <datalist id="tarifas-modelos-datalist"></datalist>
   </div>
+  <div id="tarifas-modelos-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,480px),1fr));gap:4px 12px;margin:4px 0 12px"></div>
   <div id="tarifas-aviso" class="inventario-count" style="display:none;color:#991b1b;font-weight:600"></div>
   <div id="tarifas-count" class="inventario-count"></div>
+  <div id="tarifas-columnas-bar" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0 8px"></div>
   <div class="table-wrap">
     <table id="tarifas-table">
-      <thead><tr><th>Talla</th><th>Coste</th><th>BEZEN</th><th>MAISON ES</th><th>RESTO ES</th><th>MAISON FR</th><th>RESTO FR</th><th>MAISON IT</th><th>RESTO IT</th><th>RESTO AL</th></tr></thead>
+      <thead></thead>
       <tbody></tbody>
     </table>
   </div>
 </div>
 
+<div id="view-tarifas-completos" style="display:none">
+  <div style="padding:1rem 2rem">
+    <div id="fc-clientes" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+    <div id="fc-contenido"></div>
+  </div>
+</div>
+
+<div id="view-tarifas-reforman" style="display:none">
+  <div style="padding:1rem 2rem" id="rf-contenido"></div>
+</div>
+
 <div id="view-tarifas-plataformas" style="display:none">
+  <h3 style="margin:0 0 10px">FICHERO PRECIOS SOLO COLCHONES - API</h3>
   <div id="tarifas-plataformas-lista" class="inventario-count">Cargando...</div>
+</div>
+
+<div id="view-publicidad" style="display:none">
+  <div style="padding:1rem 2rem;max-width:1100px">
+    <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end">
+      <label style="font-size:13px">Fecha de consulta<br><input type="date" id="pub-fecha" /><br><span id="pub-periodo" style="font-weight:700"></span></label>
+      <label style="font-size:13px">Facturación total con IVA, acumulado del mes (€)<br><input type="text" inputmode="decimal" id="pub-facturacion" placeholder="Ej. 85.400,50" /></label>
+      <label style="font-size:13px">Gasto total publicitario, acumulado del mes (€)<br><input type="text" inputmode="decimal" id="pub-gasto" placeholder="Ej. 12.300" /></label>
+      <label style="font-size:13px">ROAS bruto del mes (Triple Whale)<br><input type="text" inputmode="decimal" id="pub-roas" placeholder="Ej. 4,25" /></label>
+    </div>
+    <div id="pub-resultados" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:18px 0"></div>
+    <button type="button" id="pub-guardar">Guardar</button> <span id="pub-msg" style="font-size:13px;color:var(--muted)"></span>
+    <details id="pub-cierres-box" style="margin-top:28px;border:1px solid var(--border);border-radius:10px;padding:10px 14px">
+      <summary style="cursor:pointer;font-weight:700;font-size:16px">📅 Cierres de mes</summary>
+      <p style="font-size:13px;color:var(--muted)">Un mes por fila (lo guardado con fecha de consulta el día 1 = mes anterior completo).</p>
+      <div style="overflow-x:auto"><table id="pub-cierres"><thead><tr><th>Mes</th><th>Facturación total con IVA</th><th>Gasto total publicitario</th><th>ROAS bruto</th><th>Total ventas sin IVA</th><th>% gasto publicitario</th><th>ROAS neto</th><th></th></tr></thead><tbody></tbody></table></div>
+    </details>
+    <h3 style="margin-top:28px">Histórico diario</h3>
+    <p style="font-size:13px;color:var(--muted);margin-top:-6px">Datos acumulados del mes, siempre del día 1 al día anterior a la fecha de consulta. Consultado el día 1 = el mes anterior completo (cierre de mes).</p>
+    <div style="overflow-x:auto"><table id="pub-tabla"><thead><tr><th>Fecha consulta</th><th>Periodo</th><th>Facturación total con IVA</th><th>Gasto total publicitario</th><th>ROAS bruto</th><th>Total ventas sin IVA</th><th>% gasto publicitario</th><th>ROAS neto</th><th>Guardado por</th><th></th></tr></thead><tbody></tbody></table></div>
+  </div>
+</div>
+
+<div id="view-boveda" style="display:none">
+  <div style="padding:1rem 2rem;max-width:1200px">
+    <div id="bov-cargando" style="color:var(--muted)">Cargando…</div>
+    <div id="bov-crear" style="display:none;max-width:520px">
+      <h3 style="margin-top:0">🔒 Crear el directorio de contraseñas</h3>
+      <p style="font-size:14px;line-height:1.5">Elige una <b>contraseña maestra</b>. Con ella se cifra todo en tu navegador: el servidor solo guarda texto ilegible y la contraseña maestra <b>no se guarda en ningún sitio</b>.</p>
+      <p style="font-size:14px;line-height:1.5;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 10px">⚠️ Si la olvidas, <b>no hay forma de recuperar</b> las contraseñas guardadas (nadie puede, tampoco Claude). Apúntala en papel y guárdala en un sitio seguro.</p>
+      <label style="display:block;margin:10px 0 4px">Contraseña maestra (mínimo 12 caracteres)</label>
+      <input type="password" id="bov-crear-p1" autocomplete="new-password" style="width:100%" />
+      <label style="display:block;margin:10px 0 4px">Repítela</label>
+      <input type="password" id="bov-crear-p2" autocomplete="new-password" style="width:100%" />
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center"><button type="button" id="bov-crear-btn">Crear directorio</button><span id="bov-crear-msg" style="font-size:13px;color:#b91c1c"></span></div>
+    </div>
+    <div id="bov-bloqueado" style="display:none;max-width:420px">
+      <h3 style="margin-top:0">🔒 Directorio bloqueado</h3>
+      <p style="font-size:14px">Escribe la contraseña maestra para abrirlo.</p>
+      <input type="password" id="bov-abrir-p" autocomplete="current-password" style="width:100%" />
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center"><button type="button" id="bov-abrir-btn">Abrir</button><span id="bov-abrir-msg" style="font-size:13px;color:#b91c1c"></span></div>
+    </div>
+    <div id="bov-abierto" style="display:none">
+      <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+        <button type="button" id="bov-nueva">+ Nueva contraseña</button>
+        <input type="search" id="bov-buscar" placeholder="Buscar por página, link o usuario..." style="min-width:260px" />
+        <button type="button" class="secondary" id="bov-cambiar-maestra">Cambiar contraseña maestra</button>
+        <button type="button" class="secondary" id="bov-bloquear">🔒 Bloquear ahora</button>
+        <span id="bov-msg" style="font-size:13px;color:var(--muted)"></span>
+      </div>
+      <div class="table-wrap"><table id="bov-tabla"><thead><tr><th>Link de la página</th><th>Usuario</th><th>Contraseña</th><th>A qué se refiere</th><th>Últ. cambio</th><th></th></tr></thead><tbody></tbody></table></div>
+      <p style="font-size:12px;color:var(--muted)">Se bloquea solo tras 5 minutos sin actividad o al recargar la página.</p>
+    </div>
+  </div>
+</div>
+<div id="view-imagenes" style="display:none">
+  <div style="padding:1rem 2rem">
+    <div id="img-aviso" style="display:none;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:14px"></div>
+    <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+      <div style="width:290px;max-width:100%;flex-shrink:0">
+        <input type="search" id="img-buscar-modelo" placeholder="Buscar modelo…" style="width:100%;box-sizing:border-box;margin-bottom:6px" />
+        <label style="font-size:12px;display:flex;gap:6px;align-items:center;margin-bottom:6px;color:var(--muted)"><input type="checkbox" id="img-solo-con" /> Solo modelos con fotos</label>
+        <div id="img-modelos" style="max-height:70vh;overflow-y:auto;border:1px solid var(--border, #e5e7eb);border-radius:8px;background:var(--panel, #fff)"></div>
+      </div>
+      <div style="flex:1;min-width:280px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <h3 id="img-modelo-titulo" style="margin:0;flex:1">Todas las fotos</h3>
+          <input type="search" id="img-buscar-foto" placeholder="Buscar por nombre de foto…" style="width:220px" />
+          <button type="button" id="img-subir-btn">📤 Subir fotos</button>
+          <input type="file" id="img-file" accept="image/*" multiple style="display:none" />
+        </div>
+        <div id="img-carpetas-bar" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <div id="img-ruta" style="flex:1;font-size:14px"></div>
+          <button type="button" class="secondary" id="img-nueva-carpeta">＋ Nueva carpeta</button>
+          <button type="button" class="secondary" id="img-renombrar-carpeta">✏️ Renombrar carpeta</button>
+          <button type="button" class="secondary" id="img-borrar-carpeta" style="color:#b91c1c">🗑 Borrar carpeta</button>
+          <button type="button" class="secondary" id="img-sel-btn">☑ Seleccionar varias</button>
+        </div>
+        <div id="img-sel-bar" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;background:#ecfdf5;border:1px solid #86efac;border-radius:8px;padding:8px 10px;font-size:14px">
+          <b id="img-sel-n">0 seleccionadas</b>
+          <span>Mover a</span>
+          <select id="img-sel-destino" style="max-width:340px"></select>
+          <button type="button" id="img-sel-mover">Mover</button>
+          <button type="button" class="secondary" id="img-sel-todas">Marcar todas</button>
+          <button type="button" class="secondary" id="img-sel-cancelar">Cancelar</button>
+        </div>
+        <div id="img-drop" style="border:2px dashed var(--border, #cbd5e1);border-radius:8px;padding:14px;text-align:center;color:var(--muted);font-size:13px;margin-bottom:12px">Arrastra aquí las fotos para guardarlas en el modelo y la carpeta que tienes abiertos. Se guardan en su tamaño original.</div>
+        <div id="img-espacio" style="margin-bottom:10px;font-size:13px"></div>
+        <div id="img-progreso" style="font-size:13px;margin-bottom:8px"></div>
+        <div id="img-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="view-contactos" style="display:none">
+  <div style="padding:1rem 2rem">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+      <input type="search" id="contactos-buscar" placeholder="Buscar por nombre, empresa, teléfono, email o nota…" style="flex:1;min-width:220px" />
+      <select id="contactos-cat-filter"></select>
+      <span id="contactos-cuenta" style="color:var(--muted);font-size:13px"></span>
+      <button type="button" id="contactos-nuevo">＋ Nuevo contacto</button>
+    </div>
+    <div id="contactos-grid"></div>
+  </div>
+</div>
+<div class="modal-overlay" id="contacto-modal-overlay">
+  <div class="modal-box" style="width:min(620px,96vw);max-height:94vh;overflow-y:auto">
+    <h3 id="contacto-modal-titulo" style="margin-top:0">Nuevo contacto</h3>
+    <div style="display:grid;grid-template-columns:110px 1fr;gap:8px 10px;align-items:center">
+      <label>Nombre</label><input type="text" id="contacto-nombre" placeholder="Persona de contacto" />
+      <label>Empresa</label><input type="text" id="contacto-empresa" placeholder="Ej. Polival, SEUR Valdemoro…" />
+      <label>Categoría</label><select id="contacto-categoria"></select>
+      <label>Teléfono(s)</label><input type="text" id="contacto-telefonos" placeholder="Varios separados por / o coma" />
+      <label>Email</label><input type="text" id="contacto-email" />
+      <label>Web</label><input type="text" id="contacto-web" />
+      <label>Dirección</label><input type="text" id="contacto-direccion" />
+      <label style="align-self:start;padding-top:6px">Notas</label><textarea id="contacto-notas" rows="4" placeholder="Horarios, nº de cliente, persona que atiende…" style="font:inherit;width:100%;box-sizing:border-box"></textarea>
+    </div>
+    <div id="contacto-info" style="font-size:12px;color:var(--muted);margin:8px 0"></div>
+    <div style="display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap">
+      <button type="button" class="secondary" id="contacto-borrar" style="color:#b91c1c">🗑 Borrar</button>
+      <div style="display:flex;gap:8px;margin-left:auto">
+        <button type="button" class="secondary" id="contacto-cancelar">Cancelar</button>
+        <button type="button" id="contacto-guardar">Guardar</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="img-modal-overlay">
+  <div class="modal-box" style="width:min(1000px,96vw);max-height:94vh;overflow-y:auto">
+    <div style="text-align:center;background:#f1f5f9;border-radius:8px;margin-bottom:10px">
+      <img id="img-modal-img" alt="" style="max-width:100%;max-height:62vh;display:inline-block" />
+    </div>
+    <div style="display:grid;grid-template-columns:110px 1fr;gap:8px 10px;align-items:center">
+      <label>Nombre</label><input type="text" id="img-m-nombre" />
+      <label>Modelo</label><select id="img-m-modelo"></select>
+      <label>Carpeta</label><select id="img-m-carpeta"></select>
+    </div>
+    <div id="img-m-info" style="font-size:12px;color:var(--muted);margin:8px 0"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:space-between">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a id="img-m-descargar" class="secondary" style="display:inline-block;padding:6px 12px;border-radius:6px;text-decoration:none" href="#">⬇️ Descargar original</a>
+        <a id="img-m-abrir" class="secondary" style="display:inline-block;padding:6px 12px;border-radius:6px;text-decoration:none" href="#" target="_blank" rel="noopener">🔍 Ver a tamaño real</a>
+        <button type="button" class="secondary" id="img-m-borrar" style="color:#b91c1c">🗑 Borrar</button>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="secondary" id="img-m-cerrar">Cerrar</button>
+        <button type="button" id="img-m-guardar">Guardar cambios</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="bov-modal-overlay">
+  <div class="modal-box" style="width:min(560px,94vw)">
+    <h3 id="bov-modal-titulo" style="margin-top:0">Nueva contraseña</h3>
+    <div style="display:grid;grid-template-columns:130px 1fr;gap:8px 10px;align-items:center">
+      <label>Link de la página</label><input type="text" id="bov-f-web" placeholder="https://…" />
+      <label>Usuario</label><input type="text" id="bov-f-usuario" autocomplete="off" placeholder="(opcional)" />
+      <label>Contraseña</label><div style="display:flex;gap:6px"><input type="password" id="bov-f-password" autocomplete="new-password" style="flex:1" /><button type="button" class="secondary" id="bov-f-ver" title="Mostrar/ocultar">👁</button><button type="button" class="secondary" id="bov-f-generar" title="Generar una contraseña segura de 20 caracteres">🎲</button></div>
+      <label style="align-self:start">A qué se refiere *</label><textarea id="bov-f-servicio" rows="2" placeholder="Ej.: Portal de SEUR para hacer recogidas"></textarea>
+    </div>
+    <div style="display:flex;justify-content:space-between;gap:8px;margin-top:14px">
+      <button type="button" class="secondary" id="bov-f-borrar" style="color:#b91c1c">Eliminar</button>
+      <div style="display:flex;gap:8px"><button type="button" class="secondary" id="bov-f-cancelar">Cancelar</button><button type="button" id="bov-f-guardar">Guardar</button></div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="bov-cambiar-overlay">
+  <div class="modal-box" style="width:min(460px,94vw)">
+    <h3 style="margin-top:0">Cambiar contraseña maestra</h3>
+    <label style="display:block;margin:6px 0 4px">Contraseña maestra actual</label><input type="password" id="bov-c-actual" autocomplete="current-password" style="width:100%" />
+    <label style="display:block;margin:10px 0 4px">Nueva (mínimo 12 caracteres)</label><input type="password" id="bov-c-p1" autocomplete="new-password" style="width:100%" />
+    <label style="display:block;margin:10px 0 4px">Repite la nueva</label><input type="password" id="bov-c-p2" autocomplete="new-password" style="width:100%" />
+    <div id="bov-c-msg" style="font-size:13px;color:#b91c1c;margin-top:8px"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px"><button type="button" class="secondary" id="bov-c-cancelar">Cancelar</button><button type="button" id="bov-c-guardar">Cambiar</button></div>
+  </div>
+</div>
+
+<div id="view-presupuestos" style="display:none">
+  <div style="padding:1rem 2rem;max-width:1200px">
+    <div id="presu-listado">
+      <div class="toolbar">
+        <button type="button" id="presu-nuevo">+ Nuevo presupuesto</button>
+        <input type="search" id="presu-buscar" placeholder="Buscar por cliente o nº..." style="min-width:260px" />
+      </div>
+      <div class="table-wrap"><table id="presu-tabla"><thead><tr><th>Nº</th><th>Fecha</th><th>Cliente</th><th>Líneas</th><th>Hecho por</th><th class="solo-ventas">WhatsApp</th><th></th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div id="presu-editor" style="display:none">
+      <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+        <button type="button" class="secondary" id="presu-volver">← Volver al listado</button>
+        <button type="button" id="presu-guardar">💾 Guardar</button>
+        <button type="button" id="presu-pdf">📄 Descargar PDF</button>
+        <button type="button" class="solo-ventas" id="presu-whatsapp" style="background:#11765f">📲 Enviar por WhatsApp</button>
+        <button type="button" class="secondary solo-ventas" id="presu-copiar">🔗 Copiar enlace</button>
+        <button type="button" class="secondary solo-ventas" id="presu-ver">👁 Ver como cliente</button>
+        <button type="button" class="secondary" id="presu-duplicar">Duplicar</button>
+        <span id="presu-msg" style="font-size:13px;color:var(--muted)"></span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin:10px 0 14px">
+        <label style="font-size:13px">Presupuesto Nº<br><input type="number" id="presu-numero" style="width:110px" /></label>
+        <label style="font-size:13px">Fecha<br><input type="date" id="presu-fecha" /></label>
+        <label style="font-size:13px">Cliente <span style="color:var(--muted)">(opcional)</span><br><input type="text" id="presu-cliente" style="min-width:280px" placeholder="Si no sabes el nombre, déjalo vacío" /></label>
+        <label class="solo-ventas" style="font-size:13px">Teléfono (WhatsApp)<br><input type="tel" id="presu-telefono" placeholder="600 00 00 00" style="width:150px" /></label>
+        <label class="solo-ventas" style="font-size:13px;display:none">Válido (días)<br><input type="number" id="presu-validez" min="1" max="365" style="width:80px" /></label>
+        <label style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="presu-total" /> Mostrar total (si no son opciones)</label>
+        <label style="font-size:13px;display:flex;gap:6px;align-items:center;background:#ecfdf5;border:1px solid #86efac;border-radius:8px;padding:4px 10px"><input type="checkbox" id="presu-profesional" /> Cliente profesional · descuento <input type="text" inputmode="decimal" id="presu-dto-pct" placeholder="%" style="width:56px" /> %</label>
+      </div>
+      <label class="solo-ventas" style="font-size:13px;display:block;max-width:760px;margin:0 0 14px">Nota personal para el cliente <span style="color:var(--muted)">(sale firmada en la página del presupuesto; cuéntale por qué le recomiendas esto)</span><br>
+        <textarea id="presu-nota" rows="3" placeholder="Ej.: Ana, como me contaste que te levantas con la espalda cargada, te he puesto el Supreme Zen…" style="width:100%;box-sizing:border-box;font:inherit"></textarea></label>
+      <h3 style="margin:8px 0">Líneas</h3>
+      <div class="table-wrap"><table id="presu-lineas-tabla"><thead><tr><th style="min-width:380px">Descripción</th><th>Un.</th><th>Precio (€)</th><th class="presu-col-prof" style="display:none">Precio profesional</th><th>Total</th><th title="Marca las líneas entre las que el cliente elige una (ej. dos colchones): se comparan y no se suman">Alternativa</th><th></th></tr></thead><tbody id="presu-lineas"></tbody></table></div>
+      <div id="presu-resumen" style="font-size:13.5px;margin:6px 0 0;text-align:right;max-width:900px"></div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0 18px">
+        <div style="position:relative;flex:1;min-width:320px;max-width:760px">
+          <input type="text" id="presu-producto" placeholder="Buscar producto de la web (nombre · medida/color)..." autocomplete="off" style="width:100%;box-sizing:border-box" />
+          <div id="presu-sugerencias" class="presu-sugerencias" style="display:none"></div>
+        </div>
+        <button type="button" id="presu-add-producto">Añadir producto</button>
+        <button type="button" class="secondary" id="presu-add-libre">+ Línea libre</button>
+        <button type="button" class="secondary" id="presu-add-texto">+ Línea de texto (sin precio)</button>
+        <span id="presu-productos-msg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <h3 style="margin:8px 0">Información adicional <span style="font-size:12px;font-weight:400;color:var(--muted)">(página 2 · un bloque por producto, cada línea es un punto; si no hay bloques no sale la página)</span></h3>
+      <div id="presu-info"></div>
+      <button type="button" class="secondary" id="presu-add-info" style="margin:6px 0 18px">+ Añadir bloque</button>
+      <label style="font-size:13px;display:none">Texto de validez (pie)<br><textarea id="presu-pie" rows="2" style="width:100%;max-width:760px"></textarea></label>
+    </div>
+  </div>
+</div>
+
+<div id="view-liquidacion" style="display:none">
+  <div style="padding:1rem 2rem;max-width:1200px">
+    <p style="font-size:13px;color:var(--muted);margin-top:0">Apartado independiente: lo que se guarda aquí no cambia Tarifas ni Precios BEZEN. El coste y el envío se copian de Tarifas al añadir la fila (se pueden corregir a mano) y se quedan fijos. Precio = (coste + envío) × 1,21 × 1,04, sin margen ni publicidad, € entero al alza. Precio tachado = precio ÷ 0,20 (el precio sale un 80% más barato que el tachado).</p>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+      <label style="font-size:13px">Producto<br><input type="text" id="liq-modelo" list="liq-modelos-datalist" placeholder="Escribe o elige el producto" style="min-width:320px" /></label>
+      <datalist id="liq-modelos-datalist"></datalist>
+      <label style="font-size:13px">Medida<br><select id="liq-talla" style="min-width:140px"><option value="">—</option></select></label>
+      <label style="font-size:13px">Coste (€)<br><input type="text" inputmode="decimal" id="liq-coste" style="width:100px" /></label>
+      <label style="font-size:13px">Envío (€)<br><input type="text" inputmode="decimal" id="liq-envio" style="width:100px" /></label>
+      <label style="font-size:13px">SKU (opcional)<br><input type="text" id="liq-sku" style="width:200px" /></label>
+      <label style="font-size:13px">Nota (opcional)<br><input type="text" id="liq-nota" style="width:200px" /></label>
+    </div>
+    <div id="liq-calculo" style="margin:12px 0;font-size:14px"></div>
+    <button type="button" id="liq-anadir">Añadir a liquidación</button> <span id="liq-msg" style="font-size:13px;color:var(--muted)"></span>
+    <div class="toolbar" style="margin-top:22px;padding:0">
+      <input id="liq-buscar" type="text" placeholder="Buscar producto, medida o SKU..." style="min-width:320px" />
+      <button type="button" id="liq-descargar-btn" class="secondary" title="Mismo formato que el fichero del BLACK: SKU / VARIANTE CON 0 / PRECIO / PRECIO TACHADO. Sale lo que se ve con el buscador (vacío = todo); las filas sin SKU no salen.">Descargar fichero de precios</button>
+      <span id="liq-count" class="inventario-count"></span>
+    </div>
+    <div style="overflow-x:auto"><table id="liq-tabla"><thead><tr><th>Producto</th><th>Medida</th><th>SKU</th><th>Coste</th><th>Envío</th><th>Precio liquidación</th><th>Precio tachado</th><th>Nota</th><th>Añadido</th><th></th></tr></thead><tbody></tbody></table></div>
+  </div>
 </div>
 
 <div id="view-precios-bezen" style="display:none">
@@ -2549,33 +3332,42 @@ function renderPage() {
     <label style="font-size:13px;color:var(--muted)">Precios de:</label>
     <select id="pb-descargar-columna">
       <option value="precioBlack">Precios BLACK 2026</option>
-      <option value="precioNuevo">Precio nuevo</option>
+      <option value="precioNuevo">Precio nuevo revisión antes BLACK</option>
       <option value="precioFijo">Precio fijo</option>
       <option value="precio">Precio web de esta subida</option>
     </select>
     <button type="button" id="pb-descargar-btn" class="secondary" title="Todos los SKU: SKU / VARIANTE CON 0 / PRECIO / PRECIO TACHADO. Si la columna elegida está vacía, sale el precio fijo (y si no hay, el precio web de esta subida).">Descargar fichero de precios</button>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap" title="Usa el buscador y el filtro de abajo para elegir los productos"><input type="checkbox" id="pb-descargar-solo-vistas" /> Solo las filas que se ven</label>
     <button type="button" id="pb-borrar-btn" class="secondary" style="margin-left:auto">Borrar esta subida</button>
   </div>
   <div class="toolbar">
-    <input id="pb-buscar" type="text" placeholder="Buscar producto, medida o SKU..." style="min-width:280px" />
+    <input id="pb-buscar" type="text" placeholder="Buscar producto, medida o SKU... (varias: con coma · quitar: -palabra)" style="min-width:360px" />
     <select id="pb-filtro">
       <option value="">Todas las filas</option>
       <option value="dif">Precio web distinto de tarifa</option>
       <option value="debajo">Precio web por debajo de tarifa</option>
       <option value="encima">Precio web por encima de tarifa</option>
       <option value="sintarifa">Sin precio de tarifa</option>
-      <option value="nuevo">Con precio nuevo</option>
+      <option value="nuevo">Con precio nuevo revisión antes BLACK</option>
       <option value="cambiado">Cambiados desde la subida anterior</option>
       <option value="sinsku">Sin SKU</option>
+      <option value="packs">Solo packs</option>
     </select>
-    <button type="button" id="pb-tarifa-a-nuevo-btn" class="secondary" title="En las filas que se ven ahora y tienen precio de tarifa">Poner precio de tarifa como precio nuevo</button>
+    <button type="button" id="pb-tarifa-a-nuevo-btn" class="secondary" title="En las filas que se ven ahora y tienen precio de tarifa">Poner precio de tarifa como precio nuevo revisión antes BLACK</button>
     <button type="button" id="pb-quitar-nuevo-btn" class="secondary" title="En las filas que se ven ahora">Quitar precios nuevos</button>
+    <label style="font-size:13px;white-space:nowrap" title="Se resta a la suma de las piezas del pack">Descuento pack: <input type="number" id="pb-pack-dto" min="0" max="90" step="1" value="0" style="width:60px" /> %</label>
+    <button type="button" id="pb-pack-a-columnas-btn" class="secondary" title="En las filas de pack que se ven: pack BLACK → Precios BLACK 2026 y pack nuevo → Precio nuevo revisión">= pack en BLACK y en precio nuevo</button>
     <button type="button" id="pb-fijo-a-black-btn" class="secondary" title="En las filas que se ven ahora y tienen el BLACK vacío: modelos que no se rebajan en BLACK">= Precio actual en BLACK</button>
+    <label style="font-size:13px;white-space:nowrap" title="Resta del margen BLACK del colchón Spring Zen el coste de las almohadas (hasta 120: 1 de 90 = 16 € · 135/140: 2 de 67,5 = 25 € · 150: 28 € · 160: 2 de 75 = 28 € · 180/200: 2 de 90 = 32 €)"><input type="checkbox" id="pb-seafoam-spring" /> Spring Zen: incluir almohadas Sea Foam (BLACK)</label>
+    <label style="font-size:13px;white-space:nowrap" title="Packs y Spring Zen: el regalo de las almohadas Sea Foam solo se resta del margen desde este ancho">Regalo Sea Foam desde: <select id="pb-seafoam-desde"><option value="0">todas las medidas</option><option value="90">90</option><option value="105">105</option><option value="135" selected>135</option><option value="140">140</option><option value="150">150</option><option value="160">160</option><option value="180">180</option><option value="200">200</option></select></label>
   </div>
   <div id="pb-count" class="inventario-count"></div>
-  <div class="table-wrap">
+  <div id="pb-regla-pack" style="display:none;margin:0 2rem 8px;padding:8px 12px;border:2px solid #c4b5fd;border-radius:10px;background:#faf5ff"></div>
+  <!-- Barra para moverse a izquierda/derecha arriba de la tabla (Jennifer, 2026-10-20: "hay muchas columnas y no se ve todo"). -->
+  <div id="pb-scroll-top" style="margin:0 2rem;overflow-x:auto;overflow-y:hidden;height:16px"><div id="pb-scroll-top-inner" style="height:1px"></div></div>
+  <div class="table-wrap" id="pb-table-wrap" style="max-height:calc(100vh - 300px)">
     <table id="pb-table">
-      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th id="pb-th-web">Precio web</th><th id="pb-th-fijo">Precio fijo</th><th>Precios BLACK 2026</th><th>Precio nuevo</th></tr></thead>
+      <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th>Precio tarifa</th><th>Dif. €</th><th>Dif. %</th><th id="pb-th-web">Precio web</th><th id="pb-th-fijo">Precio fijo</th><th>Precios BLACK 2026</th><th>PRECIO NUEVO REVISIÓN ANTES BLACK</th><th title="Suma de los precios de sus piezas (con el descuento de pack de arriba)">Precio pack calculado</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -2622,6 +3414,24 @@ function renderPage() {
       <option value="pendientes">Pendientes</option>
       <option value="hechas">Hechas</option>
     </select>
+    <select id="tareas-grupo-filter" title="Filtrar por grupo">
+      <option value="">Todos los grupos</option>
+      <option value="FURNITURE">Furniture</option>
+      <option value="POLIVAL">Polival</option>
+      <option value="LUSO">Luso</option>
+      <option value="FERNANDO">Fernando</option>
+      <option value="SERGIO">Sergio</option>
+      <option value="JENNIFER">Jennifer</option>
+      <option value="CONTABILIDAD">Contabilidad</option>
+      <option value="SEUR">SEUR</option>
+      <option value="WORTEN">Worten</option>
+      <option value="TRABAJO PERSONAL">Trabajo personal</option>
+      <option value="-">Sin grupo</option>
+    </select>
+    <select id="tareas-agrupar" title="Cómo se ordenan las tareas">
+      <option value="dias">Ver por días</option>
+      <option value="grupos">Ver por grupos</option>
+    </select>
     <button type="button" class="secondary" id="tareas-email-prueba-btn" title="Manda ahora el email de recordatorio con las tareas de hoy">✉ Enviarme el recordatorio ahora</button>
   </div>
   <div id="tareas-count" class="inventario-count"></div>
@@ -2662,12 +3472,37 @@ function renderPage() {
   </div>
 </div>
 
+<div class="modal-overlay" id="indem-seur-overlay">
+  <div class="modal-box">
+    <h3 id="indem-seur-titulo">Indemnización</h3>
+    <p id="indem-seur-texto" style="color:var(--muted);font-size:13px"></p>
+    <label style="display:block;font-size:13px;margin:8px 0"><input type="radio" name="indem-seur-tipo" value="portes" checked /> Indemnización por portes</label>
+    <label style="display:block;font-size:13px;margin:8px 0"><input type="radio" name="indem-seur-tipo" value="extravio-portes" /> Indemnización por extravío y portes</label>
+    <div id="indem-seur-extravio" style="display:none;margin:8px 0 0 22px;font-size:13px">
+      <label style="display:block;margin-bottom:6px">Importe reclamado (€)<br><input type="text" inputmode="decimal" id="indem-seur-importe" placeholder="Ej. 389,90" /></label>
+      <label style="display:block">Factura (PDF o imagen, máx. 1,3 MB)<br><input type="file" id="indem-seur-factura" accept=".pdf,image/*" /></label>
+      <div id="indem-seur-factura-actual" style="margin-top:4px;color:var(--muted)"></div>
+      <button type="button" class="secondary" id="indem-seur-generar-factura" style="margin-top:6px" title="Factura con lo que pagó el cliente, en el formato de las facturas BEZEN. Se descarga en PDF para subirla aquí.">📄 Generar factura (precio real)</button>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="indem-seur-quitar" style="margin-right:auto;display:none">Quitar indemnización</button>
+      <button type="button" class="secondary" id="indem-seur-cancel">Cancelar</button>
+      <button type="button" id="indem-seur-ok">Guardar</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="seur-correo-overlay">
   <div class="modal-box modal-box-wide">
     <h3 id="seur-correo-titulo">Conversación con SEUR</h3>
     <div id="seur-correo-destino" style="color:var(--muted);font-size:12px;margin-bottom:8px"></div>
     <div id="seur-correo-mensajes" style="display:flex;flex-direction:column;gap:8px;max-height:45vh;overflow-y:auto;margin-bottom:10px"></div>
+    <div id="seur-correo-adjuntos-enviados" style="font-size:12px;margin-bottom:8px"></div>
     <textarea id="seur-correo-texto" rows="6" style="width:100%;resize:vertical" placeholder="Escribe aquí el problema o la duda para SEUR..."></textarea>
+    <div style="margin-top:6px;font-size:13px">
+      <label class="secondary" style="display:inline-block;cursor:pointer;border:1px solid var(--border, #ccc);border-radius:6px;padding:4px 10px">📎 Adjuntar fotos<input type="file" id="seur-correo-fotos" accept="image/*,.pdf" multiple style="display:none" /></label>
+      <span id="seur-correo-fotos-lista" style="color:var(--muted);margin-left:8px"></span>
+    </div>
     <div style="color:var(--muted);font-size:11px;margin-top:4px">Se envía desde tu Gmail (jennifer@colchonesbezen.com). La referencia, el nº de expedición y el destinatario se añaden solos arriba del mensaje.</div>
     <div class="modal-actions">
       <button type="button" class="secondary" id="seur-correo-cerrar">Cerrar</button>
@@ -2681,6 +3516,8 @@ function renderPage() {
     <input type="search" class="bl-input" placeholder="🔎 ¿Dónde está un pedido? (nº, referencia, nombre, teléfono, ref. de fábrica…)" />
     <div class="bl-resultado"></div>
   </div>
+  <!-- Retenidos arriba del todo (Jennifer, 2026-10-28). -->
+  <div id="seur-retenidos"></div>
   <div id="seur-decision-box"class="carga-abierta-box" style="display:none">
     <div class="toolbar">
       <h3 style="margin:0">Pedidos con disponibilidad mixta — pendientes de decidir</h3>
@@ -2691,6 +3528,78 @@ function renderPage() {
 
   <div id="seur-cargas-list"></div>
   <div id="seur-fuera-carga"></div>
+</div>
+
+<div id="view-material-seur" style="display:none">
+  <p style="margin:0.75rem 2rem 0;color:var(--muted);font-size:13px">Un jueves sí y otro no (desde las 9:00) se manda solo un email a SEUR pidiendo el material, con la plantilla de solicitud adjunta. Si hace falta antes, pulsa «Enviar ahora».</p>
+  <div style="margin:12px 2rem;max-width:760px">
+    <div style="display:grid;grid-template-columns:150px 1fr;gap:6px 12px;font-size:14px;margin-bottom:12px">
+      <strong>Para</strong><span id="material-seur-para"></span>
+      <strong>Asunto</strong><span id="material-seur-asunto"></span>
+      <strong>Adjunto</strong><span><a href="/api/seur/material/plantilla" id="material-seur-plantilla"></a></span>
+      <strong>Próximos envíos</strong><span id="material-seur-proximos"></span>
+    </div>
+    <label for="material-seur-texto" style="font-weight:600;font-size:14px">Texto del email</label>
+    <textarea id="material-seur-texto" rows="6" style="width:100%;margin-top:4px;font-family:inherit;font-size:14px"></textarea>
+    <div class="toolbar" style="margin:8px 0;padding:0">
+      <button type="button" id="material-seur-guardar" class="secondary">Guardar texto</button>
+      <button type="button" id="material-seur-enviar">📧 Enviar ahora</button>
+      <span id="material-seur-msg" style="font-size:13px;color:var(--muted)"></span>
+    </div>
+    <h3 style="font-size:15px;margin:16px 0 6px">Envíos hechos</h3>
+    <div class="table-wrap" style="margin:0">
+      <table id="material-seur-table">
+        <thead><tr><th>Fecha</th><th>Cómo</th><th>Quién</th><th>Resultado</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div id="view-pendiente-recibir" style="display:none">
+  <p style="margin:0.75rem 2rem 0;color:var(--muted);font-size:13px">Lo que se recoge en casa de los clientes y tiene que volver a nosotros (envíos de NACEX con retorno). Cuando llegue, pulsa «✔ Recibido».</p>
+  <div class="toolbar" style="margin:8px 2rem">
+    <input type="search" id="pend-recibir-buscar" placeholder="Buscar pedido, cliente, qué se recoge..." style="min-width:280px" autocomplete="off" />
+    <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="pend-recibir-ver-recibidos" /> Ver también lo ya recibido</label>
+    <span id="pend-recibir-count" class="inventario-count" style="padding:0"></span>
+  </div>
+  <div class="table-wrap">
+    <table id="pend-recibir-table">
+      <thead><tr><th>Desde</th><th>Pedido</th><th>Cliente</th><th style="min-width:220px">Qué se recoge</th><th>Viene por</th><th>Nº expedición</th><th>Seguimiento</th><th>Estado</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-nacex-historico" style="display:none">
+  <p style="margin:0.75rem 2rem 0;color:var(--muted);font-size:13px">Todos los envíos mandados a NACEX. Entran aquí en cuanto se manda el email de «Documentar envío en NACEX» y se quedan guardados, con la dirección que se mandó y los números de recogida y expedición.</p>
+  <div class="toolbar" style="margin:8px 2rem">
+    <input type="search" id="nacex-hist-buscar" placeholder="Buscar pedido, cliente, dirección, nº de recogida o expedición..." style="min-width:320px" autocomplete="off" />
+    <select id="nacex-hist-estado"><option value="">Todos</option><option value="pedido">Pedido a NACEX (sin salir)</option><option value="enviado">Enviados</option></select>
+    <button type="button" id="nacex-hist-excel" class="secondary">Descargar Excel</button>
+    <button type="button" id="nacex-hist-informe" class="secondary" title="Se manda solo el día 1 de cada mes con el mes anterior">📧 Mandar informe de un mes a contabilidad y Estrada</button>
+    <span id="nacex-hist-count" class="inventario-count" style="padding:0"></span>
+  </div>
+  <div class="table-wrap">
+    <table id="nacex-hist-table">
+      <thead><tr><th>Email a NACEX</th><th>Pedido</th><th>Cliente</th><th>Qué</th><th style="min-width:220px">Dirección mandada</th><th>Estado</th><th>Nº recogida</th><th>Nº expedición</th><th>Seguimiento</th><th>Enviado</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-nacex" style="display:none">
+  <div style="margin:0.75rem 2rem">
+    <p style="margin:0 0 8px;color:var(--muted);font-size:13px">Reposiciones que salen por NACEX. Cuando lleguen: «📧 Documentar envío en NACEX» (email a la operativa con la dirección del pedido), NACEX contesta con el nº de recogida y de expedición, y «✔ Enviado por NACEX».</p>
+    <div id="nacex-vista"></div>
+    <h3 style="margin:18px 0 6px">Enviados por NACEX</h3>
+    <div class="table-wrap">
+      <table id="nacex-enviados-table">
+        <thead><tr><th>Fecha</th><th>Pedido</th><th>Cliente</th><th>Qué</th><th>Nº recogida</th><th>Nº expedición</th><th>Seguimiento</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <div id="view-buscar-logistica" style="display:none">
@@ -2740,6 +3649,20 @@ function renderPage() {
         <option value="SEUR">SEUR</option>
         <option value="NACEX">NACEX (no va en ninguna carga: aviso al recibirlo)</option>
       </select>
+      <div id="reposicion-nacex-retorno-block" style="display:none">
+        <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">NACEX — ¿tiene algo para recoger en casa del cliente?</label>
+        <select id="reposicion-nacex-retorno" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px">
+          <option value="">Elige una opción...</option>
+          <option value="si">SÍ — envío con retorno (NACEX recoge algo en casa del cliente)</option>
+          <option value="no">NO — solo entrega</option>
+        </select>
+        <div id="reposicion-nacex-que-block" style="display:none">
+          <label style="display:block;font-size:12.5px;color:#c00000;font-weight:600;margin:8px 0 4px">¿Qué se recoge en casa del cliente?</label>
+          <input id="reposicion-nacex-que" type="text" placeholder="Ej.: tapa del canapé dañada, colchón 150X190..." autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
+        </div>
+        <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">NACEX — ¿cuántos bultos?</label>
+        <input id="reposicion-nacex-bultos" type="number" min="1" max="20" step="1" value="1" style="width:100px;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
+      </div>
     </div>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Unidades:</label>
     <input id="reposicion-unidades" type="number" min="1" max="20" step="1" value="1" style="width:100px;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
@@ -2766,6 +3689,35 @@ function renderPage() {
         <option value="instalaciones">Vuelve a nuestras instalaciones</option>
         <option value="desechar">Para desechar</option>
       </select>
+      <input id="reposicion-recoger-que" type="text" placeholder="¿Qué hay que recoger? Modelo y medida del colchón que tiene el cliente" autocomplete="off" style="display:none;width:100%;box-sizing:border-box;margin-top:6px;padding:8px 12px;border:1px solid var(--border);border-radius:8px" />
+      <div id="reposicion-recoger-aviso" class="recoger-que-aviso" style="font-size:11.5px;color:var(--muted);margin-top:2px;display:none">Obligatorio. Si se envió mal, lo que se recoge NO es lo mismo que lo que se envía ahora.</div>
+    </div>
+    <div id="reposicion-servicios-block" style="display:none;margin-top:8px;padding:8px 12px;border:1px solid var(--border);border-radius:8px">
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:4px">Servicio adicional en Furniture:</div>
+      <label style="display:block;font-size:13px;padding:2px 0"><input type="radio" name="reposicion-servicio" class="reposicion-servicio" value="" checked> Ninguno</label>
+      <label style="display:block;font-size:13px;padding:2px 0"><input type="radio" name="reposicion-servicio" class="reposicion-servicio" value="MONTAJE, DESMONTAJE Y RETIRADA DE LA MERCANCÍA PARA DEVOLVER A TIENDA"> Montaje, desmontaje y retirada de la mercancía para devolver a tienda</label>
+      <label style="display:block;font-size:13px;padding:2px 0"><input type="radio" name="reposicion-servicio" class="reposicion-servicio" value="MONTAJE, DESMONTAJE Y LLEVAR A DESECHAR"> Montaje, desmontaje y llevar a desechar</label>
+      <label style="display:block;font-size:13px;padding:2px 0"><input type="radio" name="reposicion-servicio" class="reposicion-servicio" value="RETIRAR MERCANCÍA Y DEVOLVER A TIENDA"> Retirar mercancía y devolver a tienda</label>
+      <input id="reposicion-servicio-otro" type="text" placeholder="Otro servicio (escríbelo)" autocomplete="off" style="width:100%;box-sizing:border-box;margin-top:4px;padding:8px 12px;border:1px solid var(--border);border-radius:8px" />
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px">Sin marcar nada, en Furniture va como siempre ("desmontar y retirar la pieza dañada, devolver a almacén").</div>
+    </div>
+    <div id="reposicion-mercancia-block" style="display:none;margin-top:8px">
+      <label style="display:block;font-size:12.5px;color:var(--muted);margin:0 0 4px">¿El cliente tiene la mercancía en casa?</label>
+      <select id="reposicion-mercancia-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px">
+        <option value="">Elige una opción...</option>
+        <option value="en-casa">Sí, la tiene en casa (se lleva solo la pieza)</option>
+        <option value="juntar">No — juntar con lo que está bien del pedido y entregar todo (referencia con BIS)</option>
+      </select>
+    </div>
+    <div id="reposicion-devfab-block" style="display:none;margin-top:8px">
+      <label style="display:block;font-size:12.5px;color:var(--muted);margin:0 0 4px">¿Furniture tiene que devolver algo a la fábrica?</label>
+      <select id="reposicion-devfab-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px">
+        <option value="">Elige una opción...</option>
+        <option value="si">Sí — hay que recoger algo y vuelve a fábrica</option>
+        <option value="no">No hay que devolver nada</option>
+      </select>
+      <input id="reposicion-devfab-que" type="text" placeholder="¿Qué hay que recoger? Pieza, medida y color de lo que tiene el cliente" autocomplete="off" style="display:none;width:100%;box-sizing:border-box;margin-top:4px;padding:8px 12px;border:1px solid var(--border);border-radius:8px" />
+      <div id="reposicion-devfab-aviso" class="recoger-que-aviso" style="font-size:11.5px;color:var(--muted);margin-top:2px;display:none">Obligatorio. Si se envió mal, lo que se recoge NO es lo mismo que lo que se envía ahora.</div>
     </div>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Nota adicional (opcional):</label>
     <input id="reposicion-motivo" type="text" placeholder="ej. llegó con un arañazo" autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
@@ -2792,6 +3744,12 @@ function renderPage() {
     </select>
     <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Motivo (opcional):</label>
     <input id="gesto-comercial-motivo" type="text" placeholder="ej. llegó con un arañazo, no compensa cambiar la pieza" autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px" />
+    <label style="display:block;font-size:12.5px;color:var(--muted);margin:8px 0 4px">Envío:</label>
+    <select id="gesto-comercial-agencia-select" style="width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid var(--border);border-radius:8px">
+      <option value="SEUR">SEUR (envío propio)</option>
+      <option value="FURNITURE">FURNITURE (junto con lo que le queda por enviar)</option>
+    </select>
+    <div id="gesto-comercial-agencia-nota" style="font-size:12px;color:var(--muted);margin-top:4px"></div>
     <div id="gesto-comercial-modal-result" class="inventario-count"></div>
     <div class="modal-actions">
       <button type="button" class="secondary" id="gesto-comercial-modal-cancel">Cancelar</button>
@@ -2849,6 +3807,19 @@ function renderPage() {
   </div>
 </div>
 
+<div class="modal-overlay" id="aviso-tareas-overlay">
+  <div class="modal-box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
+    <h3 id="aviso-tareas-titulo" style="margin-top:0">📌 Tareas pendientes</h3>
+    <div id="aviso-tareas-lista"></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <small style="color:var(--muted)" id="aviso-tareas-pie"></small>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="secondary" id="aviso-tareas-ver">Ir a Tareas</button>
+        <button type="button" id="aviso-tareas-cerrar">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="tarea-modal-overlay">
   <div class="modal-box" style="width:min(560px,94vw)">
     <h3 id="tarea-modal-titulo">Nueva tarea</h3>
@@ -2857,6 +3828,9 @@ function renderPage() {
       <label class="caso-campo" style="flex:1">Fecha <input type="date" id="tarea-fecha" /></label>
       <label class="caso-campo" style="flex:1">Para
         <select id="tarea-para"><option value="AMBOS">Los dos</option><option value="JENNIFER">Jennifer</option><option value="SERGIO">Sergio</option></select>
+      </label>
+      <label class="caso-campo" style="flex:1">Grupo
+        <select id="tarea-grupo"><option value="">Sin grupo</option><option value="FURNITURE">Furniture</option><option value="POLIVAL">Polival</option><option value="LUSO">Luso</option><option value="FERNANDO">Fernando</option><option value="SERGIO">Sergio</option><option value="JENNIFER">Jennifer</option><option value="CONTABILIDAD">Contabilidad</option><option value="SEUR">SEUR</option><option value="WORTEN">Worten</option><option value="TRABAJO PERSONAL">Trabajo personal</option></select>
       </label>
     </div>
     <label class="caso-campo">Pedido (opcional)
@@ -2896,6 +3870,25 @@ function renderPage() {
   </div>
 </div>
 
+<div class="modal-overlay" id="tiktok-modal-overlay">
+  <div class="modal-box" style="max-width:720px">
+    <h3>🎵 Pedido(s) nuevos de TikTok: contactar con el cliente</h3>
+    <p style="font-size:14px">Los pedidos de TikTok <b>NO se tramitan</b> (ni fábrica, ni envío, ni stock). Llama al cliente para que lo compre en nuestra web y apunta cómo ha ido.</p>
+    <div id="tiktok-modal-lista" style="font-size:14px"></div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="tiktok-modal-luego">Más tarde</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="doc-seur-modal-overlay">
+  <div class="modal-box" style="max-width:720px">
+    <h3>📎 SEUR pide documentación de una reclamación</h3>
+    <p style="font-size:14px">SEUR ha abierto un caso de reclamación y hay que aportar la documentación en su enlace. <b>Si se pasa el plazo, SEUR cierra el caso y ya no se puede reclamar.</b> Súbela y después pulsa «✅ Documentación subida». Si ahora no puedes, pulsa «⏰ Recordar mañana» y volverá a salir mañana a las 9:00.</p>
+    <div id="doc-seur-modal-lista" style="font-size:14px"></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="montana-modal-overlay">
   <div class="modal-box">
     <h3>⛰️ Pedido(s) a CP de MONTAÑA</h3>
@@ -2926,9 +3919,10 @@ function renderPage() {
   <div class="modal-box">
     <h3 id="seur-fecha-modal-titulo">¿En qué carga de SEUR sale?</h3>
     <p id="seur-fecha-modal-texto" style="color:var(--muted);font-size:13px"></p>
-    <label style="font-size:13px">Día de la carga (cualquier día laborable, aunque sea dentro de varias semanas):
+    <label style="display:block;font-size:13px;margin:8px 0"><input type="radio" name="seur-fecha-tipo" value="fecha" checked /> Día de la carga (cualquier día laborable, aunque sea dentro de varias semanas):
       <input type="date" id="seur-fecha-input" style="display:block;margin-top:6px" />
     </label>
+    <label style="display:block;font-size:13px;margin:8px 0"><input type="radio" name="seur-fecha-tipo" value="sin-fecha" /> Sin fecha: NO enviar hasta que el cliente nos diga</label>
     <div class="modal-actions">
       <button type="button" class="secondary" id="seur-fecha-quitar-btn" style="margin-right:auto;display:none">Quitar fecha</button>
       <button type="button" class="secondary" id="seur-fecha-modal-cancel">Cancelar</button>
@@ -2958,7 +3952,7 @@ const PAGO_MANUAL_USERS = ${JSON.stringify(PAGO_MANUAL_USERS)};
 const COLOR_META = ${JSON.stringify(COLOR_META)};
 const BASE_HEAD = ["","Nº Pedido","Fecha","Nombre","Dirección de entrega","Teléfono","Producto comprado","Servicios adicionales","Método de pago","Estado de pago","Situación de envío","Agencia","Seguimiento","Precio","Notas"];
 
-let currentUser = localStorage.getItem("hd_user");
+let currentUser = window.MODO_VENTAS ? sessionStorage.getItem("hd_user_ventas") : localStorage.getItem("hd_user");
 let editing = false;
 let pendingRefresh = false;
 
@@ -2981,6 +3975,9 @@ function refLabel(o) {
   // que se graba SIEMPRE lleva "REP" delante de la del pedido original
   // (ej. BEZEN12215 -> REPBEZEN12215), para distinguirla a simple vista de
   // un pedido normal — nunca se confunde con la referencia real del pedido.
+  // Revisión de montaje (Jennifer, 2026-10-22): "REVISIÓN" delante.
+  if (o && o.servicioMontaje) return "MONTAJE" + base;
+  if (o && o.revisionMontaje) return "REVISIÓN" + base;
   if (o && o.reposicion) return "REP" + base;
   // Gesto comercial (Jennifer, 2026-09-22): mismo patrón, "GC" delante.
   if (o && o.gestoComercial) return "GC" + base;
@@ -3037,7 +4034,7 @@ const PLAZO_LIMITE_DESDE = { "Carrefour": "2026-09-29" };
 // que pone esperando envío", 10002308790-A).
 // Conforama (Francia) desde el 28/09, igual que su tramitación (Jennifer,
 // 2026-10-01: "todos ya deben estar activos en ese sentido").
-const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18", "Leroy Merlin": "2026-09-23", "Maison Du Monde": "2026-09-22", "Conforama": "2026-09-28" };
+const PLAZO_PEDIDOS_DESDE = { "Conforama ES": "2026-09-24", "Worten": "2026-09-18", "Leroy Merlin": "2026-09-23", "Maison Du Monde": "2026-09-22", "Conforama": "2026-09-28", "Groupon": "2026-10-16" };
 function plazoEnvioActivo(o) {
   if (!o || !o.limiteEnvio) return false;
   // Sin aviso mientras el cliente no ha pagado (Jennifer, 2026-09-29:
@@ -3111,7 +4108,7 @@ function paymentStatusBadge(paymentStatus) {
 // aún sin marcar como pagada en Shopify — se tramita ya, con fecha de hoy.
 // Cuando luego se marque pagado en Shopify no se vuelve a tramitar.
 function pagoManualCell(o) {
-  let html = paymentStatusBadge(o.paymentStatus);
+  let html = paymentStatusBadge(o.paymentStatus) + tiktokTag(o);
   if (o.pagoConfirmadoManual) {
     const p = o.pagoConfirmadoManual;
     html += \`<br><span class="badge pago-manual-tag" title="Tramitado por \${escapeAttr(p.usuario || "")} el \${new Date(p.fecha).toLocaleString("es-ES")}">Pago confirmado a mano</span>\`;
@@ -3167,6 +4164,57 @@ function reposicionButton(order) {
   return \`<button type="button" class="\${cls}" data-reposicion-order-id="\${order.id}" title="\${escapeAttr(title)}">REP</button>\`;
 }
 
+// Botón "REVISIÓN MONTAJE" (Jennifer, 2026-10-22, BEZEN11036): Furniture va
+// a revisar el montaje sin llevar mercancía. Crea una línea propia en
+// Furniture > Pedidos pendientes (como una reposición) para meterla en una
+// carga y sacar la etiqueta.
+function revisionMontajeButton(order) {
+  const hechas = backorders.filter(b => b.revisionMontaje && String(b.orderId) === String(order.id));
+  const cls = "reposicion-pedido-btn revision-montaje-btn" + (hechas.length ? " reposicion-pedido-btn-activa" : "");
+  const title = hechas.length ? "Ya tiene " + hechas.length + " revisión(es)/servicio(s) de montaje pedido(s)" : "Pedir a Furniture una revisión o un servicio de montaje (sin mercancía)";
+  return \`<button type="button" class="\${cls}" data-revision-montaje-order-id="\${order.id}" title="\${escapeAttr(title)}">REVISIÓN / MONTAJE</button>\`;
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-revision-montaje-order-id]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const order = allOrders.find(o => String(o.id) === btn.dataset.revisionMontajeOrderId);
+  if (!order) return;
+  // Servicio de montaje (Jennifer, 2026-11-04): mismo botón, se elige.
+  const tipo = prompt("¿Qué quieres pedir a Furniture para " + refLabel(order) + "? (sin mercancía)\\n\\n1 = REVISIÓN de montaje (subida a piso)\\n2 = SERVICIO de montaje (subida y montaje)", "1");
+  if (tipo === null) return;
+  const esMontaje = String(tipo).trim() === "2";
+  if (!esMontaje && String(tipo).trim() !== "1") { alert("Escribe 1 o 2."); return; }
+  if (esMontaje) {
+    const detalle = prompt("¿Qué hay que montar? (sale en Observaciones de Furniture)\\nEj.: CANAPÉ ABATIBLE 105X190 GRIS", "");
+    if (detalle === null) return;
+    const refM = "MONTAJE" + refLabel(order);
+    const resM = await fetch("/api/inventario/reposicion", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, orderDate: order.orderDate, revisionMontaje: true, servicioMontaje: true, detalleMontaje: detalle }),
+    });
+    const rM = await resM.json().catch(() => ({}));
+    if (!resM.ok || !rM.ok) { alert(rM.error || "No se ha podido crear el servicio de montaje."); return; }
+    backorders = await (await fetch("/api/inventario/pendientes")).json();
+    btn.classList.add("reposicion-pedido-btn-activa");
+    alert("Servicio de montaje " + refM + " creado (subida y montaje). Está en Furniture > Pedidos pendientes para meterlo en una carga.");
+    return;
+  }
+  const ref = "REVISIÓN" + refLabel(order);
+  const yaHay = backorders.some(b => b.revisionMontaje && String(b.orderId) === String(order.id) && b.estado === "pendiente");
+  if (!confirm((yaHay ? "⚠️ Este pedido ya tiene una revisión de montaje pendiente.\\n\\n" : "") + "¿Crear la revisión de montaje " + ref + "?\\n\\nArtículo: REVISIÓN MONTAJE · Servicio: subida a piso · sin mercancía.\\nQuedará en Furniture > Pedidos pendientes para meterla en una carga.")) return;
+  const res = await fetch("/api/inventario/reposicion", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderId: order.id, orderNumber: order.orderNumber, platform: order.platform, orderRef: order.orderRef, orderDate: order.orderDate, revisionMontaje: true }),
+  });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido crear la revisión de montaje."); return; }
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  btn.classList.add("reposicion-pedido-btn-activa");
+  alert("Revisión de montaje " + ref + " creada. Está en Furniture > Pedidos pendientes.");
+}, true);
+
 // Botón "GC" (gesto comercial, Jennifer, 2026-09-22): mismo patrón que REP
 // — se pinta activo si este pedido ya tiene algún gesto comercial pedido
 // (cualquier estado), y el tooltip enseña qué se dio sin tener que abrir
@@ -3204,6 +4252,135 @@ function noSalioButton(order) {
   if (!colchonesSeurDelPedido(order).length) return "";
   return \`<button type="button" class="no-salio-btn" data-no-salio-id="\${escapeAttr(String(order.id))}" title="El colchón NO ha salido: vuelve a pendiente en su proveedor con la referencia siguiente (…2)">↩</button>\`;
 }
+// Añadir a tareas desde un pedido (Jennifer, 2026-10-23, 1626300273323-A:
+// "estoy pendiente de ver la incidencia con SEUR"): va al siguiente día
+// laborable (viernes -> lunes), para quien la crea, enlazada al pedido.
+function tareaPedidoButton(o, ref, sugerencia) {
+  if (!o || !o.id) return "";
+  const r = ref || refLabel(o);
+  return '<button type="button" class="secondary" style="padding:2px 8px;font-size:11px;margin-top:4px" data-tarea-pedido="' + escapeAttr(String(o.id)) + '" data-tarea-ref="' + escapeAttr(r) + '" data-tarea-sug="' + escapeAttr(sugerencia || "") + '" title="Añadir a las tareas del siguiente día laborable">📝 Tarea</button>';
+}
+// Abrir caso de reclamación desde el pedido (Jennifer, 2026-10-23): si ya
+// tiene uno abierto, lo abre; si no, uno nuevo con el pedido rellenado.
+function casoPedidoButton(o, motivo) {
+  if (!o || !o.id) return "";
+  const abierto = typeof casosAbiertosDePedido === "function" && allOrders.some(x => String(x.id) === String(o.id)) ? casosAbiertosDePedido(allOrders.find(x => String(x.id) === String(o.id))).length : 0;
+  return '<button type="button" class="secondary" style="padding:2px 8px;font-size:11px;margin-top:4px' + (abierto ? ";background:#fde68a" : "") + '" data-caso-pedido="' + escapeAttr(String(o.id)) + '" data-caso-motivo="' + escapeAttr(motivo || "") + '" title="' + (abierto ? "Ver el caso abierto de este pedido" : "Abrir un caso de reclamación para este pedido") + '">📒 ' + (abierto ? "Ver caso" : "Abrir caso") + '</button>';
+}
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-caso-pedido]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const o = allOrders.find(x => String(x.id) === btn.dataset.casoPedido);
+  if (!o) { alert("No encuentro el pedido."); return; }
+  const abiertos = casosAbiertosDePedido(o);
+  if (abiertos.length) { abrirModalCaso(abiertos[0]); return; }
+  abrirModalCaso(null, o);
+  if (btn.dataset.casoMotivo) document.getElementById("caso-motivo").value = btn.dataset.casoMotivo + " ";
+  document.getElementById("caso-responsable").value = ["JENNIFER", "SERGIO"].includes(currentUser) ? currentUser : "AMBOS";
+});
+function siguienteLaborable(iso) {
+  let d = sumarDias(iso, 1);
+  while ([0, 6].includes(new Date(d + "T12:00:00Z").getUTCDay())) d = sumarDias(d, 1);
+  return d;
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-tarea-pedido]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const ref = btn.dataset.tareaRef;
+  const fecha = siguienteLaborable(hoyMadrid());
+  const dia = new Date(fecha + "T12:00:00Z").toLocaleDateString("es-ES", { weekday: "long", day: "2-digit", month: "2-digit", timeZone: "UTC" });
+  const texto = prompt("Tarea para el " + dia + " — " + ref + "\\n\\n¿Qué hay que hacer?", (btn.dataset.tareaSug ? btn.dataset.tareaSug + " " : "") + ref);
+  if (texto === null || !texto.trim()) return;
+  const para = ["JENNIFER", "SERGIO"].includes(currentUser) ? currentUser : "AMBOS";
+  const res = await fetch("/api/tareas/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texto: texto.trim(), fecha, para, pedidoId: btn.dataset.tareaPedido, pedidoRef: ref, usuario: currentUser }) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido guardar la tarea."); return; }
+  mostrarAvisoBreve("Tarea añadida para el " + dia + ": " + texto.trim());
+  try { await loadTareas(); } catch (err) {}
+});
+// Quitar el servicio adicional de retirada (Jennifer, 2026-10-23, BEZEN12350:
+// lo pagó pero ya no lo quiere): sale tachado y no va a las Observaciones de
+// Furniture. Se puede recuperar.
+function tieneServicioAdicional(o) {
+  return [...String((o && o.services) || "").matchAll(/Servicios adicionales:\\s*([^·]+)/gi)].some(m => m[1].trim().toLowerCase() !== "ninguno");
+}
+// Montaje a mano (Jennifer, 2026-11-11, Carrefour 76758034-A: "necesito que
+// el montaje se pueda añadir o guardar"): order.montajeManual {valor} manda
+// sobre los servicios en el fichero de Furniture, listado y margen.
+function montajeEnServicios(services) {
+  return String(services || "").split("·").some(parte => {
+    const p = parte.trim().toLowerCase();
+    if (p.startsWith("montaje:")) return p.slice(8).trim().startsWith("con montaje");
+    return p.includes("montaje") && !p.includes("desmontaje") && !p.includes("sin montaje");
+  });
+}
+function montajeCell(o) {
+  if (!o || !o.id) return "";
+  const id = escapeAttr(String(o.id));
+  const mm = o.montajeManual;
+  const btn = (accion, texto, titulo) => '<button type="button" class="secondary" style="font-size:11px;padding:2px 6px;margin-top:4px" data-montaje-manual="' + id + '" data-accion="' + accion + '" title="' + escapeAttr(titulo) + '">' + texto + '</button>';
+  if (mm && mm.valor === true) return '<div style="color:#15803d;font-size:12px;font-weight:600;margin-top:4px">🔧 CON MONTAJE (añadido a mano' + (mm.usuario ? " por " + escapeAttr(mm.usuario) : "") + ')</div>' + btn("auto", "Quitar montaje", "Vuelve a lo que digan los servicios del pedido");
+  if (mm && mm.valor === false) return '<div style="color:#b91c1c;font-size:12px;font-weight:600;margin-top:4px">🔧 SIN MONTAJE (quitado a mano)</div>' + btn("auto", "Recuperar montaje", "Vuelve a lo que digan los servicios del pedido");
+  if (montajeEnServicios(o.services)) return '<div>' + btn("quitar", "Quitar montaje", "El cliente ya no quiere el montaje: no saldrá en Furniture") + '</div>';
+  return '<div>' + btn("añadir", "＋ Añadir montaje", "El pedido lleva montaje aunque no venga en los servicios: saldrá SUBIDA Y MONTAJE en Furniture") + '</div>';
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-montaje-manual]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const listasMkt = Object.values(typeof marketplaceOrdersByPlatform === "object" ? marketplaceOrdersByPlatform : {});
+  const order = allOrders.find(o => String(o.id) === btn.dataset.montajeManual)
+    || listasMkt.flat().find(o => String(o.id) === btn.dataset.montajeManual);
+  if (!order) return;
+  const accion = btn.dataset.accion;
+  const valor = accion === "añadir" ? true : accion === "quitar" ? false : null;
+  const pregunta = valor === true ? "¿Añadir MONTAJE a " + refLabel(order) + "?\\n\\nSaldrá SUBIDA Y MONTAJE en el fichero de Furniture."
+    : valor === false ? "¿Quitar el MONTAJE de " + refLabel(order) + "?\\n\\nNo saldrá el montaje en el fichero de Furniture."
+    : "¿Deshacer el cambio de montaje de " + refLabel(order) + "?\\n\\nVolverá a lo que digan los servicios del pedido.";
+  if (!confirm(pregunta)) return;
+  btn.disabled = true;
+  const montajeManual = valor === null ? null : { valor, usuario: currentUser || null };
+  const res = await fetch("/api/pedidos/shopify/meta", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: order.id, montajeManual }) });
+  if (!res.ok) { btn.disabled = false; alert("No se pudo guardar: " + res.status); return; }
+  const nuevo = montajeManual ? { ...montajeManual, fecha: new Date().toISOString() } : null;
+  for (const o of allOrders.concat(listasMkt.flat())) if (String(o.id) === String(order.id)) o.montajeManual = nuevo;
+  try { render(currentFiltered()); } catch (err) {}
+  try { renderFurniture(); } catch (err) {}
+  Object.keys(marketplaceOrdersByPlatform || {}).forEach(pid => { try { renderMarketplace(pid); } catch (err) {} });
+});
+function serviciosCell(o) {
+  return serviciosCellBase(o) + montajeCell(o);
+}
+function serviciosCellBase(o) {
+  const txt = (o && o.services) || "";
+  if (!o || !o.id || !tieneServicioAdicional(o)) return txt;
+  if (o.servicioQuitado) {
+    return '<span style="text-decoration:line-through;color:var(--muted)">' + escapeAttr(txt) + '</span>'
+      + '<div style="color:#b91c1c;font-size:12px;font-weight:600">Servicio quitado (no sale en Furniture)</div>'
+      + '<button type="button" class="secondary" style="font-size:11px;padding:2px 6px" data-servicio-quitar="' + escapeAttr(String(o.id)) + '" data-quitar="0">Recuperar servicio</button>';
+  }
+  return escapeAttr(txt) + '<div><button type="button" class="secondary" style="font-size:11px;padding:2px 6px;margin-top:4px" data-servicio-quitar="' + escapeAttr(String(o.id)) + '" data-quitar="1" title="El cliente ya no quiere el servicio: no saldrá la retirada en la etiqueta de Furniture">Quitar servicio</button></div>';
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-servicio-quitar]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const quitar = btn.dataset.quitar === "1";
+  const order = allOrders.find(o => String(o.id) === btn.dataset.servicioQuitar);
+  if (!order) return;
+  if (!confirm((quitar ? "¿Quitar el servicio adicional de " : "¿Recuperar el servicio adicional de ") + refLabel(order) + "?\\n\\n" + order.services + (quitar ? "\\n\\nNo saldrá la retirada en la etiqueta de Furniture." : ""))) return;
+  const res = await fetch("/api/pedidos/shopify/meta", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: order.id, servicioQuitado: quitar ? { usuario: currentUser || null } : null }) });
+  if (!res.ok) { alert("No se pudo guardar: " + res.status); return; }
+  for (const o of allOrders) if (String(o.id) === String(order.id)) o.servicioQuitado = quitar ? { fecha: new Date().toISOString() } : null;
+  render(currentFiltered());
+  try { renderFurniture(); } catch (err) {}
+});
 // Ventana para elegir unidades (Jennifer, 2026-09-29): "No ha salido" de
 // solo una parte del pedido, o cancelar unidades concretas. filas: [{ key,
 // label, max }] -> Promise<[{ key, unidades }] | null>.
@@ -3373,9 +4550,43 @@ function cambioNoSalioHtml(b) {
   return '<div class="cambio-medida-tag" style="background:#fef3c7;color:#92400e" title="' + escapeAttr(c.nota || "") + (c.fecha ? " (" + new Date(c.fecha).toLocaleDateString("es-ES") + ")" : "") + '">↩ CAMBIO NO REALIZADO: se le ofreció '
     + escapeAttr(nombreCortoModelo(c.a) + " " + (c.tallaA || "")) + " pero no había en stock. Vuelve a su " + escapeAttr(nombreCortoModelo(c.de) + " " + (c.tallaDe || "")) + "</div>";
 }
+// Tapicería sacada del almacén (Jennifer, 2026-10-20): "OJO, he usado una
+// pieza suelta del almacén".
+// "X pieza en stock y el resto pedido bajo referencia X" (Jennifer, 2026-10-20).
+function senalPiezasStock(b) {
+  return "🧩 " + b.piezasStockTexto.join(" + ") + " EN STOCK · EL RESTO " + (b.pedidoGenerado ? "PEDIDO" : "SE PIDE") + " BAJO REFERENCIA " + (b.referencia || "(sin referencia)");
+}
+function stockTapiceriaPedidoHtml(b) {
+  if ((b.piezasStockTexto || []).length) return '<div class="cambio-medida-tag" style="background:#fef3c7;color:#92400e" title="En el pedido a Polival va la nota para que la revisen en fábrica">' + escapeAttr(senalPiezasStock(b)) + "</div>";
+  return '<div class="cambio-medida-tag" style="background:#dcfce7;color:#166534">📦 SALE DEL STOCK DE TAPICERÍA' + (b.referencia ? " (" + escapeAttr(b.referencia) + ")" : "") + "</div>";
+}
+// Precio muy por debajo de tarifa (Jennifer, 2026-10-21), ver revisarPreciosPedidos.
+function alertaPrecioHtml(o) {
+  const a = o && o.alertaPrecio;
+  if (!a || !a.llamativo) return "";
+  const eur = n => n == null ? "?" : Number(n).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+  const txt = "⚠ PRECIO MUY POR DEBAJO DE TARIFA: pagado " + eur(a.pagado) + " · tarifa " + eur(a.tarifa) + (a.pct != null ? " (" + a.pct.toLocaleString("es-ES") + " %)" : "") + (a.margen != null ? " · margen " + eur(a.margen) : "");
+  if (a.revisadoPor) return '<div class="cambio-medida-tag" style="background:#f1f5f4;color:#475569" title="' + escapeAttr(txt) + '">✓ Precio revisado' + (a.revisadoPor.usuario ? " por " + escapeAttr(a.revisadoPor.usuario) : "") + " " + new Date(a.revisadoPor.fecha).toLocaleDateString("es-ES") + "</div>";
+  return '<div class="cambio-medida-tag" style="background:#fee2e2;color:#991b1b;font-weight:700" title="' + escapeAttr((a.motivos || []).join("; ")) + '">' + escapeAttr(txt)
+    + ' <button type="button" class="secondary" data-precio-revisado="' + escapeAttr(String(o.id)) + '" style="padding:1px 6px;font-size:11px;margin-left:4px">✓ Revisado</button></div>';
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-precio-revisado]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const id = btn.dataset.precioRevisado;
+  const r = await fetch("/api/pedidos/alerta-precio/revisado", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, usuario: currentUser }) });
+  if (!r.ok) { alert("No se ha podido marcar como revisado."); return; }
+  const o = allOrders.find(x => String(x.id) === id);
+  if (o && o.alertaPrecio) o.alertaPrecio.revisadoPor = { usuario: currentUser, fecha: new Date().toISOString() };
+  applyFilter();
+}, true);
 function cambiosPedidoHtml(o) {
-  return cambioMedidaHtml(o) + cambioModeloHtml(o)
-    + (o ? backorders.filter(b => String(b.orderId) === String(o.id) && b.cambioNoSalio && b.estado !== "cancelado").map(cambioNoSalioHtml).join("") : "");
+  return alertaPrecioHtml(o) + cambioMedidaHtml(o) + cambioColorPedidoHtml(o) + cambioModeloHtml(o)
+    + (o ? backorders.filter(b => String(b.orderId) === String(o.id) && b.cambioNoSalio && b.estado !== "cancelado").map(cambioNoSalioHtml).join("") : "")
+    + (o ? backorders.filter(b => String(b.orderId) === String(o.id) && b.cambioColor && b.estado !== "cancelado").map(cambioColorHtml).join("") : "")
+    + (o ? backorders.filter(b => String(b.orderId) === String(o.id) && b.estado !== "cancelado" && (b.stockTapiceriaId || (b.piezasStockTexto || []).length)).map(stockTapiceriaPedidoHtml).join("") : "");
 }
 function cambiarMedidaButton(order) {
   if (!order || order.cancelado) return "";
@@ -3444,6 +4655,139 @@ document.addEventListener("click", e => {
   e.stopPropagation();
   const order = allOrders.find(o => String(o.id) === btn.dataset.cambiarMedidaId);
   if (order) abrirCambioMedida(order);
+}, true);
+
+// Cambiar el color de la tapicería (Jennifer, 2026-10-20): dos colores, el
+// de las etiquetas de Furniture y el que se pide a fábrica (Polival).
+function cambioColorHtml(b) {
+  const c = b && b.cambioColor;
+  if (!c) return "";
+  // "EL CLIENTE CAMBIÓ EL COLOR" bien visible (Jennifer, 2026-10-21,
+  // BEZEN12246: en el almacén vieron etiquetas en un color y el canapé en otro).
+  return '<div class="cambio-medida-tag" style="background:#fee2e2;color:#991b1b;font-weight:700" title="Cambiado el ' + new Date(c.fecha).toLocaleDateString("es-ES") + (c.usuario ? " por " + escapeAttr(c.usuario) : "") + '">🎨 EL CLIENTE CAMBIÓ EL COLOR: ' + escapeAttr(c.de || "?") + " → " + escapeAttr(c.a || "?") + (c.fabrica ? " (fábrica: " + escapeAttr(c.fabrica) + ")" : "") + "</div>";
+}
+function articulosParaCambioColor(order) {
+  return articulosParaCambioMedida(order).filter(b => b.tipo === "tapiceria");
+}
+// Todo pedido con tapicería (Jennifer, 2026-10-20: "tiene que estar
+// disponible para todo lo que es tapicería"), también sin tramitar.
+function pedidoConTapiceria(order) {
+  return /canap|cabecero|base tapizada|tapizad/i.test(order.product || "")
+    || (order.items || []).some(i => /canap|cabecero|base tapizada|tapizad/i.test((i.title || "") + " " + (i.variantTitle || "")))
+    || backorders.some(b => String(b.orderId) === String(order.id) && b.tipo === "tapiceria" && b.estado !== "cancelado");
+}
+function cambioColorPedidoHtml(o) {
+  const c = o && o.cambioColor;
+  if (!c || c.aplicado) return "";
+  if (Array.isArray(c.porArticulo) && c.porArticulo.length) {
+    return c.porArticulo.map(x => '<div class="cambio-medida-tag" title="Se aplicará al tramitar el pedido">🎨 COLOR A CAMBIAR AL TRAMITAR: ' + escapeAttr((x.talla || "") + (x.de ? " " + x.de : "")) + " → " + escapeAttr(x.a || "(igual)") + (x.fabrica ? " (fábrica: " + escapeAttr(x.fabrica) + ")" : "") + "</div>").join("");
+  }
+  return '<div class="cambio-medida-tag" title="Se aplicará al tramitar el pedido">🎨 COLOR A CAMBIAR AL TRAMITAR: ' + escapeAttr(c.a || "(igual)") + (c.fabrica ? " (fábrica: " + escapeAttr(c.fabrica) + ")" : "") + "</div>";
+}
+function cambiarColorButton(order) {
+  if (!order || order.cancelado) return "";
+  if (!pedidoConTapiceria(order)) return "";
+  return '<button type="button" class="cambiar-medida-btn" data-cambiar-color-id="' + escapeAttr(String(order.id)) + '" title="Cambiar el color de la tapicería (el cliente lo quiere en otro color)">🎨</button>';
+}
+// Tapicería de un pedido SIN tramitar, sacada de las líneas de Shopify
+// (Jennifer, 2026-11-05, BEZEN12381: dos canapés, cada uno a su color).
+function tapiceriaSinTramitar(order) {
+  const filas = [];
+  (order.items || []).forEach(i => {
+    const texto = (i.title || "") + " " + (i.variantTitle || "");
+    const esTap = /canap|cabecero|base tapizada|tapizad/i.test(texto) || /^(CAN|CAB|BASE|MBASE|PACKCAN)/i.test(i.sku || "");
+    if (!esTap) return;
+    const partes = String(i.variantTitle || "").split("/").map(s => s.trim()).filter(Boolean);
+    const talla = partes.find(s => /\\d+\\s*[x×*]\\s*\\d+/i.test(s)) || "";
+    const color = partes.filter(s => s !== talla).join(" / ");
+    const qty = Math.max(1, Number(i.qty) || 1);
+    for (let n = 0; n < qty; n++) filas.push({ talla: normalizarMedidaTexto(talla), de: color, sku: i.sku || "", etiqueta: (qty > 1 ? (n + 1) + "/" + qty + " · " : "") + (i.title ? i.title + " · " : "") + (i.variantTitle || i.sku || "") });
+  });
+  return filas;
+}
+async function abrirCambioColor(order) {
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  const arts = articulosParaCambioColor(order);
+  const sinTramitar = !order.inventoryProcessed;
+  if (!arts.length && !sinTramitar) { alert("La tapicería de este pedido no está en Proveedores (ya salió o no se llegó a crear su pendiente), así que no hay nada que cambiar en el pedido a fábrica ni en las etiquetas."); return; }
+  const filasSin = !arts.length && sinTramitar ? tapiceriaSinTramitar(order) : [];
+  const ov = document.createElement("div");
+  ov.className = "modal-overlay open";
+  const inputs = (i, deshabilitado) => '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 0 22px;font-size:12px">'
+    + '<label>Furniture: <input type="text" class="cc-furniture" data-i="' + i + '" placeholder="Gris Niebla" style="width:140px"' + (deshabilitado ? " disabled" : "") + "></label>"
+    + '<label>Fábrica: <input type="text" class="cc-fabrica" data-i="' + i + '" placeholder="Duna Koala" style="width:140px"' + (deshabilitado ? " disabled" : "") + "></label></div>";
+  const filas = arts.length ? arts.map((b, i) => {
+    const cambiable = b.estado === "pendiente" || b.estado === "cubierto";
+    const estado = b.estado === "servido" ? "ya salió" : b.estado === "cubierto" ? "sale del stock" : b.pedidoGenerado ? "PEDIDO a fábrica" + (b.fechaPedidoFabrica ? " el " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : "") : "sin pedir";
+    return '<div style="margin:8px 0;padding:6px 0;border-top:1px solid var(--border,#e5e7eb)"><strong style="font-size:13px">'
+      + escapeAttr(b.cantidad + "x " + nombreCortoModelo(b.stockModel) + " " + b.talla + " · " + (b.color || "sin color")) + "</strong>" + (b.referencia ? " [" + escapeAttr(b.referencia) + "]" : "")
+      + ' <span style="color:' + (b.pedidoGenerado ? "#b45309" : "var(--muted)") + ';font-size:12px">· ' + escapeAttr(estado) + "</span>"
+      + (b.mercanciaFabrica ? '<div style="font-size:11px;color:var(--muted);margin-left:22px">Fábrica ahora: ' + escapeAttr(b.mercanciaFabrica) + "</div>" : "")
+      + inputs(i, !cambiable) + "</div>";
+  }).join("") : filasSin.map((f, i) => '<div style="margin:8px 0;padding:6px 0;border-top:1px solid var(--border,#e5e7eb)"><strong style="font-size:13px">' + escapeAttr(f.etiqueta) + "</strong>" + inputs(i, false) + "</div>").join("");
+  const variasFilas = (arts.length || filasSin.length) > 1;
+  ov.innerHTML = '<div class="modal-box"><h3>🎨 Cambiar color · ' + escapeAttr(refLabel(order)) + "</h3>"
+    + '<p style="color:var(--muted);font-size:13px;margin:0 0 8px">' + escapeAttr(order.product || "") + "</p>"
+    + (arts.some(b => b.pedidoGenerado && b.estado !== "servido")
+      ? '<div style="background:#fef3c7;color:#92400e;border-radius:6px;padding:8px 10px;margin:6px 0;font-size:13px"><strong>⚠ Ya se ha pedido a fábrica:</strong><br>' + arts.filter(b => b.pedidoGenerado && b.estado !== "servido").map(b => escapeAttr(nombreCortoModelo(b.stockModel) + " " + b.talla) + " — referencia de fábrica <strong>" + escapeAttr(b.referencia || "(sin referencia)") + "</strong>" + (b.fechaPedidoFabrica ? " (pedido el " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") + ")" : "")).join("<br>") + "<br>Avisa a Polival del cambio con esa referencia.</div>"
+      : "")
+    + (arts.length
+      ? '<p style="font-size:13px;margin:6px 0">Escribe el color nuevo en cada artículo que cambia (el que dejes vacío se queda como está):</p>' + filas
+      : filasSin.length
+        ? '<p style="font-size:13px;margin:6px 0">Pedido aún sin tramitar: escribe el color nuevo de cada artículo (vacío = no cambia). Se aplicará al tramitarlo.</p>' + filas
+        : '<p style="font-size:13px;margin:6px 0">Este pedido aún no está tramitado: el color nuevo se aplicará a toda su tapicería al tramitarlo.</p>' + inputs(0, false))
+    + (variasFilas ? '<div style="margin:8px 0;font-size:12px"><button type="button" class="secondary cc-copiar" style="padding:4px 10px;font-size:12px">Copiar el color del primero a todos</button></div>' : "")
+    + '<p style="font-size:12px;color:var(--muted);margin:6px 0 0">Furniture = color de las etiquetas. Fábrica = el que va en el pedido de Polival; si lo dejas vacío, lo saco de la receta con el color de Furniture. Lo que aún no se ha pedido queda rectificado en el pedido a proveedor; lo ya pedido sigue con su referencia (avisa tú a fábrica). En Shopify el pedido sigue con el color comprado.</p>'
+    + '<div class="modal-actions"><button type="button" class="secondary cc-cancelar">Cancelar</button><button type="button" class="cc-ok">Cambiar color</button></div></div>';
+  document.body.appendChild(ov);
+  const cerrar = () => ov.remove();
+  ov.querySelector(".cc-cancelar").addEventListener("click", cerrar);
+  ov.addEventListener("click", e => { if (e.target === ov) cerrar(); });
+  const copiar = ov.querySelector(".cc-copiar");
+  if (copiar) copiar.addEventListener("click", () => {
+    const f0 = ov.querySelector(".cc-furniture:not([disabled])"), b0 = ov.querySelector(".cc-fabrica:not([disabled])");
+    ov.querySelectorAll(".cc-furniture:not([disabled])").forEach(x => { x.value = f0 ? f0.value : ""; });
+    ov.querySelectorAll(".cc-fabrica:not([disabled])").forEach(x => { x.value = b0 ? b0.value : ""; });
+  });
+  const valor = (cls, i) => { const el = ov.querySelector("." + cls + '[data-i="' + i + '"]'); return el && !el.disabled ? el.value.trim() : ""; };
+  ov.querySelector(".cc-ok").addEventListener("click", async () => {
+    let body;
+    let resumen;
+    if (arts.length) {
+      const lista = arts.map((b, i) => ({ id: b.id, a: valor("cc-furniture", i), fabrica: valor("cc-fabrica", i), b })).filter(x => x.a || x.fabrica);
+      if (!lista.length) { alert("Escribe el color nuevo en al menos un artículo."); return; }
+      const yaPedidos = lista.map(x => x.b).filter(b => b.pedidoGenerado);
+      if (yaPedidos.length && !confirm("⚠ YA SE HA PEDIDO A FÁBRICA:\\n" + yaPedidos.map(b => "· " + nombreCortoModelo(b.stockModel) + " " + b.talla + " — referencia de fábrica " + (b.referencia || "(sin referencia)") + (b.fechaPedidoFabrica ? ", pedido el " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : "")).join("\\n") + "\\n\\nTendrás que avisar a Polival del cambio de color con esa referencia. ¿Seguir con el cambio?")) return;
+      resumen = lista.map(x => "· " + nombreCortoModelo(x.b.stockModel) + " " + x.b.talla + " " + (x.b.color || "") + " → Furniture: " + (x.a || "(sin cambio)") + " · Fábrica: " + (x.fabrica || "(según receta)")).join("\\n");
+      body = { orderId: order.id, porArticulo: lista.map(x => ({ id: x.id, a: x.a, fabrica: x.fabrica })), usuario: currentUser };
+    } else if (filasSin.length) {
+      const lista = filasSin.map((f, i) => ({ talla: f.talla, de: f.de, sku: f.sku, a: valor("cc-furniture", i), fabrica: valor("cc-fabrica", i) })).filter(x => x.a || x.fabrica);
+      if (!lista.length) { alert("Escribe el color nuevo en al menos un artículo."); return; }
+      resumen = lista.map(x => "· " + x.talla + " " + (x.de || "") + " → Furniture: " + (x.a || "(sin cambio)") + " · Fábrica: " + (x.fabrica || "(según receta)")).join("\\n");
+      body = { orderId: order.id, porArticulo: lista, usuario: currentUser };
+    } else {
+      const colorFurniture = valor("cc-furniture", 0), colorFabrica = valor("cc-fabrica", 0);
+      if (!colorFurniture && !colorFabrica) { alert("Escribe el color nuevo."); return; }
+      resumen = "Etiquetas Furniture: " + (colorFurniture || "(sin cambio)") + "\\nFábrica: " + (colorFabrica || "(según receta)");
+      body = { orderId: order.id, colorFurniture, colorFabrica, usuario: currentUser };
+    }
+    if (!confirm("¿Cambiar el color de " + refLabel(order) + "?\\n\\n" + resumen)) return;
+    const res = await fetch("/api/pedidos/cambiar-color", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok || !r.ok) { alert(r.error || "No se ha podido cambiar el color."); return; }
+    cerrar();
+    if (r.sinTramitar) { alert("Apuntado: el color nuevo se aplicará al tramitar el pedido."); await loadOrders(); return; }
+    alert("Color cambiado: " + r.cambios.length + " artículo(s)." + r.cambios.map(c => "\\n· " + nombreCortoModelo(c.stockModel) + " → " + (c.a || "") + (c.mercanciaFabrica ? "\\n   Fábrica: " + c.mercanciaFabrica : "")).join("") + (r.avisos.length ? "\\n\\n" + r.avisos.join("\\n") : ""));
+    await recargarTrasCancelar();
+  });
+}
+document.addEventListener("click", e => {
+  const btn = e.target.closest("[data-cambiar-color-id]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const order = allOrders.find(o => String(o.id) === btn.dataset.cambiarColorId);
+  if (order) abrirCambioColor(order);
 }, true);
 
 // Cancelar unidades (Jennifer, 2026-09-29): desde el pedido (⊘, eligiendo
@@ -3662,20 +5006,20 @@ function render(orders) {
   const tbody = document.querySelector("#orders tbody");
   tbody.innerHTML = orders.map(o => {
     const baseCells = \`
-      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}\${cambiarMedidaButton(o)}</div></td>
+      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${juntarEnvioButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}\${cambiarMedidaButton(o)}\${cambiarColorButton(o)}\${revisionMontajeButton(o)}\${tareaPedidoButton(o)}\${casoPedidoButton(o)}</div></td>
       <td>BEZEN\${o.orderNumber}\${grupoEnvioTag(o)}\${casoTag(o)}</td>
       <td>\${formatOrderDate(o.orderDate)}</td>
       <td>\${o.name}</td>
       <td>\${o.address}\${direccionButton(o)}</td>
       <td>\${o.phone}</td>
       <td>\${o.product}\${cambiosPedidoHtml(o)}\${lineasCanceladasHtml(o)}\${backorders.filter(b => b.orderId === o.id).map(abiertoTagHtml).join("")}</td>
-      <td class="services">\${o.services}</td>
+      <td class="services">\${serviciosCell(o)}</td>
       <td>\${o.paymentMethod}</td>
       <td>\${pagoManualCell(o)}</td>
       <td>\${statusBadge(o.shippingStatus)}</td>
       <td>\${agenciaBadge(o)}</td>
       <td>\${trackingCell(o)}</td>
-      <td class="price">\${o.price} \${o.currency || ""}</td>
+      <td class="price">\${o.price} \${o.currency || ""}\${(o.platform === "Shopify" || !o.platform) && margenDesdePedido(o) ? '<div class="margen-pedido" data-margen-id="' + escapeAttr(String(o.id)) + '"></div>' : ""}</td>
       <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
     \`;
     if (!access) return \`<tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>\${baseCells}</tr>\`;
@@ -3730,6 +5074,42 @@ function render(orders) {
       saveMeta(inp.dataset.id, { notas: inp.value });
       if (pendingRefresh) { pendingRefresh = false; loadOrders(); }
     });
+  });
+  pintarMargenesPedidos();
+}
+// Solo pedidos que entren desde el 21/10/2026 (Jennifer: "a partir de
+// mañana, no de los anteriores"): ya traen lo pagado en cada línea.
+function margenDesdePedido(o) {
+  const t = Date.parse(o.orderDate || "");
+  return !isNaN(t) && t >= Date.parse("2026-10-21T00:00:00+02:00");
+}
+// MARGEN BRUTO de cada venta de la web (Jennifer, 2026-10-20): se pide al
+// servidor para los pedidos que se ven y se guarda aquí para no repetir.
+const margenesPedidos = new Map();
+async function pintarMargenesPedidos() {
+  const celdas = [...document.querySelectorAll(".margen-pedido[data-margen-id]")];
+  const faltan = celdas.map(c => c.dataset.margenId).filter(id => !margenesPedidos.has(id));
+  for (let i = 0; i < faltan.length; i += 40) {
+    const lote = faltan.slice(i, i + 40);
+    try {
+      const r = await fetch("/api/pedidos/margen", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: lote }) }).then(x => x.json());
+      for (const id of lote) margenesPedidos.set(id, r[id] || null);
+    } catch (e) { for (const id of lote) margenesPedidos.set(id, null); }
+  }
+  document.querySelectorAll(".margen-pedido[data-margen-id]").forEach(c => {
+    const m = margenesPedidos.get(c.dataset.margenId);
+    if (!m) { c.innerHTML = ""; return; }
+    const titulo = "Pagado " + fmtPrecio(m.ingresos) + (m.aprox ? " (total del pedido)" : "") + " → sin IVA, financieras y publicidad " + fmtPrecio(m.neto)
+      + " · Coste piezas " + fmtPrecio(m.costes) + " · Transporte real " + fmtPrecio(m.envioReal) + (m.envioDetalle ? " (" + m.envioDetalle + ")" : "") + (m.madrid ? " · MADRID" : "")
+      + " · En el precio iba " + fmtPrecio(m.envioIncluidoEnPrecio) + " de envío → " + (m.ahorroTransporte >= 0 ? "+" : "") + fmtPrecio(m.ahorroTransporte) + " al margen"
+      + (m.montaje ? " · CON MONTAJE: el cliente paga " + fmtPrecio(m.ingresoMontaje) + " y el transporte es el de Furniture con montaje" : "") + ((m.avisosEnvio || []).length ? " · " + m.avisosEnvio.join("; ") : "") + (m.faltan.length ? " · Falta: " + m.faltan.join("; ") : "");
+    c.innerHTML = m.ok
+      ? '<div title="' + escapeAttr(titulo) + '" style="font-size:11px;margin-top:3px;white-space:nowrap;font-weight:600;color:' + (m.margen < 0 ? "#b91c1c" : "#15803d") + '">Margen ' + fmtPrecio(m.margen) + (m.pct != null ? " (" + m.pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + " %)" : "") + (m.madrid ? " · MAD" : "") + (m.montaje ? " · montaje" : "") + ((m.avisosEnvio || []).length ? " ⚠" : "") + "</div>"
+      // Transporte contemplado en los precios vs lo que cobra Furniture, y el montaje.
+      + '<div style="font-size:10.5px;color:var(--muted);white-space:nowrap">Transporte: en precio ' + fmtPrecio(m.envioIncluidoEnPrecio) + (m.montaje ? " + montaje sin IVA " + fmtPrecio(m.montajeSinIva) + " = " + fmtPrecio(Math.round((m.envioIncluidoEnPrecio + m.montajeSinIva) * 100) / 100) : "") + " · Furniture " + fmtPrecio(m.envioReal)
+      + ' <span style="font-weight:600;color:' + (m.ahorroTransporte >= 0 ? "#15803d" : "#b91c1c") + '">(' + (m.ahorroTransporte >= 0 ? "+" : "") + fmtPrecio(m.ahorroTransporte) + ")</span>"
+      + "</div>"
+      : '<div title="' + escapeAttr(titulo) + '" style="font-size:11px;margin-top:3px;color:var(--muted)">Margen: faltan costes</div>';
   });
 }
 
@@ -3840,11 +5220,24 @@ document.getElementById("review-modal-save").addEventListener("click", async () 
   closeReviewModal();
   render(currentFiltered());
   if (document.getElementById("view-pendientes").style.display !== "none") loadPendientes();
+  // Pestañas de marketplace: al contestar puede tramitarse (Groupon ECO).
+  for (const pid of Object.keys(marketplaceOrdersByPlatform)) {
+    const v = document.getElementById("view-" + pid);
+    if (v && v.style.display !== "none") { await loadOrders(); await loadMarketplacePedidos(pid); }
+  }
 });
 document.querySelector("#orders tbody").addEventListener("click", (e) => {
   const btn = e.target.closest("[data-review-id]");
   if (!btn) return;
   const order = allOrders.find(o => String(o.id) === btn.dataset.reviewId);
+  if (order) openReviewModal(order);
+});
+// Campana en las pestañas de marketplace (Jennifer, 2026-10-16, Groupon ECO).
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-review-id]");
+  if (!btn || btn.closest("#orders")) return;
+  const id = btn.dataset.reviewId;
+  const order = allOrders.find(o => String(o.id) === id) || Object.values(marketplaceOrdersByPlatform).flat().find(o => String(o.id) === id);
   if (order) openReviewModal(order);
 });
 document.querySelector("#orders tbody").addEventListener("click", (e) => {
@@ -3909,7 +5302,9 @@ document.querySelector("#orders tbody").addEventListener("click", async (e) => {
     body: JSON.stringify({ orderId: order.id, usuario: currentUser }),
   });
   const r = await res.json().catch(() => ({}));
-  if (!res.ok || !r.inventoryProcessed) {
+  if (res.ok && r.decisionSeur) {
+    alert("Pago apuntado ✔\\n\\n" + refLabel(order) + " lleva varios colchones por SEUR y solo hay stock de una parte:\\n" + ((r.seurMixedInfo && r.seurMixedInfo.colchones) || []).map(c => "· " + nombreCortoModelo(c.stockModel) + " " + c.talla + ": " + c.disponible + " de " + c.cantidad + " en stock").join("\\n") + "\\n\\nDecide en SEUR › «pendientes de decidir»: dividir ahora (sale ya lo que hay) o esperar a tenerlo todo (se tramita solo cuando llegue).");
+  } else if (!res.ok || !r.inventoryProcessed) {
     alert("No se ha podido tramitar: " + (r.error || "revisa el pedido (quizá el procesamiento está en pausa)."));
   }
   await loadOrders();
@@ -3980,8 +5375,74 @@ async function loadOrders() {
   allOrders = await res.json();
   applyFilter();
   revisarAvisosMontana();
+  revisarAvisosDocumentacionSeur();
+  revisarAvisosTiktok();
 }
 
+// Pedidos de TikTok (Jennifer, 2026-10-28): NUNCA se tramitan, pero sus
+// datos sirven para llamar al cliente y que lo compre en nuestra web. Aviso
+// con los datos de contacto hasta que se apunte el seguimiento. "Más tarde"
+// lo aparta hasta recargar la página.
+let tiktokAvisoAplazado = false;
+const TIKTOK_ESTADOS = { contactado: "📞 Contactado", "compra-web": "🛒 Lo compra en la web", "no-interesa": "✖ No le interesa" };
+function tiktokPendientes() {
+  return allOrders.filter(o => o.tiktokRetenido && !o.tiktokRevision && !o.inventoryProcessed && !o.cancelado && !o.shopifyCancelado);
+}
+function revisarAvisosTiktok() {
+  const ov = document.getElementById("tiktok-modal-overlay");
+  const lista = tiktokPendientes();
+  if (!lista.length) { ov.classList.remove("open"); return; }
+  if (tiktokAvisoAplazado) return;
+  const cont = document.getElementById("tiktok-modal-lista");
+  cont.innerHTML = lista.map((o, i) => '<div style="border:1px solid #ddd;border-radius:8px;padding:10px;margin:8px 0">'
+    + "<b>" + escapeAttr(refLabel(o)) + "</b> · " + escapeAttr(new Date(o.orderDate).toLocaleDateString("es-ES"))
+    + "<br><b>" + escapeAttr(o.name || "") + "</b> · 📞 <b>" + escapeAttr(o.phone || "sin teléfono") + "</b>"
+    + "<br>" + escapeAttr(o.address || "")
+    + "<br>" + escapeAttr(o.product || "") + " · <b>" + escapeAttr(o.price || "") + " €</b>"
+    + '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">'
+    + Object.entries(TIKTOK_ESTADOS).map(([k, t]) => '<button type="button" class="secondary tiktok-estado" data-i="' + i + '" data-estado="' + k + '">' + t + "</button>").join("")
+    + "</div></div>").join("");
+  cont.querySelectorAll(".tiktok-estado").forEach(b => b.addEventListener("click", async () => {
+    const o = lista[Number(b.dataset.i)];
+    const nota = prompt(TIKTOK_ESTADOS[b.dataset.estado] + " · " + refLabel(o) + "\\nNota (opcional):", "");
+    if (nota === null) return;
+    b.disabled = true;
+    await seguimientoTiktok(o, b.dataset.estado, nota);
+  }));
+  document.getElementById("tiktok-modal-luego").onclick = () => { tiktokAvisoAplazado = true; ov.classList.remove("open"); };
+  ov.classList.add("open");
+}
+async function seguimientoTiktok(o, estado, nota) {
+  const res = await fetch("/api/pedidos/tiktok-decision", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: o.id, estado, nota, usuario: currentUser || "" }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { alert(d.error || "No se ha podido guardar (" + res.status + ")."); return; }
+  await loadOrders();
+}
+function tiktokTag(o) {
+  if (o.paymentMethod !== "TIKTOK_SHOP" || !o.tiktokRetenido) return "";
+  const r = o.tiktokRevision;
+  const base = '<br><span class="badge" style="background:#fee2e2;color:#991b1b">🎵 TikTok · NO SE TRAMITA</span>';
+  if (!r) return base + '<br><button type="button" class="badge tiktok-revisar-btn" style="background:#fef3c7;color:#92400e;border:0;cursor:pointer">📞 Pendiente de contactar</button>';
+  return base + '<br><button type="button" class="badge tiktok-cambiar-btn" data-tiktok-id="' + escapeAttr(o.id) + '" style="background:#e0f2fe;color:#075985;border:0;cursor:pointer" title="'
+    + escapeAttr((r.usuario || "") + " · " + new Date(r.fecha).toLocaleString("es-ES") + (r.nota ? " · " + r.nota : "") + " (pulsa para cambiar)") + '">' + escapeAttr(TIKTOK_ESTADOS[r.estado] || r.estado) + "</button>"
+    + (r.nota ? '<br><small style="color:var(--muted)">' + escapeAttr(r.nota) + "</small>" : "");
+}
+document.addEventListener("click", async (e) => {
+  if (e.target.closest(".tiktok-revisar-btn")) { tiktokAvisoAplazado = false; revisarAvisosTiktok(); return; }
+  const cam = e.target.closest(".tiktok-cambiar-btn");
+  if (!cam) return;
+  const o = allOrders.find(x => String(x.id) === cam.dataset.tiktokId);
+  if (!o) return;
+  const opciones = Object.keys(TIKTOK_ESTADOS);
+  const n = prompt("Seguimiento de " + refLabel(o) + ":\\n" + opciones.map((k, i) => (i + 1) + ". " + TIKTOK_ESTADOS[k]).join("\\n") + "\\n\\nEscribe el número:", "");
+  const estado = opciones[Number(n) - 1];
+  if (!estado) return;
+  const nota = prompt("Nota (opcional):", (o.tiktokRevision && o.tiktokRevision.nota) || "");
+  if (nota === null) return;
+  await seguimientoTiktok(o, estado, nota);
+});
+
+let filtroCampanas = false;
 function currentFiltered() {
   const q = document.getElementById("search").value.trim().toLowerCase();
   const colorFilter = hasColorAccess() ? document.getElementById("color-filter").value : "";
@@ -3992,6 +5453,15 @@ function currentFiltered() {
   // suyos (Jennifer, 2026-09-17: pantallas separadas por plataforma;
   // generalizado 2026-09-19 al añadir Maison Du Monde).
   let filtered = allOrders.filter(o => o.platform === "Shopify" || !o.platform);
+  // Campanas pendientes de resolver (Jennifer, 2026-11-05): needsReview sin
+  // todas las preguntas contestadas (la campana roja, no la ya contestada).
+  const campanaPendiente = o => o.needsReview && !isReviewAnswered(o) && !o.cancelado && o.shippingStatus !== "fulfilled";
+  const nCampanas = filtered.filter(campanaPendiente).length;
+  const cntEl = document.getElementById("campanas-filter-count");
+  if (cntEl) cntEl.textContent = "(" + nCampanas + ")";
+  const btnCamp = document.getElementById("campanas-filter-btn");
+  if (btnCamp) btnCamp.classList.toggle("secondary", !filtroCampanas);
+  if (filtroCampanas) filtered = filtered.filter(campanaPendiente);
   if (q) {
     filtered = filtered.filter(o => ("bezen" + o.orderNumber).includes(q) || (o.name || "").toLowerCase().includes(q));
   }
@@ -4021,6 +5491,7 @@ function applyFilter() {
 }
 
 document.getElementById("search").addEventListener("input", applyFilter);
+document.getElementById("campanas-filter-btn").addEventListener("click", () => { filtroCampanas = !filtroCampanas; applyFilter(); });
 document.getElementById("pendientes-referencia-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-pedido-search").addEventListener("input", renderPendientes);
 document.getElementById("pendientes-sku-search").addEventListener("input", renderPendientes);
@@ -4028,22 +5499,29 @@ document.getElementById("pendientes-sku-search").addEventListener("input", rende
 // navegador (Jennifer, 2026-10-08): al marcar un colchón como recibido (y
 // mandarse la reserva al almacén) la fila seguía a la vista, y al volver a
 // pulsar se desmarcaba sin querer.
+// Cada proveedor tiene las suyas (Jennifer, 2026-10-22: "prefiero que cada
+// proveedor sea independiente"): se guardan por pestaña. Sin nada guardado
+// para esa pestaña, se usa lo que había antes en común.
+function casillaProveedorGuardada(clave, prov, porDefecto) {
+  try {
+    const v = localStorage.getItem(clave + "_" + prov);
+    const comun = localStorage.getItem(clave);
+    return v != null ? v === "1" : comun != null ? comun === "1" : porDefecto;
+  } catch (e) { return porDefecto; }
+}
+function aplicarCasillasProveedor(prov) {
+  document.getElementById("pendientes-ocultar-recibidos").checked = casillaProveedorGuardada("hd_ocultar_recibidos", prov, true);
+  document.getElementById("pendientes-mostrar-cancelados").checked = casillaProveedorGuardada("hd_mostrar_cancelados", prov, false);
+}
 (() => {
-  const chk = document.getElementById("pendientes-ocultar-recibidos");
-  try { chk.checked = localStorage.getItem("hd_ocultar_recibidos") !== "0"; } catch (e) { chk.checked = true; }
-  chk.addEventListener("change", () => {
-    try { localStorage.setItem("hd_ocultar_recibidos", chk.checked ? "1" : "0"); } catch (e) { /* sin localStorage */ }
-    renderPendientes();
-  });
-})();
-// "Mostrar cancelados" se recuerda en este navegador (Jennifer, 2026-09-29).
-(() => {
-  const chk = document.getElementById("pendientes-mostrar-cancelados");
-  try { chk.checked = localStorage.getItem("hd_mostrar_cancelados") === "1"; } catch (e) { /* sin localStorage */ }
-  chk.addEventListener("change", () => {
-    try { localStorage.setItem("hd_mostrar_cancelados", chk.checked ? "1" : "0"); } catch (e) { /* sin localStorage */ }
-    renderPendientes();
-  });
+  for (const [fid, clave] of [["pendientes-ocultar-recibidos", "hd_ocultar_recibidos"], ["pendientes-mostrar-cancelados", "hd_mostrar_cancelados"]]) {
+    const chk = document.getElementById(fid);
+    chk.addEventListener("change", () => {
+      try { localStorage.setItem(clave + "_" + currentProveedorFilter, chk.checked ? "1" : "0"); } catch (e) { /* sin localStorage */ }
+      renderPendientes();
+    });
+  }
+  aplicarCasillasProveedor("polival");
 })();
 // Si la ventana cambia de tamaño el texto de la cabecera puede pasar a 1 o 2
 // líneas y cambiar de alto — se re-mide (Jennifer, 2026-09-25, ver
@@ -4071,7 +5549,7 @@ document.getElementById("descargar-excel-pendientes-btn").addEventListener("clic
   await cargarCostesTarifa(lista.filter(b => b.proveedor === "LUSO" || b.proveedor === "NEW"));
   const costeUd = b => {
     if (b.proveedor !== "LUSO" && b.proveedor !== "NEW") return "";
-    const c = costesTarifa.get(b.stockModel + "|" + b.talla);
+    const c = costesTarifa.get(b.stockModel + "|" + tallaTarifa(b));
     return c && c.coste != null ? Math.round(c.coste * 100) / 100 : "";
   };
   const filas = lista
@@ -4160,6 +5638,7 @@ function updateUserBadge() {
 
 function onUserReady() {
   renderHead();
+  if (window.MODO_VENTAS) setTimeout(selectPresupuestos, 0);
   document.getElementById("color-filter-wrap").style.display = hasColorAccess() ? "flex" : "none";
   updateUserBadge();
   loadOrders();
@@ -4195,7 +5674,7 @@ function initUser() {
 document.querySelectorAll(".user-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     currentUser = btn.dataset.user;
-    localStorage.setItem("hd_user", currentUser);
+    if (window.MODO_VENTAS) sessionStorage.setItem("hd_user_ventas", currentUser); else localStorage.setItem("hd_user", currentUser);
     document.getElementById("user-gate").style.display = "none";
     onUserReady();
   });
@@ -4206,7 +5685,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-casos-revisar-seur", "view-devoluciones-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas"];
+const ALL_VIEWS = ["view-contactos", "view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-groupon", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-stock-tapiceria", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-devoluciones-fabrica", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-nacex", "view-casos-revisar-seur", "view-devoluciones-seur", "view-reclamaciones-seur", "view-nacex-historico", "view-pendiente-recibir", "view-material-seur", "view-revision-facturas-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-tarifas-completos", "view-tarifas-reforman","view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas", "view-publicidad", "view-liquidacion", "view-presupuestos", "view-boveda", "view-imagenes"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -4219,7 +5698,7 @@ function selectPlatform(id) {
 
   if (id === "shopify") {
     document.getElementById("view-shopify").style.display = "block";
-  } else if (id === "carrefour" || id === "maison-du-monde" || id === "worten" || id === "conforama" || id === "conforama-es" || id === "leroy-merlin") {
+  } else if (id === "carrefour" || id === "maison-du-monde" || id === "worten" || id === "conforama" || id === "conforama-es" || id === "leroy-merlin" || id === "groupon") {
     document.getElementById("view-" + id).style.display = "block";
     loadMarketplacePedidos(id);
   } else {
@@ -4278,7 +5757,7 @@ async function cargarPlazosMarketplace() {
   }
 }
 
-const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", abiertos: "Colchones abiertos", historial: "Historial de stock", pesos: "Pesos SEUR" };
+const INVENTARIO_LABELS = { catalogo: "Catálogo", stock: "Stock", abiertos: "Colchones abiertos", "stock-tapiceria": "Stock de tapicería", historial: "Historial de stock", pesos: "Pesos SEUR" };
 function selectInventario(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.inventario === id));
   document.getElementById("view-title").textContent = "Inventario · " + INVENTARIO_LABELS[id];
@@ -4287,22 +5766,48 @@ function selectInventario(id) {
   if (id === "catalogo") loadCatalogo();
   if (id === "stock") loadStock();
   if (id === "abiertos") loadAbiertos();
+  if (id === "stock-tapiceria") loadStockTapiceria();
   if (id === "historial") loadHistorial();
   if (id === "pesos") loadPesos();
 }
 
 const PROVEEDORES_LABELS = { polival: "Polival", luso: "Luso", new: "New", decision: "Pendiente de decisión", revisar: "Sin proveedor asignado" };
 let currentProveedorFilter = "polival";
+// Filtros propios de cada proveedor (Jennifer, 2026-10-22: "si tengo un
+// filtro puesto en Luso, ¿por qué me afecta a New o a Polival?"). Las
+// casillas y buscadores son los mismos en todas las pestañas, así que al
+// cambiar se guardan los de la que se deja y se ponen los de la que se abre.
+// "Ocultar recibidos" y "Mostrar cancelados" van aparte, guardadas por
+// proveedor en este navegador (ver aplicarCasillasProveedor).
+const FILTROS_PROVEEDOR_IDS = ["pendientes-pedido-search", "pendientes-sku-search", "pendientes-referencia-search"];
+const filtrosPorProveedor = {};
+function cambiarFiltrosProveedor(de, a) {
+  const guardado = {};
+  for (const fid of FILTROS_PROVEEDOR_IDS) {
+    const el = document.getElementById(fid);
+    if (el) guardado[fid] = el.type === "checkbox" ? el.checked : el.value;
+  }
+  filtrosPorProveedor[de] = guardado;
+  const nuevo = filtrosPorProveedor[a] || {};
+  for (const fid of FILTROS_PROVEEDOR_IDS) {
+    const el = document.getElementById(fid);
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = !!nuevo[fid];
+    else el.value = nuevo[fid] || "";
+  }
+}
 function selectProveedores(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.proveedores === id));
   document.getElementById("view-title").textContent = "Proveedores · " + PROVEEDORES_LABELS[id];
   hideAllViews();
   document.getElementById("view-pendientes").style.display = "block";
+  if (id !== currentProveedorFilter) cambiarFiltrosProveedor(currentProveedorFilter, id);
   currentProveedorFilter = id;
+  aplicarCasillasProveedor(id);
   loadPendientes();
 }
 
-const LOGISTICA_LABELS = { "buscar-logistica": "Buscar pedido en cargas", furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR", "devoluciones-seur": "SEUR · Devueltos" };
+const LOGISTICA_LABELS = { "material-seur": "SEUR · Solicitud de material", "pendiente-recibir": "Mercancía pendiente de recibir", "nacex-historico": "NACEX · Histórico", "revision-facturas-seur": "SEUR · Revisión de facturas", "buscar-logistica": "Buscar pedido en cargas", nacex: "NACEX · Envíos",furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", "devoluciones-fabrica": "Furniture · Pendiente de devolución a fábrica", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR", "devoluciones-seur": "SEUR · Devueltos", "reclamaciones-seur": "SEUR · Casos abiertos de reclamación" };
 function selectLogistica(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.logistica === id));
   document.getElementById("view-title").textContent = "Logística · " + LOGISTICA_LABELS[id];
@@ -4311,11 +5816,18 @@ function selectLogistica(id) {
   if (id === "furniture") return loadFurniture();
   if (id === "historial-cargas") return loadHistorialCargas();
   if (id === "casos-revisar") return loadCasosRevisar();
+  if (id === "devoluciones-fabrica") return loadDevolucionesFabrica();
   if (id === "seur") return loadSeur();
   if (id === "historial-cargas-seur") return loadHistorialCargasSeur();
   if (id === "casos-revisar-seur") return loadCasosRevisarSeur();
   if (id === "devoluciones-seur") return loadDevoluciones();
+  if (id === "reclamaciones-seur") return loadReclamacionesSeur();
+  if (id === "revision-facturas-seur") return loadRevisionFacturasSeur();
   if (id === "buscar-logistica") return cargarDatosLogistica();
+  if (id === "nacex") return loadNacex();
+  if (id === "nacex-historico") return loadNacexHistorico();
+  if (id === "pendiente-recibir") return loadPendienteRecibir();
+  if (id === "material-seur") return loadMaterialSeur();
 }
 
 // Histórico de reposiciones y gestos comerciales (Jennifer, 2026-09-22):
@@ -4337,13 +5849,372 @@ function selectHistorico(id) {
 // desglose paso a paso de la fórmula al pulsar sobre cada precio — "quiero
 // poder chequear cómo has sacado ese cálculo". Solo modelos de tipo
 // Colchones (por ahora, empezando por Toscana Deluxe).
+// FICHEROS PLATAFORMAS COMPLETOS (Jennifer, 2026-11-04): "me gustaría que
+// eso se quedara guardado en el programa... lo vamos a dividir por clientes.
+// En este primer caso CARREFOUR". El fichero de ofertas entero de cada
+// market se guarda una vez; el CSV de importación sale con los precios de
+// Tarifas al día (ver ficheros-completos.js en el servidor). Leroy Merlin
+// lleva varios países (canales) en el mismo fichero.
+const FC_CLIENTES = [{ id: "CARREFOUR", nombre: "Carrefour" }, { id: "LEROY_MERLIN", nombre: "Leroy Merlin" }, { id: "CONFORAMA_ES", nombre: "Conforama España" }, { id: "MAISON", nombre: "Maison du Monde" }, { id: "CONFORAMA_FR", nombre: "Conforama Francia" }, { id: "WORTEN", nombre: "Worten" }];
+let fcCliente = "CARREFOUR";
+let fcDatos = null;
+let fcCanal = null;
+const fcAbiertas = new Set();
+function fcEur(n) {
+  return n === null || n === undefined || isNaN(n) ? "—" : Number(n).toLocaleString("es-ES") + " €";
+}
+function fcFecha(iso) {
+  return iso ? new Date(iso).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+}
+function pintarClientesFicheroCompleto() {
+  document.getElementById("fc-clientes").innerHTML = FC_CLIENTES.map(c =>
+    '<button type="button" class="fc-cliente-btn' + (c.id === fcCliente ? "" : " secondary") + '" data-cliente="' + escapeAttr(c.id) + '">' + escapeAttr(c.nombre) + '</button>').join(" ");
+  document.querySelectorAll(".fc-cliente-btn").forEach(b => b.addEventListener("click", () => {
+    fcCliente = b.dataset.cliente;
+    fcCanal = null;
+    fcAbiertas.clear();
+    cargarFicheroCompleto();
+  }));
+}
+async function cargarFicheroCompleto() {
+  pintarClientesFicheroCompleto();
+  const cont = document.getElementById("fc-contenido");
+  cont.innerHTML = '<p class="inventario-count">Calculando los precios al día con Tarifas...</p>';
+  try {
+    const res = await fetch("/api/fichero-completo/" + encodeURIComponent(fcCliente));
+    fcDatos = await res.json();
+    if (!res.ok || fcDatos.ok === false) throw new Error(fcDatos.error || "Error " + res.status);
+  } catch (e) {
+    cont.innerHTML = '<p style="color:#dc2626">No se ha podido cargar: ' + escapeAttr(e.message) + '</p>';
+    return;
+  }
+  if (!fcCanal || !(fcDatos.canales || []).some(c => c.id === fcCanal)) fcCanal = (fcDatos.canales || [])[0] ? fcDatos.canales[0].id : null;
+  pintarFicheroCompleto();
+}
+function botonSubirFicheroCompleto(texto) {
+  return '<label class="secondary" style="display:inline-block;cursor:pointer;padding:8px 14px;border:1px solid var(--border, #d1d5db);border-radius:8px;font-size:14px">'
+    + '<input type="file" id="fc-subir" accept=".csv,text/csv,.xlsx" style="display:none" />' + escapeAttr(texto) + '</label>';
+}
+function fcSinTarifa(f) {
+  return !f.descatalogado && Object.values(f.canales || {}).some(c => c.oferta === null || c.oferta === undefined);
+}
+function fcCambiaPrecio(f) {
+  return (f.cambios || []).some(col => col !== "quantity");
+}
+function pintarFicheroCompleto() {
+  const d = fcDatos;
+  const cont = document.getElementById("fc-contenido");
+  if (!d.meta) {
+    cont.innerHTML = (fcCliente === "WORTEN" ? '<p>Todavía no hay fichero guardado para <strong>Worten</strong>. Sube el CSV de importación de ofertas de Worten (offers-import, con las columnas sku, internal-description, price, price[channel=WRT_PT_ONLINE]...).</p>' : '<p>Todavía no hay fichero guardado para <strong>' + escapeAttr(d.nombre) + '</strong>. Sube el CSV de IMPORTACIÓN del market (el que tiene las columnas sku, price, discount-price...). La exportación de ofertas no vale.</p>')
+      + botonSubirFicheroCompleto("⬆ Subir fichero de " + d.nombre);
+    enlazarSubidaFicheroCompleto();
+    return;
+  }
+  const filas = d.filas || [];
+  const sinTarifa = filas.filter(fcSinTarifa);
+  const cambian = filas.filter(fcCambiaPrecio);
+  const cambiaStock = filas.filter(f => (f.cambios || []).includes("quantity"));
+  const descatalogados = filas.filter(f => f.descatalogado);
+  const m = d.meta;
+  const varios = (d.canales || []).length > 1;
+  cont.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">'
+    + '<button type="button" id="fc-descargar">⬇ Descargar CSV de importación (precios al día)</button>'
+    + botonSubirFicheroCompleto("⬆ Sustituir fichero base (artículos nuevos)")
+    + '</div>'
+    + '<div class="inventario-count" style="margin-bottom:6px"><strong>' + filas.length + ' artículos</strong> · '
+    + (d.canales || []).map(c => escapeAttr(c.pais) + ": <strong>" + escapeAttr(c.columna) + "</strong>").join(" · ")
+    + (d.general ? (fcCliente === "CONFORAMA_ES" || fcCliente === "MAISON" ? ' · precio general = el tachado de España' : ' · precio general: se mantiene, salvo que haga falta subirlo para que todas las ofertas queden un 30 % por debajo') : "")
+    + ' · fichero guardado el ' + escapeAttr(fcFecha(m.cargado)) + (m.cargadoPor ? " por " + escapeAttr(m.cargadoPor) : "")
+    + (m.ultimaDescarga ? ' · última descarga el ' + escapeAttr(fcFecha(m.ultimaDescarga.fecha)) + (m.ultimaDescarga.usuario ? " por " + escapeAttr(m.ultimaDescarga.usuario) : "") : " · todavía no se ha descargado desde aquí") + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0">'
+    + '<span class="badge" style="background:' + (cambian.length ? "#f59e0b" : "#16a34a") + ';color:#fff">' + cambian.length + ' artículos cambian de precio desde la última descarga</span>'
+    + '<span class="badge" style="background:' + (sinTarifa.length ? "#dc2626" : "#16a34a") + ';color:#fff">' + sinTarifa.length + ' sin tarifa en algún país (se queda el último precio)</span>'
+    + '<span class="badge" style="background:' + (cambiaStock.length ? "#2563eb" : "#16a34a") + ';color:#fff">Stock: vivos a 100, descatalogados a 0' + (cambiaStock.length ? " · " + cambiaStock.length + " cambian" : "") + '</span>'
+    + (descatalogados.length ? '<span class="badge" style="background:#6b7280;color:#fff">' + descatalogados.length + ' descatalogados (stock 0)</span>' : "")
+    + '</div>'
+    + '<div class="toolbar" style="gap:8px;flex-wrap:wrap"><input type="search" id="fc-buscar" placeholder="Buscar SKU o descripción..." style="min-width:240px" />'
+    + (varios ? '<select id="fc-canal">' + d.canales.map(c => '<option value="' + escapeAttr(c.id) + '"' + (c.id === fcCanal ? " selected" : "") + '>' + escapeAttr(c.pais) + ' (' + filas.filter(f => f.canales && f.canales[c.id]).length + ')</option>').join("") + '</select>' : "")
+    + '<select id="fc-vista"><option value="todas">Todos los artículos</option><option value="cambian">Solo los que cambian</option><option value="sin">Solo sin tarifa</option><option value="descat">Solo descatalogados</option></select>'
+    + '<select id="fc-modo"><option value="calculo">Ver cálculo de precios</option><option value="fichero">Ver el fichero (como sale en el CSV)</option></select></div>'
+    + '<div class="table-wrap"><table id="fc-tabla"><thead></thead><tbody></tbody></table></div>';
+  document.getElementById("fc-buscar").addEventListener("input", pintarFilasFicheroCompleto);
+  document.getElementById("fc-vista").addEventListener("change", pintarFilasFicheroCompleto);
+  if (varios) document.getElementById("fc-canal").addEventListener("change", (e) => { fcCanal = e.target.value; pintarFilasFicheroCompleto(); });
+  try { if (localStorage.getItem("hd_fc_modo") === "fichero") document.getElementById("fc-modo").value = "fichero"; } catch (e) { /* sin almacenamiento */ }
+  document.getElementById("fc-modo").addEventListener("change", () => {
+    try { localStorage.setItem("hd_fc_modo", document.getElementById("fc-modo").value); } catch (e) { /* sin almacenamiento */ }
+    pintarFilasFicheroCompleto();
+  });
+  document.querySelector("#fc-tabla tbody").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr.fc-fila");
+    if (!tr) return;
+    if (fcAbiertas.has(tr.dataset.sku)) fcAbiertas.delete(tr.dataset.sku); else fcAbiertas.add(tr.dataset.sku);
+    pintarFilasFicheroCompleto();
+  });
+  document.getElementById("fc-descargar").addEventListener("click", () => {
+    if (sinTarifa.length && !confirm(sinTarifa.length + " artículos no tienen tarifa en algún país y saldrán con su último precio. ¿Descargar igualmente?")) return;
+    window.location.href = "/api/fichero-completo/" + encodeURIComponent(fcCliente) + "/csv?usuario=" + encodeURIComponent(currentUser || "");
+    mostrarAvisoBreve("Descargando el CSV de " + d.nombre + ". Súbelo en el panel del market: Ofertas > Importar.");
+    setTimeout(cargarFicheroCompleto, 6000);
+  });
+  enlazarSubidaFicheroCompleto();
+  pintarFilasFicheroCompleto();
+}
+function pintarFilasFicheroCompleto() {
+  const q = document.getElementById("fc-buscar").value.trim().toLowerCase();
+  const vista = document.getElementById("fc-vista").value;
+  const modo = document.getElementById("fc-modo").value;
+  const thead = document.querySelector("#fc-tabla thead");
+  const tbody = document.querySelector("#fc-tabla tbody");
+  const varios = (fcDatos.canales || []).length > 1;
+  const buscar = f => !q || (String(f.sku) + " " + String(f.skuNuestro || "") + " " + String(f.description || "")).toLowerCase().includes(q);
+  if (modo === "fichero") {
+    // El fichero tal cual saldrá en el CSV de importación (precios al día).
+    const H = fcDatos.cabeceras || [];
+    const filas = (fcDatos.filas || []).filter(f => buscar(f) && (vista !== "sin" || fcSinTarifa(f)) && (vista !== "descat" || f.descatalogado) && (vista !== "cambian" || fcCambiaPrecio(f)));
+    thead.innerHTML = "<tr>" + H.map(h => "<th>" + escapeAttr(h) + "</th>").join("") + "</tr>";
+    tbody.innerHTML = filas.map(f => "<tr" + (fcSinTarifa(f) ? ' style="background:#fef9c3"' : "") + ">" + H.map((h, i) => {
+      const nuevo = f.salida && Object.prototype.hasOwnProperty.call(f.salida, h);
+      const v = nuevo ? String(f.salida[h]) : String(f.valores[i] === undefined || f.valores[i] === null ? "" : f.valores[i]);
+      const cambia = (f.cambios || []).includes(h);
+      if (/description/i.test(h)) return '<td style="min-width:260px;font-size:12px" title="' + escapeAttr(v) + '">' + escapeAttr(v.length > 80 ? v.slice(0, 80) + "…" : v) + "</td>";
+      return '<td style="white-space:nowrap' + (cambia ? ";font-weight:700;color:#b45309" : "") + '"' + (cambia ? ' title="Antes: ' + escapeAttr(f.valores[i]) + '"' : "") + '>' + escapeAttr(v) + "</td>";
+    }).join("") + "</tr>").join("") || '<tr><td style="color:var(--muted)">Nada que mostrar.</td></tr>';
+    return;
+  }
+  const filas = (fcDatos.filas || []).filter(f => {
+    if (f.noTocar) return vista === "todas" && buscar(f);
+    const c = f.canales && f.canales[fcCanal];
+    if (!c || !buscar(f)) return false;
+    const sin = c.oferta === null || c.oferta === undefined;
+    if (vista === "sin" && (!sin || f.descatalogado)) return false;
+    if (vista === "descat" && !f.descatalogado) return false;
+    if (vista === "cambian" && !fcCambiaPrecio(f)) return false;
+    return true;
+  });
+  const conGeneral = !!fcDatos.general;
+  thead.innerHTML = '<tr><th></th><th>SKU</th><th>Descripción</th><th>Último descargado<br><span style="font-weight:400">oferta / tachado</span></th><th>Precio al día' + (varios ? " · " + escapeAttr((fcDatos.canales.find(c => c.id === fcCanal) || {}).pais || "") : "") + '<br><span style="font-weight:400">oferta / tachado</span></th>'
+    + (conGeneral ? '<th>Precio general<br><span style="font-weight:400">antes → al día</span></th>' : "") + '<th>Cómo se calcula</th></tr>';
+  const cols = conGeneral ? 7 : 6;
+  tbody.innerHTML = filas.map(f => {
+    // Artículo que se deja tal cual (lo gestiona Jennifer a mano).
+    if (f.noTocar) return '<tr style="background:var(--bg-soft, #f8fafc)"><td></td><td style="white-space:nowrap"><strong>' + escapeAttr(f.sku) + '</strong><br><span class="badge" style="background:#7c3aed;color:#fff">No se toca</span></td><td colspan="' + (cols - 2) + '" style="font-size:12px;color:var(--muted)">Se deja tal cual en el fichero (precio y stock): lo gestionas tú a mano.</td></tr>';
+    const c = f.canales[fcCanal];
+    const sin = c.oferta === null || c.oferta === undefined;
+    const cambia = !sin && (c.oferta !== c.ofertaGuardada || c.tachado !== c.tachadoGuardado);
+    const abierta = fcAbiertas.has(f.sku);
+    const flecha = !sin && c.ofertaGuardada !== null && c.oferta !== c.ofertaGuardada ? (c.oferta > c.ofertaGuardada ? ' <span style="color:#dc2626" title="Sube">▲</span>' : ' <span style="color:#16a34a" title="Baja">▼</span>') : "";
+    const desc = String(f.description || "");
+    const g = f.general;
+    let html = '<tr class="fc-fila" data-sku="' + escapeAttr(f.sku) + '" style="cursor:pointer' + (sin ? ";background:#fef9c3" : "") + '" title="Pulsa para ver el cálculo paso a paso">'
+      + '<td style="width:24px;color:var(--muted)">' + (abierta ? "▾" : "▸") + '</td>'
+      + '<td style="white-space:nowrap"><strong>' + escapeAttr(f.sku) + '</strong>' + (f.skuNuestro ? '<br><span style="font-size:12px;color:var(--muted)">= ' + escapeAttr(f.skuNuestro) + '</span>' : "") + (f.descatalogado ? '<br><span class="badge" style="background:#6b7280;color:#fff">Descatalogado · stock 0</span>' : "") + '</td>'
+      + '<td style="max-width:320px;font-size:12px" title="' + escapeAttr(desc) + '">' + (desc ? escapeAttr(desc.length > 80 ? desc.slice(0, 80) + "…" : desc) : '<span style="color:#dc2626">SIN DESCRIPCIÓN</span>') + '</td>'
+      + '<td style="white-space:nowrap">' + fcEur(c.ofertaGuardada) + ' / ' + fcEur(c.tachadoGuardado) + '</td>'
+      + '<td style="white-space:nowrap' + (cambia ? ";font-weight:700" : "") + '">' + (sin ? '<span style="color:#b45309">Sin tarifa: se queda ' + fcEur(c.ofertaGuardada) + '</span>' : fcEur(c.oferta) + ' / ' + fcEur(c.tachado) + flecha) + '</td>'
+      + (conGeneral ? '<td style="white-space:nowrap">' + (g ? fcEur(g.tachadoGuardado) + ' → <strong>' + fcEur(g.tachado) + '</strong>' : "—") + '</td>' : "")
+      + '<td style="font-size:12px;color:var(--muted)">' + escapeAttr(c.como || "") + '</td>'
+      + '</tr>';
+    if (abierta) html += '<tr><td></td><td colspan="' + (cols - 1) + '" style="background:var(--bg-soft, #f8fafc)">' + pasosFicheroCompletoHtml(c) + (conGeneral && g ? generalFicheroCompletoHtml(f) : "") + '</td></tr>';
+    return html;
+  }).join("") || '<tr><td colspan="' + cols + '" style="color:var(--muted)">Nada que mostrar.</td></tr>';
+}
+// Desglose paso a paso (Jennifer, 2026-11-04: "ver el desplegable de las
+// líneas... para ver cómo se han calculado los precios"): cada paso con su
+// importe y, debajo, la fórmula de Tarifas de la que sale ese precio.
+function pasosFicheroCompletoHtml(c) {
+  const pasos = c.pasos || [];
+  if (!pasos.length) return '<span style="color:var(--muted)">' + escapeAttr(c.como || "Sin desglose") + '</span>';
+  return '<ol style="margin:6px 0;padding-left:20px;font-size:13px;max-width:820px">' + pasos.map(p =>
+    '<li style="margin:4px 0' + (p.destacado ? ";font-weight:700" : "") + '"><div style="display:flex;justify-content:space-between;gap:16px"><span>' + escapeAttr(p.label) + '</span>' + (p.valor !== null && p.valor !== undefined ? '<span style="white-space:nowrap">' + fcEur(p.valor) + '</span>' : "") + '</div>'
+    + ((p.sub || []).length ? '<div style="margin:4px 0 6px 10px;padding:4px 8px;border-left:3px solid var(--border, #d1d5db);font-size:12px;color:var(--muted);font-weight:400">Cómo sale en Tarifas:'
+      + (p.sub || []).map(q => '<div style="display:flex;justify-content:space-between;gap:12px"><span>' + escapeAttr(q.label) + '</span><span style="white-space:nowrap">' + fcEur(q.valor) + '</span></div>').join("") + '</div>' : "")
+    + '</li>').join("") + '</ol>';
+}
+// Precio general de Leroy: se mantiene el actual salvo que alguna oferta
+// quede a menos de un 30 % por debajo (entonces sube a oferta ÷ 0,70).
+function generalFicheroCompletoHtml(f) {
+  const g = f.general;
+  if (g.igualAlCanal) return '<div style="margin:6px 0 4px;padding:6px 10px;border-top:1px dashed var(--border, #d1d5db);font-size:13px"><strong>Precio general</strong> = el tachado de España: <strong>' + fcEur(g.tachado) + '</strong> (antes ' + fcEur(g.tachadoGuardado) + ').' + (g.oferta !== null && g.oferta !== undefined ? ' Oferta general = la de España: <strong>' + fcEur(g.oferta) + '</strong>.' : ' Sin oferta general (va vacía).') + '</div>';
+  const sube = g.tachadoGuardado === null || g.tachado !== g.tachadoGuardado;
+  return '<div style="margin:6px 0 4px;padding:6px 10px;border-top:1px dashed var(--border, #d1d5db);font-size:13px"><strong>Precio general</strong>: '
+    + (sube ? 'el actual (' + fcEur(g.tachadoGuardado) + ') dejaba alguna oferta a menos de un 30 % por debajo → sube a la oferta más alta ÷ 0,70 = <strong>' + fcEur(g.tachado) + '</strong>'
+      : 'se mantiene el actual, <strong>' + fcEur(g.tachado) + '</strong> (mínimo para el 30 %: ' + fcEur(g.minimo) + ')')
+    + '. Oferta general = la de ' + (fcCliente === 'WORTEN' ? 'Portugal' : 'España') + ': <strong>' + fcEur(g.oferta) + '</strong>.</div>';
+}
+function enlazarSubidaFicheroCompleto() {
+  const inp = document.getElementById("fc-subir");
+  if (!inp) return;
+  inp.addEventListener("change", async () => {
+    const file = inp.files && inp.files[0];
+    if (!file) return;
+    if (fcDatos && fcDatos.meta && !confirm("Esto SUSTITUYE el fichero guardado de " + fcDatos.nombre + " (" + fcDatos.meta.total + " artículos) por " + file.name + ". ¿Seguir?")) { inp.value = ""; return; }
+    let csv;
+    // Worten da el fichero de ofertas en .xlsx: se pasa a CSV aquí (Jennifer, 2026-11-06).
+    if (/\\.xlsx$/i.test(file.name)) {
+      const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+      // Valores en bruto: el xlsx de Worten trae un formato de número vacío
+      // y sheet_to_csv dejaba en blanco Precio original, Umbral, Precio de
+      // descuento y Plazo (2026-11-06).
+      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: "", blankrows: false });
+      const esc = v => { const s = v === null || v === undefined ? "" : String(v); return /[;"\\r\\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+      csv = aoa.map(r => r.map(esc).join(";")).join("\\n") + "\\n";
+    } else csv = await file.text();
+    const res = await fetch("/api/fichero-completo/" + encodeURIComponent(fcCliente) + "/cargar", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ csv, usuario: currentUser || null, nombre: file.name }),
+    });
+    const r = await res.json().catch(() => ({}));
+    inp.value = "";
+    if (!res.ok || r.ok === false) { alert(r.error || "No se ha podido guardar el fichero."); return; }
+    mostrarAvisoBreve("Fichero de " + (fcDatos ? fcDatos.nombre : fcCliente) + " guardado: " + r.meta.total + " artículos.");
+    cargarFicheroCompleto();
+  });
+}
+
+// TARIFA REFORMAN (Jennifer, 2026-11-17): el catálogo en Excel se sube una
+// vez; al descargarlo sale igual, con la columna Precio recalculada:
+// (coste + transporte España) ÷ 0,7, sin IVA, 2 decimales. Packs = suma de
+// piezas sin descuento. Ver reforman.js en el servidor.
+let rfDatos = null;
+const rfAbiertas = new Set();
+function rfEur(n) {
+  return n === null || n === undefined || isNaN(n) ? "—" : Number(n).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+}
+async function cargarReforman() {
+  const cont = document.getElementById("rf-contenido");
+  cont.innerHTML = '<p class="inventario-count">Calculando los precios de Reforman con Tarifas...</p>';
+  try {
+    const res = await fetch("/api/reforman");
+    rfDatos = await res.json();
+    if (!res.ok || rfDatos.ok === false) throw new Error(rfDatos.error || "Error " + res.status);
+  } catch (e) {
+    cont.innerHTML = '<p style="color:#dc2626">No se ha podido cargar: ' + escapeAttr(e.message) + '</p>';
+    return;
+  }
+  pintarReforman();
+}
+function rfBotonSubir(texto) {
+  return '<label class="secondary" style="display:inline-block;cursor:pointer;padding:8px 14px;border:1px solid var(--border, #d1d5db);border-radius:8px;font-size:14px">'
+    + '<input type="file" id="rf-subir" accept=".xlsx,.xls" style="display:none" />' + escapeAttr(texto) + '</label>';
+}
+function rfCambia(f) {
+  return f.precio !== null && f.precio !== undefined && (f.precioGuardado === null || Math.abs(f.precio - f.precioGuardado) >= 0.005);
+}
+function pintarReforman() {
+  const d = rfDatos;
+  const cont = document.getElementById("rf-contenido");
+  const explica = '<p style="font-size:13px;color:var(--muted);margin:0 0 10px">Precio = (precio de coste + transporte España) ÷ 0,7, sin IVA, con 2 decimales. Packs = suma de las piezas, sin descuento. Base con montaje = + 19 € al coste. El resto de columnas del Excel salen exactamente igual.</p>';
+  if (!d.meta) {
+    cont.innerHTML = explica + '<p>Todavía no hay Excel de Reforman guardado. Sube el catálogo (columna A = SKU, columna Precio).</p>' + rfBotonSubir("⬆ Subir Excel de Reforman");
+    rfEnlazarSubida();
+    return;
+  }
+  const filas = d.filas || [];
+  const sin = filas.filter(f => f.precio === null || f.precio === undefined);
+  const cambian = filas.filter(rfCambia);
+  const m = d.meta;
+  cont.innerHTML = explica
+    + '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">'
+    + '<button type="button" id="rf-descargar">⬇ Descargar Excel Reforman (precios al día)</button>'
+    + rfBotonSubir("⬆ Sustituir Excel base (artículos nuevos)")
+    + '</div>'
+    + '<div class="inventario-count" style="margin-bottom:6px"><strong>' + filas.length + ' artículos</strong> · Excel guardado el ' + escapeAttr(fcFecha(m.cargado)) + (m.cargadoPor ? " por " + escapeAttr(m.cargadoPor) : "") + (m.nombre ? " (" + escapeAttr(m.nombre) + ")" : "")
+    + (m.ultimaDescarga ? ' · última descarga el ' + escapeAttr(fcFecha(m.ultimaDescarga.fecha)) + (m.ultimaDescarga.usuario ? " por " + escapeAttr(m.ultimaDescarga.usuario) : "") : "") + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0">'
+    + '<span class="badge" style="background:' + (cambian.length ? "#f59e0b" : "#16a34a") + ';color:#fff">' + cambian.length + ' cambian de precio respecto al Excel guardado</span>'
+    + '<span class="badge" style="background:' + (sin.length ? "#dc2626" : "#16a34a") + ';color:#fff">' + sin.length + ' sin tarifa (se queda el precio del Excel)</span>'
+    + '</div>'
+    + '<div class="toolbar" style="gap:8px;flex-wrap:wrap"><input type="search" id="rf-buscar" placeholder="Buscar SKU o descripción..." style="min-width:240px" />'
+    + '<select id="rf-vista"><option value="todas">Todos los artículos</option><option value="cambian">Solo los que cambian</option><option value="sin">Solo sin tarifa</option></select></div>'
+    + '<div class="table-wrap"><table id="rf-tabla"><thead><tr><th></th><th>SKU</th><th>Descripción</th><th>Precio en el Excel guardado</th><th>Precio al día</th><th>Cómo se calcula</th></tr></thead><tbody></tbody></table></div>';
+  document.getElementById("rf-buscar").addEventListener("input", pintarFilasReforman);
+  document.getElementById("rf-vista").addEventListener("change", pintarFilasReforman);
+  document.querySelector("#rf-tabla tbody").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr.rf-fila");
+    if (!tr) return;
+    if (rfAbiertas.has(tr.dataset.sku)) rfAbiertas.delete(tr.dataset.sku); else rfAbiertas.add(tr.dataset.sku);
+    pintarFilasReforman();
+  });
+  document.getElementById("rf-descargar").addEventListener("click", () => {
+    if (sin.length && !confirm(sin.length + " artículos no tienen tarifa y saldrán con el precio del Excel guardado. ¿Descargar igualmente?")) return;
+    const iP = m.iPrecio;
+    const aoa = [m.cabeceras].concat(filas.map(f => {
+      const v = f.valores.slice();
+      if (f.precio !== null && f.precio !== undefined) v[iP] = f.precio;
+      return v;
+    }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Hoja1");
+    XLSX.writeFile(wb, "TARIFA REFORMAN " + new Date().toISOString().slice(0, 10) + ".xlsx");
+    fetch("/api/reforman/descargado", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ usuario: currentUser || null }) }).catch(() => {});
+  });
+  rfEnlazarSubida();
+  pintarFilasReforman();
+}
+function pintarFilasReforman() {
+  const q = document.getElementById("rf-buscar").value.trim().toLowerCase();
+  const vista = document.getElementById("rf-vista").value;
+  const filas = (rfDatos.filas || []).filter(f => {
+    if (q && !(f.sku + " " + f.descripcion).toLowerCase().includes(q)) return false;
+    const sin = f.precio === null || f.precio === undefined;
+    if (vista === "sin" && !sin) return false;
+    if (vista === "cambian" && !rfCambia(f)) return false;
+    return true;
+  });
+  const MAX = 600;
+  document.querySelector("#rf-tabla tbody").innerHTML = filas.slice(0, MAX).map(f => {
+    const sin = f.precio === null || f.precio === undefined;
+    const abierta = rfAbiertas.has(f.sku);
+    const flecha = rfCambia(f) && f.precioGuardado !== null ? (f.precio > f.precioGuardado ? ' <span style="color:#dc2626" title="Sube">▲</span>' : ' <span style="color:#16a34a" title="Baja">▼</span>') : "";
+    let html = '<tr class="rf-fila" data-sku="' + escapeAttr(f.sku) + '" style="cursor:pointer' + (sin ? ";background:#fef9c3" : "") + '" title="Pulsa para ver el cálculo paso a paso">'
+      + '<td style="width:24px;color:var(--muted)">' + (abierta ? "▾" : "▸") + '</td>'
+      + '<td style="white-space:nowrap"><strong>' + escapeAttr(f.sku) + '</strong></td>'
+      + '<td style="max-width:320px;font-size:12px">' + escapeAttr(f.descripcion || "") + '</td>'
+      + '<td style="white-space:nowrap">' + rfEur(f.precioGuardado) + '</td>'
+      + '<td style="white-space:nowrap' + (rfCambia(f) ? ";font-weight:700" : "") + '">' + (sin ? '<span style="color:#b45309">Sin tarifa: se queda ' + rfEur(f.precioGuardado) + '</span>' : rfEur(f.precio) + flecha) + '</td>'
+      + '<td style="font-size:12px;color:var(--muted)">' + escapeAttr(f.como || "") + '</td></tr>';
+    if (abierta) html += '<tr><td></td><td colspan="5" style="background:var(--bg-soft, #f8fafc)">' + pasosFicheroCompletoHtml(f) + '</td></tr>';
+    return html;
+  }).join("") + (filas.length > MAX ? '<tr><td colspan="6" style="color:var(--muted)">Mostrando ' + MAX + ' de ' + filas.length + '. Usa el buscador para ver el resto (el Excel descargado los lleva todos).</td></tr>' : "")
+    || '<tr><td colspan="6" style="color:var(--muted)">Nada que mostrar.</td></tr>';
+}
+function rfEnlazarSubida() {
+  const inp = document.getElementById("rf-subir");
+  if (!inp) return;
+  inp.addEventListener("change", async () => {
+    const file = inp.files && inp.files[0];
+    if (!file) return;
+    if (rfDatos && rfDatos.meta && !confirm("Esto SUSTITUYE el Excel guardado de Reforman (" + rfDatos.meta.total + " artículos) por " + file.name + ". ¿Seguir?")) { inp.value = ""; return; }
+    const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    const filas = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: "", blankrows: false });
+    const res = await fetch("/api/reforman/cargar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ filas, usuario: currentUser || null, nombre: file.name }) });
+    const r = await res.json().catch(() => ({}));
+    inp.value = "";
+    if (!res.ok || r.ok === false) { alert(r.error || "No se ha podido guardar el Excel."); return; }
+    mostrarAvisoBreve("Excel de Reforman guardado: " + r.meta.total + " artículos.");
+    cargarReforman();
+  });
+}
+
 function selectTarifas(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.tarifas === id));
   hideAllViews();
+  if (id === "reforman") {
+    document.getElementById("view-title").textContent = "Tarifas · Tarifa Reforman";
+    document.getElementById("view-tarifas-reforman").style.display = "block";
+    cargarReforman();
+    return;
+  }
   if (id === "plataformas") {
-    document.getElementById("view-title").textContent = "Tarifas · Ficheros plataformas";
+    document.getElementById("view-title").textContent = "Tarifas · Ficheros plataformas colchones API";
     document.getElementById("view-tarifas-plataformas").style.display = "block";
     cargarPlataformasExport();
+    return;
+  }
+  if (id === "completos") {
+    document.getElementById("view-title").textContent = "Tarifas · Ficheros plataformas completos";
+    document.getElementById("view-tarifas-completos").style.display = "block";
+    cargarFicheroCompleto();
     return;
   }
   document.getElementById("view-title").textContent = "Tarifas · Consultar";
@@ -4353,6 +6224,7 @@ function selectTarifas(id) {
 
 document.querySelectorAll(".nav-link").forEach(a => {
   a.addEventListener("click", (e) => {
+    if (a.dataset.externo) return; // Ventas: se abre en otra pestaña
     e.preventDefault();
     if (a.dataset.platform) selectPlatform(a.dataset.platform);
     else if (a.dataset.inventario) selectInventario(a.dataset.inventario);
@@ -4362,6 +6234,12 @@ document.querySelectorAll(".nav-link").forEach(a => {
     else if (a.dataset.tarifas) selectTarifas(a.dataset.tarifas);
     else if (a.dataset.precios) selectPreciosBezen();
     else if (a.dataset.plazos) selectPlazos(a.dataset.plazos);
+    else if (a.dataset.publicidad) selectPublicidad();
+    else if (a.dataset.liquidacion) selectLiquidacion();
+    else if (a.dataset.presupuestos) selectPresupuestos();
+    else if (a.dataset.boveda) selectBoveda();
+    else if (a.dataset.imagenes) selectImagenes();
+    else if (a.dataset.contactos) selectContactos();
     else if (a.dataset.agenda === "tareas") selectTareas();
     else if (a.dataset.agenda) selectAgenda();
   });
@@ -4407,6 +6285,1544 @@ const tarifasListEl = document.getElementById("tarifas-list");
 tarifasToggle.addEventListener("click", () => {
   tarifasToggle.classList.toggle("open");
   tarifasListEl.classList.toggle("open");
+});
+
+const presupuestosToggle = document.getElementById("presupuestos-toggle");
+const presupuestosListEl = document.getElementById("presupuestos-list");
+presupuestosToggle.addEventListener("click", () => {
+  presupuestosToggle.classList.toggle("open");
+  presupuestosListEl.classList.toggle("open");
+});
+const bovedaToggle = document.getElementById("boveda-toggle");
+const bovedaListEl = document.getElementById("boveda-list");
+bovedaToggle.addEventListener("click", () => {
+  bovedaToggle.classList.toggle("open");
+  bovedaListEl.classList.toggle("open");
+});
+const imagenesToggle = document.getElementById("imagenes-toggle");
+const imagenesListEl = document.getElementById("imagenes-list");
+imagenesToggle.addEventListener("click", () => {
+  imagenesToggle.classList.toggle("open");
+  imagenesListEl.classList.toggle("open");
+});
+const publicidadToggle = document.getElementById("publicidad-toggle");
+const publicidadListEl = document.getElementById("publicidad-list");
+publicidadToggle.addEventListener("click", () => {
+  publicidadToggle.classList.toggle("open");
+  publicidadListEl.classList.toggle("open");
+});
+
+// GASTO PUBLICITARIO (Jennifer, 2026-10-16): facturación con IVA, gasto y
+// ROAS bruto de Triple Whale, metidos a mano. Calcula ventas sin IVA (÷1,21),
+// % gasto sobre ventas sin IVA y ROAS neto (Jennifer: "dividir el total de
+// ventas sin IVA entre el gasto publicitario"). Un registro por día con las
+// 6 casillas, para el histórico.
+const PUB_IVA = 1.21;
+let pubDatos = {};
+function numEs(s) {
+  let t = String(s == null ? "" : s).trim().split(" ").join("").split("€").join("");
+  if (!t) return NaN;
+  if (t.includes(",")) t = t.split(".").join("").split(",").join(".");
+  else if (t.split(".").length > 2) t = t.split(".").join("");
+  return Number(t);
+}
+function eurEs(n) { return n == null || isNaN(n) ? "—" : n.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €"; }
+function decEs(n, d) { return n == null || isNaN(n) ? "—" : n.toLocaleString("es-ES", { minimumFractionDigits: d, maximumFractionDigits: d }); }
+function calcPub(fact, gasto) {
+  const sinIva = fact > 0 ? fact / PUB_IVA : NaN;
+  return { sinIva, pct: sinIva > 0 && gasto >= 0 ? gasto / sinIva * 100 : NaN, roasNeto: sinIva > 0 && gasto > 0 ? sinIva / gasto : NaN };
+}
+// Periodo de una consulta: del 1 del mes al día anterior.
+function periodoPub(fecha) {
+  const ayer = new Date(fecha + "T12:00:00Z");
+  ayer.setUTCDate(ayer.getUTCDate() - 1);
+  const hasta = ayer.toISOString().slice(0, 10);
+  return { desde: hasta.slice(0, 8) + "01", hasta };
+}
+function fechaCortaPub(f) { return f.slice(8, 10) + "/" + f.slice(5, 7) + "/" + f.slice(0, 4); }
+function periodoTexto(fecha) { const p = periodoPub(fecha); return "Del " + fechaCortaPub(p.desde) + " al " + fechaCortaPub(p.hasta); }
+function diaTexto(f) {
+  return new Date(f + "T12:00:00").toLocaleDateString("es-ES", { weekday: "short", day: "2-digit", month: "2-digit", year: "numeric" });
+}
+function pintarResultadosPub() {
+  const fact = numEs(document.getElementById("pub-facturacion").value);
+  const gasto = numEs(document.getElementById("pub-gasto").value);
+  const r = calcPub(fact, gasto);
+  const caja = (titulo, valor, nota) => '<div style="border:1px solid var(--border);border-radius:10px;padding:14px"><div style="font-size:13px;color:var(--muted)">' + titulo + '</div><div style="font-size:26px;font-weight:700;margin:4px 0">' + valor + '</div><div style="font-size:12px;color:var(--muted)">' + nota + "</div></div>";
+  document.getElementById("pub-resultados").innerHTML =
+    caja("Total ventas sin IVA", eurEs(r.sinIva), "Facturación ÷ 1,21")
+    + caja("% gasto publicitario", isNaN(r.pct) ? "—" : decEs(r.pct, 2) + " %", "Gasto ÷ ventas sin IVA × 100")
+    + caja("ROAS neto", decEs(r.roasNeto, 2), "Ventas sin IVA ÷ gasto publicitario");
+}
+function rellenarDiaPub() {
+  const fecha = document.getElementById("pub-fecha").value;
+  document.getElementById("pub-periodo").textContent = fecha ? "Datos: " + periodoTexto(fecha) : "";
+  const d = pubDatos[fecha];
+  document.getElementById("pub-facturacion").value = d ? decEs(d.facturacion, 2) : "";
+  document.getElementById("pub-gasto").value = d ? decEs(d.gasto, 2) : "";
+  document.getElementById("pub-roas").value = d && d.roasBruto ? decEs(d.roasBruto, 2) : "";
+  pintarResultadosPub();
+}
+// Cierre de mes = consulta del día 1 (Jennifer, 2026-10-16: los meses
+// cerrados "todos juntos y en algún tipo de desplegable"; el histórico queda
+// para el día a día).
+function esCierrePub(f) { return f.slice(8, 10) === "01"; }
+function pintarCierresPub() {
+  const cierres = Object.keys(pubDatos).filter(esCierrePub).sort();
+  document.querySelector("#pub-cierres tbody").innerHTML = cierres.length ? cierres.map(f => {
+    const d = pubDatos[f];
+    const p = periodoPub(f);
+    const t = new Date(p.desde + "T12:00:00").toLocaleDateString("es-ES", { month: "long", year: "numeric" });
+    return "<tr><td><b>" + t.charAt(0).toUpperCase() + t.slice(1) + "</b></td><td>" + eurEs(d.facturacion) + "</td><td>" + eurEs(d.gasto) + "</td><td>" + (d.roasBruto ? decEs(d.roasBruto, 2) : "—")
+      + "</td><td>" + eurEs(d.ventasSinIva) + "</td><td>" + (d.pctGasto == null ? "—" : decEs(d.pctGasto, 2) + " %") + "</td><td><b>" + decEs(d.roasNeto, 2) + "</b></td>"
+      + '<td><button type="button" class="secondary" data-pub-editar="' + f + '">Editar</button> <button type="button" class="secondary" data-pub-borrar="' + f + '">✕</button></td></tr>';
+  }).join("") : '<tr><td colspan="8" style="color:var(--muted)">Todavía no hay meses cerrados.</td></tr>';
+}
+function pintarTablaPub() {
+  pintarCierresPub();
+  const dias = Object.keys(pubDatos).filter(f => !esCierrePub(f)).sort().reverse();
+  let mesActual = "";
+  document.querySelector("#pub-tabla tbody").innerHTML = dias.length ? dias.map(f => {
+    const d = pubDatos[f];
+    const p = periodoPub(f);
+    let cab = "";
+    if (p.desde.slice(0, 7) !== mesActual) {
+      mesActual = p.desde.slice(0, 7);
+      const t = new Date(mesActual + "-15T12:00:00").toLocaleDateString("es-ES", { month: "long", year: "numeric" });
+      cab = '<tr><td colspan="10" style="background:var(--sidebar-hover, #eef2ef);font-weight:700;text-transform:uppercase">' + t + "</td></tr>";
+    }
+    return cab + "<tr><td><b>" + diaTexto(f) + "</b></td><td>" + periodoTexto(f) + "</td><td>" + eurEs(d.facturacion) + "</td><td>" + eurEs(d.gasto) + "</td><td>" + (d.roasBruto ? decEs(d.roasBruto, 2) : "—")
+      + "</td><td>" + eurEs(d.ventasSinIva) + "</td><td>" + (d.pctGasto == null ? "—" : decEs(d.pctGasto, 2) + " %") + "</td><td><b>" + decEs(d.roasNeto, 2) + "</b></td><td>" + escapeAttr(d.usuario || "")
+      + '</td><td><button type="button" class="secondary" data-pub-editar="' + f + '">Editar</button> <button type="button" class="secondary" data-pub-borrar="' + f + '">✕</button></td></tr>';
+  }).join("") : '<tr><td colspan="10" style="color:var(--muted)">Todavía no hay datos del día a día.</td></tr>';
+}
+async function selectPublicidad() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.publicidad === "gasto"));
+  hideAllViews();
+  document.getElementById("view-title").textContent = "Publicidad · Gasto publicitario";
+  document.getElementById("view-publicidad").style.display = "block";
+  const fechaInput = document.getElementById("pub-fecha");
+  if (!fechaInput.value) fechaInput.value = hoyMadrid();
+  pubDatos = await fetch("/api/publicidad").then(r => r.json()).catch(() => ({}));
+  rellenarDiaPub();
+  pintarTablaPub();
+}
+["pub-facturacion", "pub-gasto", "pub-roas"].forEach(id => document.getElementById(id).addEventListener("input", pintarResultadosPub));
+document.getElementById("pub-fecha").addEventListener("change", rellenarDiaPub);
+document.getElementById("pub-guardar").addEventListener("click", async () => {
+  const fecha = document.getElementById("pub-fecha").value;
+  const facturacion = numEs(document.getElementById("pub-facturacion").value);
+  const gasto = numEs(document.getElementById("pub-gasto").value);
+  const roasBruto = numEs(document.getElementById("pub-roas").value);
+  if (!fecha) { alert("Elige el día."); return; }
+  if (!(facturacion > 0) || !(gasto > 0)) { alert("Rellena la facturación y el gasto publicitario."); return; }
+  if (pubDatos[fecha] && !confirm("La consulta del " + diaTexto(fecha) + " ya tiene datos guardados. ¿Sustituirlos?")) return;
+  const r = await fetch("/api/publicidad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha, facturacion, gasto, roasBruto: isNaN(roasBruto) ? 0 : roasBruto, usuario: currentUser || "" }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.ok) { alert(d.error || "No se ha podido guardar."); return; }
+  pubDatos = d.publicidad;
+  pintarTablaPub();
+  document.getElementById("pub-msg").textContent = "✓ Guardado: consulta del " + diaTexto(fecha) + " (" + periodoTexto(fecha).toLowerCase() + ").";
+  setTimeout(() => { document.getElementById("pub-msg").textContent = ""; }, 3000);
+});
+document.getElementById("pub-cierres").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pub-editar],[data-pub-borrar]");
+  if (b) document.getElementById("pub-tabla").dispatchEvent(new CustomEvent("pubAccion", { detail: b }));
+});
+document.getElementById("pub-tabla").addEventListener("pubAccion", (e) => accionTablaPub(e.detail));
+document.getElementById("pub-tabla").addEventListener("click", (e) => accionTablaPub(e.target));
+async function accionTablaPub(target) {
+  const e = { target };
+  const ed = e.target.closest("[data-pub-editar]");
+  if (ed) { document.getElementById("pub-fecha").value = ed.dataset.pubEditar; rellenarDiaPub(); window.scrollTo({ top: 0, behavior: "smooth" }); return; }
+  const bo = e.target.closest("[data-pub-borrar]");
+  if (bo && confirm("¿Borrar los datos del " + diaTexto(bo.dataset.pubBorrar) + "?")) {
+    const r = await fetch("/api/publicidad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha: bo.dataset.pubBorrar, borrar: true }) });
+    const d = await r.json().catch(() => ({}));
+    if (d.ok) { pubDatos = d.publicidad; pintarTablaPub(); rellenarDiaPub(); }
+  }
+}
+
+// PRECIOS DE LIQUIDACIÓN (Jennifer, 2026-11-02): lista manual, independiente
+// de Tarifas y Precios BEZEN ("que no dé conflicto"). De Tarifas solo se LEE
+// coste y envío para rellenar el formulario; la fila guarda su propia copia.
+// Precio a coste: (coste + envío) × 1,21 × 1,04, € entero al alza. Tachado:
+// el precio tiene que salir un 80% más barato → tachado = precio ÷ 0,20.
+// Va en el menú de Precios BEZEN (Jennifer: "en otra sección que no sea
+// Precios de la web"), pero con sus propios datos.
+let liqFilas = [];
+let liqTarifaFilas = [];
+let liqModelosExtra = null;
+function liqCalcular(coste, envio) {
+  if (!(coste >= 0) || !(envio >= 0) || !(coste + envio > 0)) return null;
+  const precio = Math.ceil((coste + envio) * 1.21 * 1.04);
+  return { precio, tachado: Math.round(precio / 0.20) };
+}
+// PRESUPUESTOS A CLIENTES (Jennifer, 2026-11-03): mismo formato que su PDF
+// "PRESUPUESTO CHARETE" (logo, tabla, "Gracias por elegirnos", triángulo
+// verde y página 2 de "Información adicional" que se rellena en cada
+// presupuesto). Sin total por defecto: suelen ser opciones, no un sumatorio.
+// Sin nada relativo al plazo del presupuesto (Jennifer, 2026-11-12): ni en la página, ni en el PDF, ni en el editor.
+const PRESU_PIE_DEFECTO = "";
+let presuLista = [];
+let presuActual = null;
+let presuProductos = null; // [{ etiqueta, descripcion, precio, handle, titulo }]
+let presuProductosPorEtiqueta = new Map();
+
+// ===== Directorio de contraseñas cifrado (Jennifer, 2026-11-10) =====
+// Todo se cifra/descifra AQUÍ, en el navegador (WebCrypto). De la contraseña
+// maestra se derivan con PBKDF2-SHA256 (600.000 vueltas) 64 bytes: los 32
+// primeros son la clave AES-GCM (no extraíble, solo en memoria) y los 32
+// últimos la "clave de acceso" que el servidor comprueba por su SHA-256.
+// La maestra y la clave AES nunca salen del navegador ni se guardan.
+// OJO: este script vive dentro de un template literal: nada de comillas
+// invertidas, barras invertidas ni dólar-llave aquí.
+const BOV_ITER = 600000;
+const BOV_INACTIVIDAD_MS = 5 * 60 * 1000;
+let bovKey = null, bovAuth = null, bovEntradas = [], bovEditId = null, bovUltimaActividad = Date.now();
+const bovVisibles = new Set();
+
+function bovB64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+function bovDeB64(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function bovDerivar(pass, saltB64, iter) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt: bovDeB64(saltB64), iterations: iter, hash: "SHA-256" }, base, 512));
+  const key = await crypto.subtle.importKey("raw", bits.slice(0, 32), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+  const auth = bovB64(bits.slice(32));
+  bits.fill(0);
+  return { key, auth };
+}
+async function bovHash(authB64) {
+  return bovB64(new Uint8Array(await crypto.subtle.digest("SHA-256", bovDeB64(authB64))));
+}
+async function bovCifrar(key, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(obj))));
+  return { iv: bovB64(iv), ct: bovB64(ct) };
+}
+async function bovDescifrar(key, e) {
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: bovDeB64(e.iv) }, key, bovDeB64(e.ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+async function bovPost(ruta, datos) {
+  const res = await fetch("/api/boveda/" + ruta, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(datos) });
+  const j = await res.json().catch(() => ({ ok: false, error: "Respuesta no válida del servidor." }));
+  j.status = res.status;
+  return j;
+}
+function bovMostrar(panel) {
+  ["bov-cargando", "bov-crear", "bov-bloqueado", "bov-abierto"].forEach(id => { document.getElementById(id).style.display = id === panel ? "block" : "none"; });
+}
+function bovBloquear(motivo) {
+  bovKey = null; bovAuth = null; bovEntradas = []; bovEditId = null; bovVisibles.clear();
+  document.querySelector("#bov-tabla tbody").innerHTML = "";
+  document.getElementById("bov-modal-overlay").classList.remove("open");
+  document.getElementById("bov-cambiar-overlay").classList.remove("open");
+  ["bov-f-password", "bov-c-actual", "bov-c-p1", "bov-c-p2", "bov-abrir-p"].forEach(id => { document.getElementById(id).value = ""; });
+  if (document.getElementById("view-boveda").style.display !== "none") {
+    bovMostrar("bov-bloqueado");
+    document.getElementById("bov-abrir-msg").textContent = motivo || "";
+  }
+}
+["mousemove", "keydown", "click", "scroll", "touchstart"].forEach(ev => document.addEventListener(ev, () => { bovUltimaActividad = Date.now(); }, { passive: true }));
+setInterval(() => { if (bovKey && Date.now() - bovUltimaActividad > BOV_INACTIVIDAD_MS) bovBloquear("Bloqueado por inactividad."); }, 15000);
+
+// ===== Banco de imágenes (Jennifer, 2026-11-10): fotos por modelo del
+// catálogo, guardadas en su tamaño original en Cloudflare R2. La miniatura
+// (solo para la cuadrícula) se genera en el navegador y se guarda aparte.
+const IMG_GENERAL = "__general__";
+let imgFotos = [];
+let imgModeloSel = null; // null = todas
+let imgAbierta = null;
+let imgBorrarArmado = false;
+// Plan gratuito de Cloudflare R2: 10 GB. Aviso desde 8 GB y no se deja subir
+// por encima de 9,5 GB (margen de seguridad).
+const IMG_GB = 1024 * 1024 * 1024;
+const IMG_GRATIS = 10 * IMG_GB, IMG_AVISO = 8 * IMG_GB, IMG_TOPE = 9.5 * IMG_GB;
+let imgUsado = 0;
+function imgPintarEspacio() {
+  const pct = Math.min(100, imgUsado / IMG_GRATIS * 100);
+  const color = imgUsado >= IMG_TOPE ? "#dc2626" : imgUsado >= IMG_AVISO ? "#f59e0b" : "#16a34a";
+  const txt = imgUsado < IMG_GB ? Math.round(imgUsado / 1024 / 1024) + " MB" : (imgUsado / IMG_GB).toFixed(2).replace(".", ",") + " GB";
+  document.getElementById("img-espacio").innerHTML = "<div>Espacio usado: <b>" + txt + "</b> de 10 GB gratis (" + pct.toFixed(1).replace(".", ",") + " %)"
+    + (imgUsado >= IMG_TOPE ? " · <b style='color:#dc2626'>Lleno: no se pueden subir más fotos sin pagar</b>" : imgUsado >= IMG_AVISO ? " · <b style='color:#b45309'>Queda poco espacio gratis</b>" : "")
+    + "</div><div style='height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;margin-top:4px;max-width:420px'><div style='height:100%;width:" + pct + "%;background:" + color + "'></div></div>";
+}
+function imgNombreModelo(m) {
+  if (m === IMG_GENERAL) return "📁 " + (imgNombreGeneral || "General (sin modelo)");
+  try { return nombreCortoModelo(m) || m; } catch (e) { return m; }
+}
+function imgListaModelos() {
+  const set = new Set((catalogoProducts || []).map(p => p.stockModel || p.title).filter(Boolean));
+  imgFotos.forEach(f => { if (f.modelo && f.modelo !== IMG_GENERAL) set.add(f.modelo); });
+  return [...set].sort((a, b) => imgNombreModelo(a).localeCompare(imgNombreModelo(b), "es"));
+}
+// Carpetas y subcarpetas (Jennifer, 2026-11-12).
+let imgCarpetas = [];
+let imgNombreGeneral = "";
+let imgCarpetaSel = null; // null = raíz del modelo
+let imgSelModo = false;
+let imgSel = new Set();
+function imgCarpeta(id) { return id ? imgCarpetas.find(c => c.id === id) || null : null; }
+function imgHijas(modelo, padre) {
+  return imgCarpetas.filter(c => c.modelo === modelo && (c.padre || null) === (padre || null))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
+}
+// Carpetas desde la raíz hasta id (incluida).
+function imgRuta(id) {
+  const r = [];
+  let c = imgCarpeta(id), guard = 0;
+  while (c && guard++ < 50) { r.unshift(c); c = imgCarpeta(c.padre); }
+  return r;
+}
+function imgRutaTexto(id) { return imgRuta(id).map(c => c.nombre).join(" › "); }
+// Carpeta en la que se ve la foto (si su carpeta se borró o es de otro modelo, la raíz).
+function imgCarpetaDe(f) {
+  const c = imgCarpeta(f.carpeta);
+  return c && c.modelo === f.modelo ? c.id : null;
+}
+// Fotos de una carpeta contando sus subcarpetas.
+function imgCuentaCarpeta(c) {
+  const ids = new Set([c.id]);
+  let crece = true;
+  while (crece) { crece = false; imgCarpetas.forEach(x => { if (x.padre && ids.has(x.padre) && !ids.has(x.id)) { ids.add(x.id); crece = true; } }); }
+  return imgFotos.filter(f => f.modelo === c.modelo && ids.has(imgCarpetaDe(f))).length;
+}
+// Opciones [valor, texto] de todas las carpetas de un modelo, en árbol.
+function imgOpcionesCarpetas(modelo) {
+  const out = [["", "(sin carpeta)"]];
+  const rec = (padre, nivel) => imgHijas(modelo, padre).forEach(c => {
+    out.push([c.id, String.fromCharCode(160, 160).repeat(nivel) + "📁 " + c.nombre]);
+    rec(c.id, nivel + 1);
+  });
+  rec(null, 1);
+  return out;
+}
+async function imgPostCarpeta(accion, datos) {
+  const res = await fetch("/api/imagenes/carpetas/" + accion, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(Object.assign({ usuario: currentUser || "" }, datos)) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) { imgAviso(d.error || "No se pudo guardar la carpeta."); return null; }
+  imgAviso("");
+  if (d.carpetas) imgCarpetas = d.carpetas;
+  (d.fotos || []).forEach(nf => { const i = imgFotos.findIndex(x => x.id === nf.id); if (i >= 0) imgFotos[i] = nf; });
+  return d;
+}
+function imgSalirSeleccion() { imgSelModo = false; imgSel = new Set(); }
+function imgTam(b) {
+  if (!b) return "";
+  if (b < 1024 * 1024) return Math.round(b / 1024) + " KB";
+  return (b / 1024 / 1024).toFixed(1).replace(".", ",") + " MB";
+}
+function imgAviso(t) {
+  const el = document.getElementById("img-aviso");
+  el.textContent = t || "";
+  el.style.display = t ? "block" : "none";
+}
+async function selectImagenes() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.imagenes === "banco"));
+  hideAllViews();
+  document.getElementById("view-title").textContent = "Imágenes · Banco de imágenes";
+  document.getElementById("view-imagenes").style.display = "block";
+  if (!catalogoProducts || !catalogoProducts.length) {
+    try { catalogoProducts = await (await fetch("/api/inventario/catalogo")).json(); } catch (e) { /* sin catálogo solo sale General */ }
+  }
+  await imgCargar();
+}
+async function imgCargar() {
+  imgAviso("");
+  try {
+    const res = await fetch("/api/imagenes/lista", { cache: "no-store" });
+    const d = await res.json();
+    if (!res.ok) { imgAviso(d.error || "No se pudieron cargar las fotos."); imgFotos = []; }
+    else { imgFotos = d.fotos || []; imgUsado = d.usado || 0; imgCarpetas = d.carpetas || []; imgNombreGeneral = d.nombreGeneral || ""; }
+  } catch (e) { imgAviso("No se pudo conectar con el servidor."); imgFotos = []; }
+  imgPintarModelos();
+  imgPintarGrid();
+}
+function imgPintarModelos() {
+  const q = document.getElementById("img-buscar-modelo").value.trim().toLowerCase();
+  const soloCon = document.getElementById("img-solo-con").checked;
+  const cuenta = {};
+  imgFotos.forEach(f => { cuenta[f.modelo] = (cuenta[f.modelo] || 0) + 1; });
+  const fila = (m, etiqueta, n) => '<div class="img-modelo-item' + (imgModeloSel === m ? " activo" : "") + '" data-modelo="' + escapeAttr(m === null ? "" : m) + '" data-todas="' + (m === null ? "1" : "") + '" title="' + escapeAttr(m || "") + '"><span>' + escapeAttr(etiqueta) + '</span><span class="img-cuenta">' + (n || "") + '</span></div>';
+  let html = fila(null, "🖼️ Todas las fotos", imgFotos.length) + fila(IMG_GENERAL, imgNombreModelo(IMG_GENERAL), cuenta[IMG_GENERAL]);
+  imgListaModelos().forEach(m => {
+    const n = cuenta[m] || 0;
+    if (soloCon && !n) return;
+    const et = imgNombreModelo(m);
+    if (q && et.toLowerCase().indexOf(q) < 0 && m.toLowerCase().indexOf(q) < 0) return;
+    html += fila(m, et, n);
+  });
+  document.getElementById("img-modelos").innerHTML = html;
+}
+function imgPintarGrid() {
+  imgPintarEspacio();
+  const enModelo = imgModeloSel !== null;
+  if (imgCarpetaSel && !imgCarpeta(imgCarpetaSel)) imgCarpetaSel = null;
+  document.getElementById("img-modelo-titulo").textContent = enModelo ? imgNombreModelo(imgModeloSel) : "Todas las fotos";
+  document.getElementById("img-drop").style.display = enModelo && !imgSelModo ? "block" : "none";
+  // Barra de carpetas: ruta clicable y botones.
+  const bar = document.getElementById("img-carpetas-bar");
+  bar.style.display = enModelo ? "flex" : "none";
+  if (enModelo) {
+    const partes = ['<span class="img-ruta-link" data-ir-carpeta="">' + escapeAttr(imgNombreModelo(imgModeloSel)) + '</span>'];
+    imgRuta(imgCarpetaSel).forEach((c, i, arr) => {
+      partes.push(i === arr.length - 1 ? '<b>📂 ' + escapeAttr(c.nombre) + '</b>' : '<span class="img-ruta-link" data-ir-carpeta="' + escapeAttr(c.id) + '">' + escapeAttr(c.nombre) + '</span>');
+    });
+    document.getElementById("img-ruta").innerHTML = partes.join(" › ");
+    document.getElementById("img-renombrar-carpeta").style.display = imgCarpetaSel || imgModeloSel === IMG_GENERAL ? "" : "none";
+    document.getElementById("img-borrar-carpeta").style.display = imgCarpetaSel ? "" : "none";
+  }
+  const q = document.getElementById("img-buscar-foto").value.trim().toLowerCase();
+  // Buscando por nombre se mira en todo el modelo, con todas sus carpetas.
+  const lista = imgFotos
+    .filter(f => !enModelo || (f.modelo === imgModeloSel && (q || imgCarpetaDe(f) === imgCarpetaSel)))
+    .filter(f => !q || (f.nombre || "").toLowerCase().indexOf(q) >= 0)
+    .sort((a, b) => (b.fecha || "").localeCompare(a.fecha || ""));
+  const carpetas = enModelo && !q ? imgHijas(imgModeloSel, imgCarpetaSel) : [];
+  // Barra de selección.
+  const visibles = new Set(lista.map(f => f.id));
+  imgSel.forEach(id => { if (!visibles.has(id)) imgSel.delete(id); });
+  document.getElementById("img-sel-bar").style.display = imgSelModo ? "flex" : "none";
+  document.getElementById("img-sel-btn").style.display = imgSelModo ? "none" : "";
+  if (imgSelModo) {
+    document.getElementById("img-sel-n").textContent = imgSel.size + (imgSel.size === 1 ? " seleccionada" : " seleccionadas");
+    const dest = document.getElementById("img-sel-destino");
+    const antes = dest.value;
+    const nomGen = imgNombreModelo(IMG_GENERAL).replace("📁 ", "");
+    const ops = [[IMG_GENERAL + "|", "📁 " + nomGen + " (sin carpeta)"]];
+    imgOpcionesCarpetas(IMG_GENERAL).slice(1).forEach(o => ops.push([IMG_GENERAL + "|" + o[0], nomGen + " ›" + o[1]]));
+    if (imgModeloSel !== IMG_GENERAL) imgOpcionesCarpetas(imgModeloSel).forEach(o => ops.push([imgModeloSel + "|" + o[0], o[0] ? "Este modelo ›" + o[1] : "Este modelo (sin carpeta)"]));
+    dest.innerHTML = ops.map(o => '<option value="' + escapeAttr(o[0]) + '">' + escapeAttr(o[1]) + '</option>').join("");
+    if (antes && ops.some(o => o[0] === antes)) dest.value = antes;
+  }
+  const grid = document.getElementById("img-grid");
+  if (!lista.length && !carpetas.length) {
+    grid.innerHTML = '<div style="color:var(--muted);font-size:14px;grid-column:1/-1">' + (!enModelo ? "Todavía no hay fotos. Elige un modelo a la izquierda y sube las fotos." : q ? "Ninguna foto con ese nombre." : imgCarpetaSel ? "Esta carpeta está vacía. Pulsa «Subir fotos» o arrástralas aquí." : "Este modelo todavía no tiene fotos. Pulsa «Subir fotos» o arrástralas aquí.") + '</div>';
+    return;
+  }
+  const htmlCarpetas = carpetas.map(c => {
+    const n = imgCuentaCarpeta(c), subs = imgHijas(c.modelo, c.id).length;
+    return '<div class="img-card img-carpeta-card" data-carpeta="' + escapeAttr(c.id) + '" title="Abrir carpeta">'
+      + '<div class="img-card-thumb">📁</div>'
+      + '<div class="img-card-nombre" title="' + escapeAttr(c.nombre) + '"><b>' + escapeAttr(c.nombre) + '</b></div>'
+      + '<div class="img-card-meta">' + n + (n === 1 ? " foto" : " fotos") + (subs ? " · " + subs + (subs === 1 ? " carpeta" : " carpetas") : "") + '</div></div>';
+  }).join("");
+  grid.innerHTML = htmlCarpetas + lista.map(f => {
+    const ruta = imgRutaTexto(imgCarpetaDe(f));
+    const donde = !enModelo ? imgNombreModelo(f.modelo) + (ruta ? " › " + ruta : "") + " · " : (q && ruta ? "📁 " + ruta + " · " : "");
+    return '<div class="img-card' + (imgSel.has(f.id) ? " sel" : "") + '" data-id="' + escapeAttr(f.id) + '">'
+    + '<div class="img-card-thumb"><img loading="lazy" src="/api/imagenes/mini/' + encodeURIComponent(f.id) + '" alt="" onerror="this.style.display=&quot;none&quot;" /></div>'
+    + '<div class="img-card-nombre" title="' + escapeAttr(f.nombre) + '">' + escapeAttr(f.nombre) + '</div>'
+    + '<div class="img-card-meta">' + escapeAttr(donde) + escapeAttr(f.usuario || "") + (f.fecha ? " · " + new Date(f.fecha).toLocaleDateString("es-ES") : "") + '</div></div>';
+  }).join("");
+}
+async function imgMiniatura(file) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const lado = 480;
+    const esc = Math.min(1, lado / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(bmp.width * esc));
+    c.height = Math.max(1, Math.round(bmp.height * esc));
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(bmp, 0, 0, c.width, c.height);
+    return await new Promise(r => c.toBlob(r, "image/jpeg", 0.82));
+  } catch (e) { return null; }
+}
+async function imgSubir(files) {
+  if (imgModeloSel === null) { imgAviso("Primero elige a la izquierda el modelo donde guardar las fotos."); return; }
+  const lista = [...files].filter(f => (f.type || "").indexOf("image/") === 0 || /* HEIC de iPhone a veces sin tipo */ (f.name || "").toLowerCase().endsWith(".heic"));
+  if (!lista.length) { imgAviso("No hay ninguna imagen entre los archivos elegidos."); return; }
+  const totalNuevo = lista.reduce((t, f) => t + f.size, 0);
+  if (imgUsado + totalNuevo > IMG_TOPE) { imgAviso("No se suben: con estas fotos se pasaría del espacio gratuito (10 GB). Borra fotos que no hagan falta antes de subir más."); return; }
+  imgAviso("");
+  const prog = document.getElementById("img-progreso");
+  let ok = 0, mal = 0;
+  for (let i = 0; i < lista.length; i++) {
+    const f = lista[i];
+    prog.textContent = "Subiendo " + (i + 1) + " de " + lista.length + ": " + f.name + " (" + imgTam(f.size) + ")…";
+    try {
+      const qs = "?modelo=" + encodeURIComponent(imgModeloSel) + "&nombre=" + encodeURIComponent(f.name) + "&usuario=" + encodeURIComponent(currentUser || "") + (imgCarpetaSel ? "&carpeta=" + encodeURIComponent(imgCarpetaSel) : "");
+      const res = await fetch("/api/imagenes/subir" + qs, { method: "POST", headers: { "content-type": f.type || "application/octet-stream" }, body: f });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "error");
+      const mini = await imgMiniatura(f);
+      if (mini) await fetch("/api/imagenes/miniatura?id=" + encodeURIComponent(d.foto.id), { method: "POST", headers: { "content-type": "image/jpeg" }, body: mini });
+      imgFotos.push(d.foto);
+      imgUsado += f.size + (mini ? mini.size : 0);
+      ok++;
+    } catch (e) { mal++; imgAviso("No se pudo subir " + f.name + ": " + e.message); }
+  }
+  prog.textContent = ok + " foto" + (ok === 1 ? "" : "s") + " guardada" + (ok === 1 ? "" : "s") + (mal ? " · " + mal + " con error" : "") + ".";
+  imgPintarModelos();
+  imgPintarGrid();
+}
+function imgAbrir(id) {
+  const f = imgFotos.find(x => x.id === id);
+  if (!f) return;
+  imgAbierta = f;
+  imgBorrarArmado = false;
+  document.getElementById("img-m-borrar").textContent = "🗑 Borrar";
+  const url = "/api/imagenes/archivo/" + encodeURIComponent(f.id);
+  document.getElementById("img-modal-img").src = url;
+  document.getElementById("img-m-abrir").href = url;
+  document.getElementById("img-m-descargar").href = url + "?descargar=1";
+  document.getElementById("img-m-nombre").value = f.nombre || "";
+  const sel = document.getElementById("img-m-modelo");
+  sel.innerHTML = [IMG_GENERAL].concat(imgListaModelos()).map(m => '<option value="' + escapeAttr(m) + '"' + (m === f.modelo ? " selected" : "") + '>' + escapeAttr(imgNombreModelo(m)) + '</option>').join("");
+  imgPintarSelectCarpeta(f.modelo, imgCarpetaDe(f));
+  document.getElementById("img-m-info").textContent = "Subida por " + (f.usuario || "—") + (f.fecha ? " el " + new Date(f.fecha).toLocaleString("es-ES") : "") + " · " + imgTam(f.tam) + (f.editadoPor ? " · Último cambio: " + f.editadoPor : "");
+  document.getElementById("img-modal-overlay").classList.add("open");
+}
+function imgCerrar() {
+  document.getElementById("img-modal-overlay").classList.remove("open");
+  document.getElementById("img-modal-img").removeAttribute("src");
+  imgAbierta = null;
+}
+document.getElementById("img-modelos").addEventListener("click", (e) => {
+  const it = e.target.closest(".img-modelo-item");
+  if (!it) return;
+  imgModeloSel = it.dataset.todas ? null : it.dataset.modelo;
+  imgCarpetaSel = null;
+  imgSalirSeleccion();
+  imgPintarModelos();
+  imgPintarGrid();
+});
+document.getElementById("img-buscar-modelo").addEventListener("input", imgPintarModelos);
+document.getElementById("img-solo-con").addEventListener("change", imgPintarModelos);
+document.getElementById("img-buscar-foto").addEventListener("input", imgPintarGrid);
+document.getElementById("img-subir-btn").addEventListener("click", () => {
+  if (imgModeloSel === null) { imgAviso("Primero elige a la izquierda el modelo donde guardar las fotos."); return; }
+  document.getElementById("img-file").click();
+});
+document.getElementById("img-file").addEventListener("change", (e) => { const fs = e.target.files; if (fs && fs.length) imgSubir(fs); e.target.value = ""; });
+const imgDrop = document.getElementById("img-drop");
+["dragenter", "dragover"].forEach(ev => imgDrop.addEventListener(ev, (e) => { e.preventDefault(); imgDrop.style.background = "#ecfdf5"; }));
+["dragleave", "drop"].forEach(ev => imgDrop.addEventListener(ev, (e) => { e.preventDefault(); imgDrop.style.background = ""; }));
+imgDrop.addEventListener("drop", (e) => { if (e.dataTransfer && e.dataTransfer.files.length) imgSubir(e.dataTransfer.files); });
+document.getElementById("img-grid").addEventListener("click", (e) => {
+  const cf = e.target.closest(".img-carpeta-card");
+  if (cf) { imgCarpetaSel = cf.dataset.carpeta; document.getElementById("img-buscar-foto").value = ""; imgPintarGrid(); return; }
+  const c = e.target.closest(".img-card");
+  if (!c) return;
+  if (imgSelModo) {
+    if (imgSel.has(c.dataset.id)) imgSel.delete(c.dataset.id); else imgSel.add(c.dataset.id);
+    imgPintarGrid();
+    return;
+  }
+  imgAbrir(c.dataset.id);
+});
+document.getElementById("img-ruta").addEventListener("click", (e) => {
+  const l = e.target.closest("[data-ir-carpeta]");
+  if (!l) return;
+  imgCarpetaSel = l.dataset.irCarpeta || null;
+  imgPintarGrid();
+});
+document.getElementById("img-nueva-carpeta").addEventListener("click", async () => {
+  if (imgModeloSel === null) return;
+  const dentro = imgCarpetaSel ? " dentro de «" + imgCarpeta(imgCarpetaSel).nombre + "»" : "";
+  const nombre = (prompt("Nombre de la nueva carpeta" + dentro + ":") || "").trim();
+  if (!nombre) return;
+  const d = await imgPostCarpeta("crear", { nombre, modelo: imgModeloSel, padre: imgCarpetaSel });
+  if (d) imgPintarGrid();
+});
+document.getElementById("img-renombrar-carpeta").addEventListener("click", async () => {
+  const c = imgCarpeta(imgCarpetaSel);
+  if (!c && imgModeloSel === IMG_GENERAL) {
+    const actual = imgNombreModelo(IMG_GENERAL).replace("📁 ", "");
+    const nombre = (prompt("Nuevo nombre para «" + actual + "»:", actual) || "").trim();
+    if (!nombre || nombre === actual) return;
+    const res = await fetch("/api/imagenes/general/renombrar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nombre }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { imgAviso(d.error || "No se pudo cambiar el nombre."); return; }
+    imgNombreGeneral = d.nombreGeneral;
+    imgPintarModelos();
+    imgPintarGrid();
+    return;
+  }
+  if (!c) return;
+  const nombre = (prompt("Nuevo nombre de la carpeta:", c.nombre) || "").trim();
+  if (!nombre || nombre === c.nombre) return;
+  const d = await imgPostCarpeta("renombrar", { id: c.id, nombre });
+  if (d) imgPintarGrid();
+});
+document.getElementById("img-borrar-carpeta").addEventListener("click", async () => {
+  const c = imgCarpeta(imgCarpetaSel);
+  if (!c) return;
+  const arriba = c.padre ? "«" + (imgCarpeta(c.padre) || {}).nombre + "»" : "el modelo (sin carpeta)";
+  const n = imgCuentaCarpeta(c), subs = imgHijas(c.modelo, c.id).length;
+  if (!confirm("¿Borrar la carpeta «" + c.nombre + "»? No se borra ninguna foto: " + (n || subs ? "sus " + n + " fotos" + (subs ? " y " + subs + " subcarpetas" : "") + " pasan a " + arriba + "." : "está vacía."))) return;
+  document.getElementById("img-progreso").textContent = "Borrando la carpeta…";
+  const d = await imgPostCarpeta("borrar", { id: c.id });
+  document.getElementById("img-progreso").textContent = "";
+  if (d) { imgCarpetaSel = c.padre || null; imgPintarModelos(); imgPintarGrid(); }
+});
+document.getElementById("img-sel-btn").addEventListener("click", () => { imgSelModo = true; imgSel = new Set(); imgPintarGrid(); });
+document.getElementById("img-sel-cancelar").addEventListener("click", () => { imgSalirSeleccion(); imgPintarGrid(); });
+document.getElementById("img-sel-todas").addEventListener("click", () => {
+  document.querySelectorAll("#img-grid .img-card[data-id]").forEach(el => imgSel.add(el.dataset.id));
+  imgPintarGrid();
+});
+document.getElementById("img-sel-mover").addEventListener("click", async () => {
+  if (!imgSel.size) { imgAviso("Marca primero las fotos que quieres mover."); return; }
+  const v = document.getElementById("img-sel-destino").value;
+  const i = v.lastIndexOf("|");
+  const modelo = v.slice(0, i), carpeta = v.slice(i + 1);
+  const btn = document.getElementById("img-sel-mover");
+  btn.disabled = true;
+  document.getElementById("img-progreso").textContent = "Moviendo " + imgSel.size + " fotos…";
+  const res = await fetch("/api/imagenes/mover", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: [...imgSel], modelo, carpeta, usuario: currentUser || "" }) });
+  const d = await res.json().catch(() => ({}));
+  btn.disabled = false;
+  if (!res.ok) { document.getElementById("img-progreso").textContent = ""; imgAviso(d.error || "No se pudieron mover."); return; }
+  (d.fotos || []).forEach(nf => { const k = imgFotos.findIndex(x => x.id === nf.id); if (k >= 0) imgFotos[k] = nf; });
+  document.getElementById("img-progreso").textContent = (d.fotos || []).length + " fotos movidas.";
+  imgSalirSeleccion();
+  imgPintarModelos();
+  imgPintarGrid();
+});
+function imgPintarSelectCarpeta(modelo, actual) {
+  document.getElementById("img-m-carpeta").innerHTML = imgOpcionesCarpetas(modelo).map(o => '<option value="' + escapeAttr(o[0]) + '"' + (o[0] === (actual || "") ? " selected" : "") + '>' + escapeAttr(o[1]) + '</option>').join("");
+}
+document.getElementById("img-m-modelo").addEventListener("change", (e) => imgPintarSelectCarpeta(e.target.value, ""));
+document.getElementById("img-m-cerrar").addEventListener("click", imgCerrar);
+document.getElementById("img-modal-overlay").addEventListener("click", (e) => { if (e.target.id === "img-modal-overlay") imgCerrar(); });
+document.getElementById("img-m-guardar").addEventListener("click", async () => {
+  if (!imgAbierta) return;
+  const nombre = document.getElementById("img-m-nombre").value.trim() || imgAbierta.nombre;
+  const modelo = document.getElementById("img-m-modelo").value;
+  const carpeta = document.getElementById("img-m-carpeta").value;
+  const res = await fetch("/api/imagenes/editar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: imgAbierta.id, nombre, modelo, carpeta, usuario: currentUser || null }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) { document.getElementById("img-m-info").textContent = "Error: " + (d.error || res.status); return; }
+  const i = imgFotos.findIndex(x => x.id === imgAbierta.id);
+  if (i >= 0) imgFotos[i] = d.foto;
+  imgCerrar();
+  imgPintarModelos();
+  imgPintarGrid();
+});
+document.getElementById("img-m-borrar").addEventListener("click", async () => {
+  if (!imgAbierta) return;
+  const b = document.getElementById("img-m-borrar");
+  if (!imgBorrarArmado) { imgBorrarArmado = true; b.textContent = "⚠️ Pulsa otra vez para borrarla"; return; }
+  const res = await fetch("/api/imagenes/borrar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: imgAbierta.id }) });
+  if (!res.ok) { document.getElementById("img-m-info").textContent = "No se pudo borrar."; return; }
+  imgUsado = Math.max(0, imgUsado - (imgAbierta.tam || 0));
+  imgFotos = imgFotos.filter(x => x.id !== imgAbierta.id);
+  imgCerrar();
+  imgPintarModelos();
+  imgPintarGrid();
+});
+
+// ===== Contactos de interés (Jennifer, 2026-11-12) =====
+let contactosLista = [];
+let contactosCategorias = [];
+let contactoEditando = null;
+let contactoBorrarArmado = false;
+async function selectContactos() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.contactos === "lista"));
+  hideAllViews();
+  document.getElementById("view-title").textContent = "Contactos · Contactos de interés";
+  document.getElementById("view-contactos").style.display = "block";
+  await contactosCargar();
+}
+async function contactosCargar() {
+  try {
+    const d = await (await fetch("/api/contactos", { cache: "no-store" })).json();
+    contactosLista = d.lista || [];
+    contactosCategorias = d.categorias || [];
+  } catch (e) { document.getElementById("contactos-grid").innerHTML = '<div style="color:#b91c1c">No se pudieron cargar los contactos.</div>'; return; }
+  contactosPintar();
+}
+function contactoCategoriasTodas() {
+  const set = new Set(contactosCategorias);
+  contactosLista.forEach(c => { if (c.categoria) set.add(c.categoria); });
+  return [...set];
+}
+function contactoTelHref(t) { return "tel:" + String(t).replace(/[^0-9+]/g, ""); }
+function contactoWebHref(w) { return /^https?:/i.test(w) ? w : "https://" + w; }
+function contactoTelefonos(c) {
+  return String(c.telefonos || "").split(/[\\/,;\\n]+/).map(t => t.trim()).filter(Boolean);
+}
+function contactosPintar() {
+  const filtro = document.getElementById("contactos-cat-filter");
+  const antes = filtro.value;
+  filtro.innerHTML = '<option value="">Todas las categorías</option>' + contactoCategoriasTodas().map(c => '<option value="' + escapeAttr(c) + '">' + escapeAttr(c) + '</option>').join("");
+  filtro.value = antes;
+  const q = document.getElementById("contactos-buscar").value.trim().toLowerCase();
+  const cat = filtro.value;
+  const lista = contactosLista
+    .filter(c => !cat || (c.categoria || "") === cat)
+    .filter(c => !q || [c.nombre, c.empresa, c.telefonos, c.email, c.web, c.direccion, c.notas, c.categoria].join(" ").toLowerCase().indexOf(q) >= 0);
+  document.getElementById("contactos-cuenta").textContent = lista.length + (lista.length === 1 ? " contacto" : " contactos");
+  const grid = document.getElementById("contactos-grid");
+  if (!lista.length) {
+    grid.innerHTML = '<div style="color:var(--muted);font-size:14px">' + (contactosLista.length ? "Ningún contacto coincide con la búsqueda." : "Todavía no hay contactos. Pulsa «＋ Nuevo contacto».") + '</div>';
+    return;
+  }
+  const grupos = {};
+  lista.forEach(c => { const k = c.categoria || "Sin categoría"; (grupos[k] = grupos[k] || []).push(c); });
+  const orden = contactoCategoriasTodas().concat(["Sin categoría"]).filter(k => grupos[k]);
+  grid.innerHTML = orden.map(k => '<h3 class="contacto-grupo">' + escapeAttr(k) + ' <span style="color:var(--muted);font-weight:400;font-size:13px">(' + grupos[k].length + ')</span></h3><div class="contactos-cards">'
+    + grupos[k].sort((a, b) => (a.empresa || a.nombre || "").localeCompare(b.empresa || b.nombre || "", "es")).map(c => '<div class="contacto-card" data-id="' + escapeAttr(c.id) + '">'
+        + '<div class="contacto-titulo">' + escapeAttr(c.nombre || c.empresa || "") + '</div>'
+        + (c.nombre && c.empresa ? '<div class="contacto-empresa">' + escapeAttr(c.empresa) + '</div>' : "")
+        + contactoTelefonos(c).map(t => '<div>📞 <a href="' + escapeAttr(contactoTelHref(t)) + '">' + escapeAttr(t) + '</a></div>').join("")
+        + (c.email ? '<div>✉️ <a href="mailto:' + escapeAttr(c.email) + '">' + escapeAttr(c.email) + '</a></div>' : "")
+        + (c.web ? '<div>🌐 <a href="' + escapeAttr(contactoWebHref(c.web)) + '" target="_blank" rel="noopener">' + escapeAttr(c.web) + '</a></div>' : "")
+        + (c.direccion ? '<div>📍 ' + escapeAttr(c.direccion) + '</div>' : "")
+        + (c.notas ? '<div class="contacto-notas">' + escapeAttr(c.notas) + '</div>' : "")
+        + '<div class="contacto-pie"><button type="button" class="secondary contacto-editar" data-id="' + escapeAttr(c.id) + '">✏️ Editar</button></div>'
+        + '</div>').join("") + '</div>').join("");
+}
+function contactoAbrir(c) {
+  contactoEditando = c || null;
+  contactoBorrarArmado = false;
+  document.getElementById("contacto-modal-titulo").textContent = c ? "Editar contacto" : "Nuevo contacto";
+  document.getElementById("contacto-borrar").style.display = c ? "" : "none";
+  document.getElementById("contacto-borrar").textContent = "🗑 Borrar";
+  ["nombre", "empresa", "telefonos", "email", "web", "direccion", "notas"].forEach(k => { document.getElementById("contacto-" + k).value = (c && c[k]) || ""; });
+  const sel = document.getElementById("contacto-categoria");
+  sel.innerHTML = '<option value="">Sin categoría</option>' + contactoCategoriasTodas().map(x => '<option value="' + escapeAttr(x) + '">' + escapeAttr(x) + '</option>').join("") + '<option value="__nueva__">＋ Nueva categoría…</option>';
+  sel.value = c ? (c.categoria || "") : (document.getElementById("contactos-cat-filter").value || "");
+  document.getElementById("contacto-info").textContent = c ? "Creado por " + (c.creadoPor || "—") + (c.creado ? " el " + new Date(c.creado).toLocaleDateString("es-ES") : "") + (c.modificadoPor ? " · Último cambio: " + c.modificadoPor + " el " + new Date(c.modificado).toLocaleDateString("es-ES") : "") : "";
+  document.getElementById("contacto-modal-overlay").classList.add("open");
+  document.getElementById("contacto-nombre").focus();
+}
+function contactoCerrar() { document.getElementById("contacto-modal-overlay").classList.remove("open"); contactoEditando = null; }
+async function contactoGuardar(extra) {
+  const datos = { id: contactoEditando ? contactoEditando.id : undefined, usuario: currentUser || null };
+  ["nombre", "empresa", "telefonos", "email", "web", "direccion", "notas"].forEach(k => { datos[k] = document.getElementById("contacto-" + k).value; });
+  datos.categoria = document.getElementById("contacto-categoria").value;
+  if (datos.categoria === "__nueva__") datos.categoria = "";
+  Object.assign(datos, extra || {});
+  const res = await fetch("/api/contactos/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(datos) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { document.getElementById("contacto-info").textContent = "Error: " + (d.error || res.status); return; }
+  contactoCerrar();
+  await contactosCargar();
+}
+document.getElementById("contactos-nuevo").addEventListener("click", () => contactoAbrir(null));
+document.getElementById("contactos-buscar").addEventListener("input", contactosPintar);
+document.getElementById("contactos-cat-filter").addEventListener("change", contactosPintar);
+document.getElementById("contactos-grid").addEventListener("click", (e) => {
+  const b = e.target.closest(".contacto-editar");
+  if (b) contactoAbrir(contactosLista.find(c => c.id === b.dataset.id));
+});
+document.getElementById("contacto-categoria").addEventListener("change", (e) => {
+  if (e.target.value !== "__nueva__") return;
+  const nombre = (prompt("Nombre de la nueva categoría:") || "").trim();
+  if (!nombre) { e.target.value = ""; return; }
+  if (!contactosCategorias.includes(nombre)) contactosCategorias.push(nombre);
+  const op = document.createElement("option");
+  op.value = nombre;
+  op.textContent = nombre;
+  e.target.insertBefore(op, e.target.querySelector('option[value="__nueva__"]'));
+  e.target.value = nombre;
+});
+document.getElementById("contacto-guardar").addEventListener("click", () => contactoGuardar());
+document.getElementById("contacto-cancelar").addEventListener("click", contactoCerrar);
+document.getElementById("contacto-modal-overlay").addEventListener("click", (e) => { if (e.target.id === "contacto-modal-overlay") contactoCerrar(); });
+document.getElementById("contacto-borrar").addEventListener("click", () => {
+  if (!contactoEditando) return;
+  if (!contactoBorrarArmado) { contactoBorrarArmado = true; document.getElementById("contacto-borrar").textContent = "⚠️ Pulsa otra vez para borrarlo"; return; }
+  contactoGuardar({ borrado: true });
+});
+const contactosToggle = document.getElementById("contactos-toggle");
+const contactosListEl = document.getElementById("contactos-list");
+contactosToggle.addEventListener("click", () => {
+  contactosToggle.classList.toggle("open");
+  contactosListEl.classList.toggle("open");
+});
+
+async function selectBoveda() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.boveda === "directorio"));
+  hideAllViews();
+  document.getElementById("view-title").textContent = "Contraseñas · Directorio";
+  document.getElementById("view-boveda").style.display = "block";
+  if (bovKey) { bovMostrar("bov-abierto"); bovPintar(); return; }
+  bovMostrar("bov-cargando");
+  let info;
+  try { info = await (await fetch("/api/boveda/info", { cache: "no-store" })).json(); }
+  catch (e) { document.getElementById("bov-cargando").textContent = "No se pudo conectar con el servidor."; return; }
+  if (!info.existe) { bovMostrar("bov-crear"); document.getElementById("bov-crear-p1").focus(); }
+  else { bovMostrar("bov-bloqueado"); document.getElementById("bov-abrir-msg").textContent = ""; document.getElementById("bov-abrir-p").focus(); }
+}
+
+async function bovCargarEntradas(lista) {
+  const out = [];
+  for (const e of lista) {
+    try { out.push({ id: e.id, actualizado: e.actualizado, por: e.por, d: await bovDescifrar(bovKey, e) }); }
+    catch (err) { out.push({ id: e.id, actualizado: e.actualizado, por: e.por, d: { servicio: "(no se puede descifrar)", roto: true } }); }
+  }
+  bovEntradas = out;
+}
+
+document.getElementById("bov-crear-btn").addEventListener("click", async () => {
+  const p1 = document.getElementById("bov-crear-p1").value, p2 = document.getElementById("bov-crear-p2").value;
+  const msg = document.getElementById("bov-crear-msg");
+  if (p1.length < 12) { msg.textContent = "Mínimo 12 caracteres."; return; }
+  if (p1 !== p2) { msg.textContent = "Las dos contraseñas no coinciden."; return; }
+  if (!confirm("¿Tienes apuntada la contraseña maestra en un sitio seguro? Si la olvidas no se podrá recuperar nada.")) return;
+  msg.style.color = "var(--muted)"; msg.textContent = "Creando…";
+  const salt = bovB64(crypto.getRandomValues(new Uint8Array(16)));
+  const { key, auth } = await bovDerivar(p1, salt, BOV_ITER);
+  const r = await bovPost("crear", { salt, iter: BOV_ITER, authHash: await bovHash(auth), usuario: currentUser });
+  msg.style.color = "#b91c1c";
+  if (!r.ok) { msg.textContent = r.error || "No se pudo crear."; return; }
+  document.getElementById("bov-crear-p1").value = ""; document.getElementById("bov-crear-p2").value = "";
+  msg.textContent = "";
+  bovKey = key; bovAuth = auth; bovEntradas = []; bovUltimaActividad = Date.now();
+  bovMostrar("bov-abierto"); bovPintar();
+});
+
+async function bovAbrir() {
+  const input = document.getElementById("bov-abrir-p");
+  const msg = document.getElementById("bov-abrir-msg");
+  if (!input.value) return;
+  msg.style.color = "var(--muted)"; msg.textContent = "Abriendo…";
+  try {
+    const info = await (await fetch("/api/boveda/info", { cache: "no-store" })).json();
+    const { key, auth } = await bovDerivar(input.value, info.salt, info.iter);
+    const r = await bovPost("abrir", { auth });
+    msg.style.color = "#b91c1c";
+    if (!r.ok) { msg.textContent = r.error || "No se pudo abrir."; input.select(); return; }
+    input.value = ""; msg.textContent = "";
+    bovKey = key; bovAuth = auth; bovUltimaActividad = Date.now();
+    await bovCargarEntradas(r.entradas || []);
+    bovMostrar("bov-abierto"); bovPintar();
+  } catch (e) { msg.style.color = "#b91c1c"; msg.textContent = "Error: " + e.message; }
+}
+document.getElementById("bov-abrir-btn").addEventListener("click", bovAbrir);
+document.getElementById("bov-abrir-p").addEventListener("keydown", (e) => { if (e.key === "Enter") bovAbrir(); });
+document.getElementById("bov-bloquear").addEventListener("click", () => bovBloquear(""));
+
+function bovFecha(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString("es-ES") + " " + d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+}
+function bovUrl(web) {
+  const w = String(web || "").trim();
+  if (!w) return "";
+  const l = w.toLowerCase();
+  return (l.indexOf("http://") === 0 || l.indexOf("https://") === 0) ? w : "https://" + w;
+}
+function bovPintar() {
+  const q = document.getElementById("bov-buscar").value.trim().toLowerCase();
+  const lista = bovEntradas.filter(e => {
+    if (!q) return true;
+    return [e.d.servicio, e.d.usuario, e.d.web, e.d.notas, e.d.categoria].some(v => String(v || "").toLowerCase().indexOf(q) >= 0);
+  }).sort((a, b) => String(a.d.servicio || "").localeCompare(String(b.d.servicio || ""), "es"));
+  const tb = document.querySelector("#bov-tabla tbody");
+  if (!lista.length) {
+    tb.innerHTML = '<tr><td colspan="6" style="color:var(--muted);padding:14px">' + (bovEntradas.length ? "Nada coincide con la búsqueda." : "Todavía no hay contraseñas. Pulsa «+ Nueva contraseña».") + "</td></tr>";
+  } else {
+    tb.innerHTML = lista.map(e => {
+      const d = e.d, url = bovUrl(d.web), ver = bovVisibles.has(e.id);
+      const pass = d.password ? (ver ? '<code style="user-select:all">' + escapeAttr(d.password) + "</code>" : "●●●●●●●●") : "";
+      const btn = (acc, txt, tit) => '<button type="button" class="secondary" style="padding:1px 6px;font-size:12px;margin-left:4px" data-bov-acc="' + acc + '" data-bov-id="' + escapeAttr(e.id) + '" title="' + tit + '">' + txt + "</button>";
+      return "<tr>"
+        + '<td style="max-width:280px;word-break:break-all">' + (url ? '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener noreferrer">' + escapeAttr(d.web) + "</a>" : "") + "</td>"
+        + "<td>" + escapeAttr(d.usuario || "") + (d.usuario ? btn("copiar-usuario", "📋", "Copiar usuario") : "") + "</td>"
+        + '<td style="white-space:nowrap">' + pass + (d.password ? btn("ver", ver ? "🙈" : "👁", ver ? "Ocultar" : "Mostrar") + btn("copiar-pass", "📋", "Copiar contraseña") : "") + "</td>"
+        + '<td style="max-width:320px;white-space:pre-wrap"><b>' + escapeAttr(d.servicio || "") + "</b>" + (d.notas ? '<br><small style="color:var(--muted)">' + escapeAttr(d.notas) + "</small>" : "") + "</td>"
+        + '<td style="font-size:12px;white-space:nowrap">' + bovFecha(e.actualizado) + (e.por ? "<br><small>" + escapeAttr(e.por) + "</small>" : "") + "</td>"
+        + "<td>" + (d.roto ? "" : btn("editar", "✏️", "Editar")) + "</td>"
+        + "</tr>";
+    }).join("");
+  }
+  document.getElementById("bov-msg").textContent = bovEntradas.length + " guardada" + (bovEntradas.length === 1 ? "" : "s");
+}
+document.getElementById("bov-buscar").addEventListener("input", bovPintar);
+
+async function bovCopiar(texto, que) {
+  try {
+    await navigator.clipboard.writeText(texto);
+    document.getElementById("bov-msg").textContent = que + " copiado.";
+  } catch (e) { document.getElementById("bov-msg").textContent = "No se pudo copiar: " + e.message; }
+}
+document.querySelector("#bov-tabla tbody").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-bov-acc]");
+  if (!b || !bovKey) return;
+  const e = bovEntradas.find(x => x.id === b.dataset.bovId);
+  if (!e) return;
+  const acc = b.dataset.bovAcc;
+  if (acc === "ver") { if (bovVisibles.has(e.id)) bovVisibles.delete(e.id); else bovVisibles.add(e.id); bovPintar(); }
+  else if (acc === "copiar-pass") bovCopiar(e.d.password || "", "Contraseña de " + (e.d.servicio || ""));
+  else if (acc === "copiar-usuario") bovCopiar(e.d.usuario || "", "Usuario de " + (e.d.servicio || ""));
+  else if (acc === "editar") bovAbrirModal(e);
+});
+
+function bovAbrirModal(e) {
+  bovEditId = e ? e.id : null;
+  const d = e ? e.d : {};
+  document.getElementById("bov-modal-titulo").textContent = e ? "Editar contraseña" : "Nueva contraseña";
+  document.getElementById("bov-f-servicio").value = d.servicio || "";
+  document.getElementById("bov-f-usuario").value = d.usuario || "";
+  document.getElementById("bov-f-password").value = d.password || "";
+  document.getElementById("bov-f-password").type = "password";
+  document.getElementById("bov-f-web").value = d.web || "";
+  document.getElementById("bov-f-borrar").style.visibility = e ? "visible" : "hidden";
+  document.getElementById("bov-modal-overlay").classList.add("open");
+  document.getElementById("bov-f-web").focus();
+}
+document.getElementById("bov-nueva").addEventListener("click", () => { if (bovKey) bovAbrirModal(null); });
+document.getElementById("bov-f-cancelar").addEventListener("click", () => { document.getElementById("bov-modal-overlay").classList.remove("open"); document.getElementById("bov-f-password").value = ""; });
+document.getElementById("bov-f-ver").addEventListener("click", () => {
+  const i = document.getElementById("bov-f-password");
+  i.type = i.type === "password" ? "text" : "password";
+});
+document.getElementById("bov-f-generar").addEventListener("click", () => {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!#%&*+-=?@_";
+  const r = crypto.getRandomValues(new Uint32Array(20));
+  let p = "";
+  for (let i = 0; i < r.length; i++) p += chars[r[i] % chars.length];
+  const inp = document.getElementById("bov-f-password");
+  inp.value = p; inp.type = "text";
+});
+async function bovRespuestaFallida(r, msgEl) {
+  if (r.status === 401 || r.status === 404 || r.status === 429) { bovBloquear(r.error || "Vuelve a abrir el directorio."); return; }
+  alert(r.error || "No se pudo guardar.");
+}
+document.getElementById("bov-f-guardar").addEventListener("click", async () => {
+  if (!bovKey) return;
+  // Se conserva lo que ya tuviera la entrada (p. ej. notas antiguas).
+  const previa = bovEditId ? (bovEntradas.find(x => x.id === bovEditId) || {}).d || {} : {};
+  const d = Object.assign({}, previa, {
+    servicio: document.getElementById("bov-f-servicio").value.trim(),
+    usuario: document.getElementById("bov-f-usuario").value.trim(),
+    password: document.getElementById("bov-f-password").value,
+    web: document.getElementById("bov-f-web").value.trim(),
+  });
+  if (!d.servicio) { alert("Escribe a qué se refiere esta página."); return; }
+  const btn = document.getElementById("bov-f-guardar");
+  btn.disabled = true;
+  try {
+    const c = await bovCifrar(bovKey, d);
+    const r = await bovPost("guardar", { auth: bovAuth, id: bovEditId, iv: c.iv, ct: c.ct, usuario: currentUser });
+    if (!r.ok) { await bovRespuestaFallida(r); return; }
+    const ent = { id: r.entrada.id, actualizado: r.entrada.actualizado, por: r.entrada.por, d };
+    const idx = bovEntradas.findIndex(x => x.id === ent.id);
+    if (idx >= 0) bovEntradas[idx] = ent; else bovEntradas.push(ent);
+    document.getElementById("bov-modal-overlay").classList.remove("open");
+    document.getElementById("bov-f-password").value = "";
+    bovPintar();
+  } finally { btn.disabled = false; }
+});
+document.getElementById("bov-f-borrar").addEventListener("click", async () => {
+  if (!bovKey || !bovEditId) return;
+  const e = bovEntradas.find(x => x.id === bovEditId);
+  if (!confirm("¿Eliminar la contraseña de «" + ((e && e.d.servicio) || "") + "»? No se puede deshacer.")) return;
+  const r = await bovPost("borrar", { auth: bovAuth, id: bovEditId });
+  if (!r.ok) { await bovRespuestaFallida(r); return; }
+  bovEntradas = bovEntradas.filter(x => x.id !== bovEditId);
+  document.getElementById("bov-modal-overlay").classList.remove("open");
+  bovPintar();
+});
+
+document.getElementById("bov-cambiar-maestra").addEventListener("click", () => {
+  ["bov-c-actual", "bov-c-p1", "bov-c-p2"].forEach(id => { document.getElementById(id).value = ""; });
+  document.getElementById("bov-c-msg").textContent = "";
+  document.getElementById("bov-cambiar-overlay").classList.add("open");
+});
+document.getElementById("bov-c-cancelar").addEventListener("click", () => document.getElementById("bov-cambiar-overlay").classList.remove("open"));
+document.getElementById("bov-c-guardar").addEventListener("click", async () => {
+  if (!bovKey) return;
+  const actual = document.getElementById("bov-c-actual").value, p1 = document.getElementById("bov-c-p1").value, p2 = document.getElementById("bov-c-p2").value;
+  const msg = document.getElementById("bov-c-msg");
+  if (p1.length < 12) { msg.textContent = "La nueva necesita mínimo 12 caracteres."; return; }
+  if (p1 !== p2) { msg.textContent = "Las dos nuevas no coinciden."; return; }
+  if (bovEntradas.some(e => e.d.roto)) { msg.textContent = "Hay entradas que no se pueden descifrar; avisa a Claude antes de cambiarla."; return; }
+  msg.style.color = "var(--muted)"; msg.textContent = "Comprobando y volviendo a cifrar…";
+  try {
+    const info = await (await fetch("/api/boveda/info", { cache: "no-store" })).json();
+    const viejo = await bovDerivar(actual, info.salt, info.iter);
+    if (viejo.auth !== bovAuth) { msg.style.color = "#b91c1c"; msg.textContent = "La contraseña maestra actual no es correcta."; return; }
+    // Releer del servidor por si alguien ha añadido algo mientras tanto.
+    const r0 = await bovPost("abrir", { auth: bovAuth });
+    if (!r0.ok) { await bovRespuestaFallida(r0); return; }
+    await bovCargarEntradas(r0.entradas || []);
+    if (bovEntradas.some(e => e.d.roto)) { msg.style.color = "#b91c1c"; msg.textContent = "Hay entradas que no se pueden descifrar; no se ha cambiado nada."; return; }
+    const salt = bovB64(crypto.getRandomValues(new Uint8Array(16)));
+    const nuevo = await bovDerivar(p1, salt, BOV_ITER);
+    const entradas = [];
+    for (const e of bovEntradas) { const c = await bovCifrar(nuevo.key, e.d); entradas.push({ id: e.id, iv: c.iv, ct: c.ct }); }
+    const r = await bovPost("cambiar", { auth: bovAuth, nuevo: { salt, iter: BOV_ITER, authHash: await bovHash(nuevo.auth) }, entradas, usuario: currentUser });
+    msg.style.color = "#b91c1c";
+    if (!r.ok) { msg.textContent = r.error || "No se pudo cambiar."; return; }
+    bovKey = nuevo.key; bovAuth = nuevo.auth;
+    document.getElementById("bov-cambiar-overlay").classList.remove("open");
+    document.getElementById("bov-msg").textContent = "Contraseña maestra cambiada.";
+    bovPintar();
+  } catch (e) { msg.style.color = "#b91c1c"; msg.textContent = "Error: " + e.message; }
+});
+
+async function selectPresupuestos() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.presupuestos === "listado"));
+  hideAllViews();
+  document.getElementById("view-title").textContent = window.MODO_VENTAS ? "Ventas · Presupuestos por WhatsApp" : "Presupuestos · Presupuestos a clientes";
+  document.getElementById("view-presupuestos").style.display = "block";
+  mostrarListadoPresu();
+  presuLista = await fetch("/api/presupuestos").then(r => r.json()).catch(() => []);
+  pintarListadoPresu();
+}
+function mostrarListadoPresu() {
+  document.getElementById("presu-listado").style.display = "block";
+  document.getElementById("presu-editor").style.display = "none";
+}
+function fechaEsPresu(iso) {
+  return iso ? iso.split("-").reverse().join("-") : "";
+}
+function pintarListadoPresu() {
+  const q = document.getElementById("presu-buscar").value.trim().toLowerCase();
+  const filas = presuLista.filter(p => !q || String(p.numero).includes(q) || (p.cliente || "").toLowerCase().includes(q));
+  const tbody = document.querySelector("#presu-tabla tbody");
+  tbody.innerHTML = filas.length ? filas.map(p => "<tr>"
+    + "<td><strong>" + p.numero + "</strong></td>"
+    + "<td>" + fechaEsPresu(p.fecha) + "</td>"
+    + "<td>" + (p.cliente ? escapeAttr(p.cliente) : '<span style="color:var(--muted)">Sin nombre' + (p.telefono ? " · " + escapeAttr(p.telefono) : "") + '</span>') + "</td>"
+    + "<td style=\\"text-align:center\\">" + (p.lineas || []).length + "</td>"
+    + "<td>" + escapeAttr(p.actualizadoPor || p.creadoPor || "") + "</td>"
+    + '<td class="solo-ventas" style="font-size:12.5px;white-space:nowrap">' + estadoWhatsappPresu(p) + '</td>'
+    + "<td style=\\"white-space:nowrap\\">"
+    + "<button type=\\"button\\" class=\\"secondary presu-abrir\\" data-id=\\"" + p.id + "\\" style=\\"padding:3px 10px\\">Abrir</button> "
+    + "<button type=\\"button\\" class=\\"secondary presu-dup\\" data-id=\\"" + p.id + "\\" style=\\"padding:3px 10px\\">Duplicar</button> "
+    + "<button type=\\"button\\" class=\\"secondary presu-pdf-fila\\" data-id=\\"" + p.id + "\\" style=\\"padding:3px 10px\\">PDF</button> "
+    + "<button type=\\"button\\" class=\\"secondary presu-borrar\\" data-id=\\"" + p.id + "\\" style=\\"padding:3px 10px;color:#b91c1c\\">Borrar</button>"
+    + "</td></tr>").join("")
+    : "<tr><td colspan=\\"7\\" style=\\"color:var(--muted)\\">" + (presuLista.length ? "Ningún presupuesto coincide." : "Todavía no hay presupuestos.") + "</td></tr>";
+  tbody.querySelectorAll(".presu-abrir").forEach(b => b.addEventListener("click", () => abrirPresu(presuLista.find(p => p.id === b.dataset.id))));
+  tbody.querySelectorAll(".presu-dup").forEach(b => b.addEventListener("click", () => abrirPresu(duplicadoPresu(presuLista.find(p => p.id === b.dataset.id)))));
+  tbody.querySelectorAll(".presu-pdf-fila").forEach(b => b.addEventListener("click", () => imprimirPresu(presuLista.find(p => p.id === b.dataset.id))));
+  tbody.querySelectorAll(".presu-borrar").forEach(b => b.addEventListener("click", async () => {
+    const p = presuLista.find(x => x.id === b.dataset.id);
+    if (!p || !confirm("¿Borrar el presupuesto Nº " + p.numero + " de " + (p.cliente || "") + "? No se puede deshacer.")) return;
+    const r = await fetch("/api/presupuestos", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ borrar: p.id }) }).then(r => r.json()).catch(() => null);
+    if (r && r.ok) { presuLista = r.lista; pintarListadoPresu(); }
+  }));
+}
+document.getElementById("presu-buscar").addEventListener("input", pintarListadoPresu);
+function siguienteNumeroPresu() {
+  return presuLista.reduce((m, p) => Math.max(m, p.numero || 0), 15328) + 1;
+}
+function nuevoPresu() {
+  return { id: null, numero: siguienteNumeroPresu(), fecha: hoyMadrid(), cliente: "", telefono: "", nota: "", validezDias: 15, mostrarTotal: false, pie: PRESU_PIE_DEFECTO, lineas: [], info: [] };
+}
+function duplicadoPresu(p) {
+  const c = JSON.parse(JSON.stringify(p));
+  return { ...c, id: null, numero: siguienteNumeroPresu(), fecha: hoyMadrid(), cliente: "", telefono: "", nota: "", creado: null, creadoPor: null, token: null, vistas: null, enviado: null };
+}
+// WhatsApp (Jennifer, 2026-11-12): enviado / visto por el cliente.
+function estadoWhatsappPresu(p) {
+  const vistas = p.vistas || [];
+  const f = iso => new Date(iso).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  if (vistas.length) return '<span style="color:#15803d;font-weight:600">👁 Visto ' + f(vistas[vistas.length - 1]) + '</span>' + (vistas.length > 1 ? ' <span style="color:var(--muted)">(' + vistas.length + ' veces)</span>' : "");
+  if (p.enviado) return '<span style="color:#b45309">📲 Enviado ' + f(p.enviado.fecha) + ' · sin abrir</span>';
+  return '<span style="color:var(--muted)">—</span>';
+}
+// Dirección propia (Jennifer, 2026-11-12): Worker "presupuestos-bezen" en la cuenta del dominio.
+function enlacePublicoPresu(p) { return p && p.token ? "https://presupuestos.colchonesbezen.com/p/" + p.token : ""; }
+// 600 11 22 33 → 34600112233 (España si son 9 cifras).
+function telefonoWhatsappPresu(t) {
+  let d = String(t || "").replace(/[^0-9]/g, "");
+  if (d.startsWith("00")) d = d.slice(2);
+  if (d.length === 9) d = "34" + d;
+  return d.length >= 10 ? d : "";
+}
+function mensajeWhatsappPresu(p) {
+  const nombre = String(p.cliente || "").trim().split(" ")[0];
+  const nombreBonito = nombre ? nombre.charAt(0).toUpperCase() + nombre.slice(1).toLowerCase() : "";
+  const yo = String(currentUser || "").charAt(0) + String(currentUser || "").slice(1).toLowerCase();
+  return "¡Hola" + (nombreBonito ? " " + nombreBonito : "") + "! Soy " + (yo || "el equipo") + ", de Colchones Bezen 😊"
+    + "\\n\\nTe he preparado tu presupuesto con todo lo que hablamos, con fotos y el enlace a cada producto en tu medida:"
+    + "\\n" + enlacePublicoPresu(p)
+    + "\\n\\nCualquier duda, me escribes por aquí y lo vemos.";
+}
+document.getElementById("presu-nuevo").addEventListener("click", () => abrirPresu(nuevoPresu()));
+document.getElementById("presu-volver").addEventListener("click", () => { mostrarListadoPresu(); pintarListadoPresu(); });
+
+function abrirPresu(p) {
+  if (!p) return;
+  presuActual = JSON.parse(JSON.stringify(p));
+  if (presuActual.pie == null) presuActual.pie = PRESU_PIE_DEFECTO;
+  document.getElementById("presu-listado").style.display = "none";
+  document.getElementById("presu-editor").style.display = "block";
+  document.getElementById("presu-numero").value = presuActual.numero || "";
+  document.getElementById("presu-fecha").value = presuActual.fecha || hoyMadrid();
+  document.getElementById("presu-cliente").value = presuActual.cliente || "";
+  document.getElementById("presu-telefono").value = presuActual.telefono || "";
+  document.getElementById("presu-validez").value = presuActual.validezDias || 15;
+  document.getElementById("presu-nota").value = presuActual.nota || "";
+  document.getElementById("presu-total").checked = !!presuActual.mostrarTotal;
+  document.getElementById("presu-profesional").checked = !!presuActual.profesional;
+  document.getElementById("presu-dto-pct").value = presuActual.descuentoPct != null ? String(presuActual.descuentoPct).replace(".", ",") : "";
+  document.getElementById("presu-pie").value = presuActual.pie || "";
+  document.getElementById("presu-msg").textContent = presuActual.id ? "" : "Nuevo (sin guardar)";
+  pintarLineasPresu();
+  pintarInfoPresu();
+  cargarProductosPresu();
+}
+function leerCabeceraPresu() {
+  presuActual.numero = Number(document.getElementById("presu-numero").value) || null;
+  presuActual.fecha = document.getElementById("presu-fecha").value;
+  presuActual.cliente = document.getElementById("presu-cliente").value.trim();
+  presuActual.telefono = document.getElementById("presu-telefono").value.trim();
+  presuActual.validezDias = Number(document.getElementById("presu-validez").value) || 15;
+  presuActual.nota = document.getElementById("presu-nota").value;
+  presuActual.mostrarTotal = document.getElementById("presu-total").checked;
+  presuActual.profesional = document.getElementById("presu-profesional").checked;
+  presuActual.descuentoPct = numPresu(document.getElementById("presu-dto-pct").value);
+  presuActual.pie = document.getElementById("presu-pie").value;
+}
+function numPresu(v) {
+  if (v === "" || v == null) return null;
+  const n = Number(String(v).replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+function eurosPresu(n) {
+  if (n == null) return "";
+  return (Math.round(n * 100) % 100 === 0 ? String(Math.round(n)) : n.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + "€";
+}
+// Descuento profesional (Jennifer, 2026-11-12): % sobre todas las líneas con precio.
+// Solo una línea libre de montaje: un producto de la web que lo lleve en el nombre
+// (Somier Singapur "Montaje incluído") sí lleva descuento.
+function esMontajePresu(l) { return !!l && !l.handle && /montaje/i.test(l.descripcion || ""); }
+function pctDescuentoPresu(p) { return p && p.profesional ? Math.min(100, Math.max(0, Number(p.descuentoPct) || 0)) : 0; }
+// Precio con el descuento profesional (el montaje, nunca: Jennifer, 2026-11-12).
+function precioProfPresu(p, l) {
+  const pct = pctDescuentoPresu(p);
+  if (l.precio == null || !pct || esMontajePresu(l)) return l.precio;
+  return Math.round(l.precio * (100 - pct)) / 100;
+}
+function totalProfLineaPresu(p, l) { const pr = precioProfPresu(p, l); return pr != null ? pr * (l.unidades != null ? l.unidades : 1) : null; }
+function descuentoPresu(p) {
+  const pct = pctDescuentoPresu(p);
+  const ls = (p && p.lineas) || [];
+  const subtotal = ls.reduce((t, l) => t + (totalLineaPresu(l) || 0), 0);
+  const total = Math.round(ls.reduce((t, l) => t + (totalProfLineaPresu(p, l) || 0), 0) * 100) / 100;
+  return { pct, subtotal, importe: Math.round((subtotal - total) * 100) / 100, total };
+}
+// Columna de precio profesional en el editor.
+function actualizarProfPresu() {
+  const con = pctDescuentoPresu(presuActual) > 0;
+  document.querySelectorAll(".presu-col-prof, .presu-prof-l").forEach(el => { el.style.display = con ? "" : "none"; });
+  (presuActual.lineas || []).forEach((l, i) => {
+    const td = document.querySelector('.presu-prof-l[data-i="' + i + '"]');
+    if (td) td.innerHTML = l.precio == null ? "" : esMontajePresu(l) ? eurosPresu(l.precio) + ' <span style="color:var(--muted);font-size:11px">(montaje, sin dto.)</span>' : eurosPresu(precioProfPresu(presuActual, l));
+    const tt = document.querySelector('.presu-total-l[data-i="' + i + '"]');
+    if (tt) tt.textContent = eurosPresu(con ? totalProfLineaPresu(presuActual, l) : totalLineaPresu(l));
+  });
+}
+function pintarResumenPresu() {
+  const el = document.getElementById("presu-resumen");
+  if (!el || !presuActual) return;
+  presuActual.profesional = document.getElementById("presu-profesional").checked;
+  presuActual.descuentoPct = numPresu(document.getElementById("presu-dto-pct").value);
+  const d = descuentoPresu(presuActual);
+  actualizarProfPresu();
+  const nAlt = (presuActual.lineas || []).filter(l => l.alternativa && l.precio != null).length;
+  const avisoAlt = nAlt >= 2 ? "<div style='margin-top:4px;color:#0d5e4c'>⇄ " + nAlt + " alternativas: el cliente elige una; se comparan en su página y cada opción lleva su total.</div>"
+    : nAlt === 1 ? "<div style='margin-top:4px;color:#b45309'>Marca al menos 2 líneas como alternativa para que el cliente pueda elegir.</div>" : "";
+  el.innerHTML = (d.pct > 0
+    ? "Subtotal: <b>" + eurosPresu(d.subtotal) + "</b> · Descuento profesional −" + String(d.pct).replace(".", ",") + " %: <b style='color:#b91c1c'>−" + eurosPresu(d.importe) + "</b> · Total: <b>" + eurosPresu(d.total) + "</b>" + " <span style='color:var(--muted)'>(el montaje no lleva descuento)</span>"
+    : (presuActual.profesional ? "<span style='color:#b45309'>Pon el % de descuento para el profesional.</span>" : "")) + avisoAlt;
+}
+document.getElementById("presu-profesional").addEventListener("change", pintarResumenPresu);
+document.getElementById("presu-dto-pct").addEventListener("input", pintarResumenPresu);
+document.getElementById("presu-total").addEventListener("change", pintarResumenPresu);
+function totalLineaPresu(l) {
+  return l.precio != null ? l.precio * (l.unidades != null ? l.unidades : 1) : null;
+}
+function pintarLineasPresu() {
+  const tbody = document.getElementById("presu-lineas");
+  const ls = presuActual.lineas;
+  tbody.innerHTML = ls.length ? ls.map((l, i) => "<tr>"
+    // Descripción en varias líneas si no cabe (Jennifer, 2026-11-12: se cortaba).
+    + '<td><textarea class="presu-l presu-l-desc" data-i="' + i + '" data-campo="descripcion" rows="1" style="width:100%;box-sizing:border-box;resize:none;overflow:hidden;font:inherit;line-height:1.35;padding:6px 8px">' + escapeAttr(l.descripcion || "") + '</textarea></td>'
+    + "<td><input type=\\"number\\" class=\\"presu-l\\" data-i=\\"" + i + "\\" data-campo=\\"unidades\\" value=\\"" + (l.unidades != null ? l.unidades : "") + "\\" style=\\"width:60px\\" /></td>"
+    + "<td><input type=\\"text\\" inputmode=\\"decimal\\" class=\\"presu-l\\" data-i=\\"" + i + "\\" data-campo=\\"precio\\" value=\\"" + (l.precio != null ? String(l.precio).replace(".", ",") : "") + "\\" style=\\"width:90px\\" /></td>"
+    + '<td class="presu-prof-l" data-i="' + i + '" style="white-space:nowrap;display:none"></td>'
+    + "<td class=\\"presu-total-l\\" data-i=\\"" + i + "\\" style=\\"white-space:nowrap\\">" + eurosPresu(totalLineaPresu(l)) + "</td>"
+    // Alternativa (Jennifer, 2026-11-12): el cliente elige una de las marcadas.
+    + '<td style="text-align:center"><input type="checkbox" class="presu-l-alt" data-i="' + i + '"' + (l.alternativa ? " checked" : "") + ' title="El cliente elige una de las líneas marcadas" /></td>'
+    + "<td style=\\"white-space:nowrap\\">"
+    + "<button type=\\"button\\" class=\\"secondary presu-l-up\\" data-i=\\"" + i + "\\" title=\\"Subir\\" style=\\"padding:2px 7px\\">↑</button>"
+    + "<button type=\\"button\\" class=\\"secondary presu-l-down\\" data-i=\\"" + i + "\\" title=\\"Bajar\\" style=\\"padding:2px 7px\\">↓</button>"
+    + "<button type=\\"button\\" class=\\"secondary presu-l-del\\" data-i=\\"" + i + "\\" title=\\"Quitar\\" style=\\"padding:2px 7px\\">✕</button>"
+    + "</td></tr>").join("")
+    : "<tr><td colspan=\\"7\\" style=\\"color:var(--muted)\\">Añade productos de la web, líneas libres (montaje…) o líneas de texto (transporte incluido…).</td></tr>";
+  const ajustarAlto = ta => { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + 2 + "px"; };
+  tbody.querySelectorAll(".presu-l-desc").forEach(ta => {
+    ajustarAlto(ta);
+    ta.addEventListener("input", () => ajustarAlto(ta));
+    // Una descripción es una sola línea en el PDF: Intro no hace salto.
+    ta.addEventListener("keydown", e => { if (e.key === "Enter") e.preventDefault(); });
+  });
+  tbody.querySelectorAll(".presu-l-alt").forEach(cb => cb.addEventListener("change", () => {
+    presuActual.lineas[Number(cb.dataset.i)].alternativa = cb.checked;
+    pintarResumenPresu();
+  }));
+  tbody.querySelectorAll(".presu-l").forEach(inp => inp.addEventListener("input", () => {
+    const l = presuActual.lineas[Number(inp.dataset.i)];
+    l[inp.dataset.campo] = inp.dataset.campo === "descripcion" ? inp.value : numPresu(inp.value);
+    const td = tbody.querySelector(".presu-total-l[data-i=\\"" + inp.dataset.i + "\\"]");
+    if (td) td.textContent = eurosPresu(totalLineaPresu(l));
+    pintarResumenPresu();
+  }));
+  pintarResumenPresu();
+  const mover = (i, d) => { const j = i + d; if (j < 0 || j >= ls.length) return; const t = ls[i]; ls[i] = ls[j]; ls[j] = t; pintarLineasPresu(); };
+  tbody.querySelectorAll(".presu-l-up").forEach(b => b.addEventListener("click", () => mover(Number(b.dataset.i), -1)));
+  tbody.querySelectorAll(".presu-l-down").forEach(b => b.addEventListener("click", () => mover(Number(b.dataset.i), 1)));
+  tbody.querySelectorAll(".presu-l-del").forEach(b => b.addEventListener("click", () => { ls.splice(Number(b.dataset.i), 1); pintarLineasPresu(); }));
+}
+function pintarInfoPresu() {
+  const el = document.getElementById("presu-info");
+  const bs = presuActual.info;
+  el.innerHTML = bs.length ? bs.map((b, i) => "<div style=\\"border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;max-width:760px\\">"
+    + "<div style=\\"display:flex;gap:6px;align-items:center\\"><input type=\\"text\\" class=\\"presu-b\\" data-i=\\"" + i + "\\" data-campo=\\"titulo\\" value=\\"" + escapeAttr(b.titulo || "") + "\\" placeholder=\\"Título (ej. Información sobre colchón Supreme)\\" style=\\"flex:1;font-weight:700\\" />"
+    + "<button type=\\"button\\" class=\\"secondary presu-b-up\\" data-i=\\"" + i + "\\" style=\\"padding:2px 7px\\">↑</button>"
+    + "<button type=\\"button\\" class=\\"secondary presu-b-down\\" data-i=\\"" + i + "\\" style=\\"padding:2px 7px\\">↓</button>"
+    + "<button type=\\"button\\" class=\\"secondary presu-b-del\\" data-i=\\"" + i + "\\" style=\\"padding:2px 7px\\">✕</button></div>"
+    + "<textarea class=\\"presu-b\\" data-i=\\"" + i + "\\" data-campo=\\"puntos\\" rows=\\"" + Math.max(2, (b.puntos || "").split("\\n").length + 1) + "\\" placeholder=\\"Un punto por línea: enlace, patas, colores...\\" style=\\"width:100%;margin-top:6px\\">" + escapeAttr(b.puntos || "") + "</textarea>"
+    + "</div>").join("")
+    : "<div style=\\"color:var(--muted);font-size:13px;margin-bottom:6px\\">Sin información adicional: el PDF saldrá solo con la página 1.</div>";
+  el.querySelectorAll(".presu-b").forEach(inp => inp.addEventListener("input", () => { presuActual.info[Number(inp.dataset.i)][inp.dataset.campo] = inp.value; }));
+  const mover = (i, d) => { const j = i + d; if (j < 0 || j >= bs.length) return; const t = bs[i]; bs[i] = bs[j]; bs[j] = t; pintarInfoPresu(); };
+  el.querySelectorAll(".presu-b-up").forEach(b => b.addEventListener("click", () => mover(Number(b.dataset.i), -1)));
+  el.querySelectorAll(".presu-b-down").forEach(b => b.addEventListener("click", () => mover(Number(b.dataset.i), 1)));
+  el.querySelectorAll(".presu-b-del").forEach(b => b.addEventListener("click", () => { bs.splice(Number(b.dataset.i), 1); pintarInfoPresu(); }));
+}
+document.getElementById("presu-add-info").addEventListener("click", () => { presuActual.info.push({ titulo: "", puntos: "" }); pintarInfoPresu(); });
+document.getElementById("presu-add-libre").addEventListener("click", () => { presuActual.lineas.push({ descripcion: "", unidades: 1, precio: null }); pintarLineasPresu(); });
+document.getElementById("presu-add-texto").addEventListener("click", () => { presuActual.lineas.push({ descripcion: "Transporte incluido. Subida a domicilio", unidades: null, precio: null }); pintarLineasPresu(); });
+
+// "Colchón Muelles Ensacados | 29cm | Doble Cara | Supreme Zen" + "180x200 cm"
+// → "COLCHÓN SUPREME ZEN 180X200" (como lo escribe Jennifer; se puede cambiar).
+function descripcionCortaPresu(titulo, variante) {
+  const partes = String(titulo || "").split("|").map(s => s.trim()).filter(Boolean);
+  let base = partes.length > 1 ? partes[0].split(" ")[0] + " " + partes[partes.length - 1] : String(titulo || "");
+  const v = String(variante || "").replace(/default title/i, "").replace(/ ?cm/gi, "").trim();
+  return (base + (v ? " " + v : "")).toUpperCase();
+}
+async function cargarProductosPresu() {
+  if (presuProductos) return;
+  const msg = document.getElementById("presu-productos-msg");
+  msg.textContent = "Cargando productos de la web...";
+  try {
+    const lista = await (await fetch("/api/presupuestos/productos")).json();
+    presuProductos = [];
+    for (const p of lista) {
+      for (const v of p.variantes) {
+        const variante = /default title/i.test(v.title || "") ? "" : v.title;
+        const etiqueta = p.title + (variante ? " · " + variante : "") + (v.precio != null ? " — " + eurosPresu(v.precio) : "");
+        presuProductos.push({ etiqueta, descripcion: descripcionCortaPresu(p.title, variante), precio: v.precio, handle: p.handle, titulo: p.title, varianteId: v.id || null, imagen: v.imagen || null });
+      }
+    }
+    presuProductosPorEtiqueta = new Map(presuProductos.map(x => [x.etiqueta, x]));
+    msg.textContent = presuProductos.length + " variantes de la web";
+  } catch (e) {
+    msg.textContent = "No se han podido cargar los productos (puedes usar líneas libres).";
+  }
+}
+// Lista propia de sugerencias (Jennifer, 2026-11-12): la del navegador
+// cortaba los nombres largos. Busca todas las palabras escritas.
+let presuSugerencias = [];
+let presuSugSel = -1;
+function presuNormaliza(t) { return String(t || "").toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g, ""); }
+function pintarSugerenciasPresu() {
+  const caja = document.getElementById("presu-sugerencias");
+  const palabras = presuNormaliza(document.getElementById("presu-producto").value).split(" ").filter(Boolean);
+  if (!palabras.length || !presuProductos) { caja.style.display = "none"; presuSugerencias = []; return; }
+  presuSugerencias = presuProductos.filter(x => { const t = presuNormaliza(x.etiqueta); return palabras.every(p => t.indexOf(p) >= 0); }).slice(0, 60);
+  if (presuSugSel >= presuSugerencias.length) presuSugSel = presuSugerencias.length - 1;
+  caja.innerHTML = presuSugerencias.length
+    ? presuSugerencias.map((x, i) => '<div class="presu-sug' + (i === presuSugSel ? " activa" : "") + '" data-i="' + i + '">' + escapeAttr(x.etiqueta) + '</div>').join("")
+    : '<div class="presu-sug-vacia">Ningún producto con esas palabras.</div>';
+  caja.style.display = "block";
+  const activa = caja.querySelector(".presu-sug.activa");
+  if (activa) activa.scrollIntoView({ block: "nearest" });
+}
+function elegirSugerenciaPresu(i) {
+  const x = presuSugerencias[i];
+  if (!x) return;
+  document.getElementById("presu-producto").value = x.etiqueta;
+  document.getElementById("presu-sugerencias").style.display = "none";
+  anadirProductoPresu();
+}
+document.getElementById("presu-producto").addEventListener("input", () => { presuSugSel = -1; pintarSugerenciasPresu(); });
+document.getElementById("presu-producto").addEventListener("focus", pintarSugerenciasPresu);
+document.getElementById("presu-producto").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    if (!presuSugerencias.length) return;
+    presuSugSel = Math.max(0, Math.min(presuSugerencias.length - 1, presuSugSel + (e.key === "ArrowDown" ? 1 : -1)));
+    pintarSugerenciasPresu();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (presuSugerencias.length) elegirSugerenciaPresu(presuSugSel >= 0 ? presuSugSel : 0);
+  } else if (e.key === "Escape") {
+    document.getElementById("presu-sugerencias").style.display = "none";
+  }
+});
+document.getElementById("presu-sugerencias").addEventListener("mousedown", (e) => {
+  const it = e.target.closest(".presu-sug");
+  if (!it) return;
+  e.preventDefault();
+  elegirSugerenciaPresu(Number(it.dataset.i));
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#presu-sugerencias") && e.target.id !== "presu-producto") document.getElementById("presu-sugerencias").style.display = "none";
+});
+function anadirProductoPresu() {
+  const inp = document.getElementById("presu-producto");
+  let x = presuProductosPorEtiqueta.get(inp.value.trim());
+  // Con el botón "Añadir producto" sin elegir de la lista: la primera sugerencia.
+  if (!x && presuSugerencias.length) x = presuSugerencias[presuSugSel >= 0 ? presuSugSel : 0];
+  if (!x) { document.getElementById("presu-productos-msg").textContent = "Elige un producto de la lista."; return; }
+  presuSugerencias = [];
+  presuSugSel = -1;
+  document.getElementById("presu-sugerencias").style.display = "none";
+  // Producto y variante de la web (Jennifer, 2026-11-12): para el carrito y para el descuento.
+  presuActual.lineas.push({ descripcion: x.descripcion, unidades: 1, precio: x.precio, handle: x.handle, varianteId: x.varianteId, imagen: x.imagen, titulo: x.titulo });
+  // Bloque de "Información adicional" con el enlace del producto (una sola
+  // vez por producto); el resto de puntos los escribe ella.
+  // Enlace con la medida ya elegida (Jennifer, 2026-11-12).
+  const enlace = "https://www.colchonesbezen.com/products/" + x.handle + (x.varianteId ? "?variant=" + x.varianteId : "");
+  if (!presuActual.info.some(b => (b.puntos || "").includes(enlace))) {
+    const nombre = x.descripcion.replace(/ [0-9]{2,3}X[0-9]{2,3}.*$/, "").toLowerCase();
+    presuActual.info.push({ titulo: "Información sobre " + nombre, puntos: enlace });
+  }
+  inp.value = "";
+  pintarLineasPresu();
+  pintarInfoPresu();
+}
+document.getElementById("presu-add-producto").addEventListener("click", anadirProductoPresu);
+
+document.getElementById("presu-guardar").addEventListener("click", guardarPresu);
+async function guardarPresu() {
+  leerCabeceraPresu();
+  const r = await fetch("/api/presupuestos", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ guardar: { ...presuActual, usuario: currentUser || "" } }) }).then(r => r.json()).catch(() => null);
+  if (!r || !r.ok) { alert((r && r.error) || "No se ha podido guardar."); return null; }
+  presuLista = r.lista;
+  presuActual.id = r.presupuesto.id;
+  presuActual.numero = r.presupuesto.numero;
+  document.getElementById("presu-numero").value = presuActual.numero;
+  document.getElementById("presu-msg").textContent = "Guardado ✓ (Nº " + presuActual.numero + ")";
+  return r.presupuesto;
+}
+document.getElementById("presu-duplicar").addEventListener("click", () => { leerCabeceraPresu(); abrirPresu(duplicadoPresu(presuActual)); });
+document.getElementById("presu-pdf").addEventListener("click", async () => {
+  const p = await guardarPresu();
+  if (p) imprimirPresu(p);
+});
+// Enviar por WhatsApp (Jennifer, 2026-11-12): abre vuestro WhatsApp con el
+// chat del cliente y el mensaje escrito; se envía a mano (gratis).
+document.getElementById("presu-whatsapp").addEventListener("click", async () => {
+  const p = await guardarPresu();
+  if (!p) return;
+  if (!p.token) { alert("No se ha podido crear el enlace del presupuesto. Vuelve a guardarlo."); return; }
+  const tel = telefonoWhatsappPresu(p.telefono);
+  const url = "https://wa.me/" + tel + "?text=" + encodeURIComponent(mensajeWhatsappPresu(p));
+  window.open(url, "_blank", "noopener");
+  const r = await fetch("/api/presupuestos/enviado", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: p.id, usuario: currentUser || "" }) }).then(x => x.json()).catch(() => null);
+  if (r && r.presupuesto) { const i = presuLista.findIndex(x => x.id === p.id); if (i >= 0) presuLista[i] = r.presupuesto; }
+  document.getElementById("presu-msg").textContent = tel ? "WhatsApp abierto con el mensaje: revísalo y pulsa enviar." : "Sin teléfono: elige el chat del cliente en WhatsApp.";
+});
+document.getElementById("presu-copiar").addEventListener("click", async () => {
+  const p = await guardarPresu();
+  if (!p || !p.token) return;
+  const url = enlacePublicoPresu(p);
+  try { await navigator.clipboard.writeText(url); document.getElementById("presu-msg").textContent = "Enlace copiado: " + url; }
+  catch (e) { prompt("Copia el enlace:", url); }
+});
+document.getElementById("presu-ver").addEventListener("click", async () => {
+  const p = await guardarPresu();
+  if (p && p.token) window.open(enlacePublicoPresu(p) + "?vista=interna", "_blank", "noopener");
+});
+
+// Página para imprimir / "Guardar como PDF", con el diseño del PDF original.
+function htmlPresu(p) {
+  const esc = s => escapeAttr(String(s == null ? "" : s));
+  const dto = descuentoPresu(p);
+  const conProf = dto.pct > 0;
+  const pctTxt = String(dto.pct).replace(".", ",");
+  // Nombre del producto con enlace a su medida en la web (Jennifer, 2026-11-12).
+  const descPdf = l => l.handle ? '<a href="https://www.colchonesbezen.com/products/' + esc(l.handle) + (l.varianteId ? "?variant=" + l.varianteId : "") + '" style="text-decoration:underline">' + esc(l.descripcion) + '</a>' : esc(l.descripcion);
+  // Alternativas (Jennifer, 2026-11-12): "OPCIÓN n" y un total por opción.
+  const alts = (p.lineas || []).filter(l => l.alternativa && l.precio != null);
+  const modoOpc = alts.length >= 2;
+  const nOpc = l => modoOpc && l.alternativa && l.precio != null ? alts.indexOf(l) + 1 : 0;
+  const descOpc = l => nOpc(l) ? '<b>OPCIÓN ' + nOpc(l) + ':</b> ' + descPdf(l) : descPdf(l);
+  const lineas = (p.lineas || []).map(l => "<tr><td>" + descOpc(l) + "</td><td>" + (l.unidades != null ? l.unidades : "") + "</td><td>" + eurosPresu(l.precio) + "</td>" + (conProf ? "<td>" + eurosPresu(precioProfPresu(p, l)) + "</td>" : "") + "<td>" + eurosPresu(conProf ? totalProfLineaPresu(p, l) : totalLineaPresu(l)) + "</td></tr>").join("");
+  const total = (p.lineas || []).reduce((s, l) => s + (totalLineaPresu(l) || 0), 0);
+  // Con descuento profesional: columna aparte y TOTAL con el precio profesional.
+  let filaTotal = conProf
+    ? (p.mostrarTotal ? '<tr class="total"><td colspan="4">TOTAL</td><td>' + eurosPresu(dto.total) + '</td></tr>' : "")
+    : p.mostrarTotal ? "<tr class=\\"total\\"><td colspan=\\"3\\">TOTAL</td><td>" + eurosPresu(total) + "</td></tr>" : "";
+  if (modoOpc) {
+    const tl = l => (conProf ? totalProfLineaPresu(p, l) : totalLineaPresu(l)) || 0;
+    const fijo = (p.lineas || []).filter(l => !(l.alternativa && l.precio != null)).reduce((t, l) => t + tl(l), 0);
+    const cols = conProf ? 4 : 3;
+    filaTotal = p.mostrarTotal ? alts.map((l, i) => '<tr class="total"><td colspan="' + cols + '">TOTAL CON OPCIÓN ' + (i + 1) + '</td><td>' + eurosPresu(Math.round((fijo + tl(l)) * 100) / 100) + '</td></tr>').join("") : "";
+  }
+  const enlazar = t => /^https?:/i.test(t.trim()) ? "<a href=\\"" + esc(t.trim()) + "\\">" + esc(t.trim()) + "</a>" : esc(t);
+  const info = (p.info || []).filter(b => (b.titulo || "").trim() || (b.puntos || "").trim());
+  const pagina2 = info.length ? "<section class=\\"pagina\\"><h2>Información adicional</h2><ul>"
+    + info.map(b => "<li>" + esc(b.titulo) + ((b.puntos || "").trim() ? "<ul>" + b.puntos.split("\\n").filter(x => x.trim()).map(x => "<li>" + enlazar(x) + "</li>").join("") + "</ul>" : "") + "</li>").join("")
+    + "</ul><div class=\\"triangulo\\"></div></section>" : "";
+  return "<!doctype html><html lang=\\"es\\"><head><meta charset=\\"utf-8\\"><title>Presupuesto " + p.numero + (p.cliente ? " " + esc(p.cliente) : "") + "</title>"
+    + "<link rel=\\"preconnect\\" href=\\"https://fonts.googleapis.com\\"><link href=\\"https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Open+Sans&family=Cormorant+Garamond:wght@500&family=Mrs+Saint+Delafield&display=swap\\" rel=\\"stylesheet\\">"
+    + "<style>@page{size:A4;margin:0}*{box-sizing:border-box}body{margin:0;font-family:Poppins,sans-serif;color:#111;-webkit-print-color-adjust:exact;print-color-adjust:exact;background:#888}"
+    + ".pagina{position:relative;width:210mm;height:297mm;overflow:hidden;background:#fff;margin:0 auto 8mm;padding:20mm 18mm 0;page-break-after:always}"
+    + ".pagina:last-child{page-break-after:auto}@media print{body{background:#fff}.pagina{margin:0}}"
+    + ".logo{display:block;margin:0 auto 9mm;width:118mm}"
+    + ".cab{display:flex;justify-content:space-between;font-weight:700;font-size:11.5pt;padding:0 2mm;line-height:1.5}"
+    + "h1{font-family:'Cormorant Garamond',serif;font-weight:500;font-size:30pt;text-align:center;margin:15mm 0 6mm;letter-spacing:.5px}"
+    + "table{width:154mm;margin:0 auto;border-collapse:collapse;position:relative;z-index:1;background:#fff}"
+    + "th,td{border:1px solid #111;padding:3.2mm 2mm;text-align:center;font-size:10.5pt;vertical-align:middle}th{font-weight:700;font-size:11pt}"
+    + "td:first-child{width:96mm}table.prof td:first-child{width:72mm}table.prof th,table.prof td{font-size:9.5pt}tr.total td{font-weight:700}"
+    + ".opciones-pdf{width:154mm;margin:4mm auto 0;font-size:10pt;text-align:center;position:relative;z-index:1}"
+    + ".gracias{font-family:'Mrs Saint Delafield',cursive;font-size:30pt;text-align:center;margin:5mm 0 0;position:relative;z-index:1}"
+    + ".validez{font-size:9.5pt;text-align:center;margin:1mm 14mm 0;position:relative;z-index:1}"
+    + ".pie{display:flex;justify-content:space-between;align-items:center;margin:8mm 6mm 0;position:relative;z-index:1}.web{font-weight:700;text-decoration:underline;font-size:12pt}.mail{font-size:11pt}"
+    + ".triangulo{position:absolute;right:0;bottom:0;width:132mm;height:94mm;background:#11765f;clip-path:polygon(100% 0,100% 100%,0 100%)}"
+    + "h2{font-family:'Open Sans',sans-serif;font-weight:400;font-size:21pt;margin:12mm 0 7mm}"
+    + ".pagina ul{font-family:'Open Sans',sans-serif;font-size:10.5pt;line-height:1.5;margin:0;padding-left:6mm}.pagina ul ul{list-style:circle}a{color:inherit;text-decoration:none}"
+    + "</style></head><body>"
+    + "<section class=\\"pagina\\"><img class=\\"logo\\" src=\\"/presupuesto-logo.png\\" alt=\\"be·zen\\">"
+    + "<div class=\\"cab\\"><div>FECHA DEL PRESUPUESTO: " + fechaEsPresu(p.fecha) + (p.cliente ? "<br>CLIENTE: " + esc(String(p.cliente).toUpperCase()) : "") + "</div><div>Presupuesto Nro. " + p.numero + "</div></div>"
+    + "<h1>PRESUPUESTO</h1>"
+    + (conProf ? "<table class=\\"prof\\">" : "<table>") + "<thead><tr><th>DESCRIPCIÓN DEL SERVICIO</th><th>UN.</th><th>PRECIO</th>" + (conProf ? "<th>PRECIO PROFESIONAL (−" + pctTxt + " %)</th>" : "") + "<th>TOTAL</th></tr></thead><tbody>" + lineas + "<tr><td>&nbsp;</td><td></td><td></td><td></td>" + (conProf ? "<td></td>" : "") + "</tr>" + filaTotal + "</tbody></table>"
+    + (modoOpc ? '<div class="opciones-pdf"><b>Las opciones son alternativas:</b> elige la que prefieras.</div>' : "")
+    // Opciones del canapé (Jennifer, 2026-11-12): solo si hay un canapé.
+    + ((p.lineas || []).some(l => /canap/i.test((l.descripcion || "") + " " + (l.titulo || "") + " " + (l.handle || "")))
+      ? '<div class="opciones-pdf"><b>Opciones para el canapé:</b> Montaje +39 € · Tapa reforzada +25 € · Tapa partida +59 €</div>' : "")
+    + "<div class=\\"gracias\\">Gracias por elegirnos</div>"
+    + "<div class=\\"pie\\"><span class=\\"web\\">WWW.COLCHONESBEZEN.COM</span><span class=\\"mail\\">✉ info@colchonesbezen.com</span></div>"
+    + "<div class=\\"triangulo\\"></div></section>"
+    + pagina2
+    + "</body></html>";
+}
+function imprimirPresu(p) {
+  if (!p) return;
+  const w = window.open("", "_blank");
+  if (!w) { alert("El navegador ha bloqueado la ventana: permite las ventanas emergentes para esta página."); return; }
+  w.document.open();
+  w.document.write(htmlPresu(p));
+  w.document.close();
+  const lanzar = () => {
+    const img = w.document.querySelector(".logo");
+    const esperaImg = img && !img.complete ? new Promise(res => { img.onload = img.onerror = res; }) : Promise.resolve();
+    Promise.all([esperaImg, w.document.fonts ? w.document.fonts.ready : Promise.resolve()]).then(() => setTimeout(() => { w.focus(); w.print(); }, 300));
+  };
+  if (w.document.readyState === "complete") lanzar(); else w.addEventListener("load", lanzar);
+}
+
+async function selectLiquidacion() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.liquidacion === "listado"));
+  hideAllViews();
+  document.getElementById("view-title").textContent = "Precios BEZEN · Precios de la web liquidación";
+  document.getElementById("view-liquidacion").style.display = "block";
+  if (!liqModelosExtra) {
+    try { liqModelosExtra = await (await fetch("/api/tarifas/modelos-extra")).json(); } catch (e) { liqModelosExtra = []; }
+  }
+  const nombres = [...new Set([...catalogoProducts, ...liqModelosExtra].filter(p => p.stockModel && !p.excluido && !/liquidaci/i.test(p.stockModel)).map(p => p.stockModel))].sort((a, b) => a.localeCompare(b));
+  document.getElementById("liq-modelos-datalist").innerHTML = nombres.map(n => '<option value="' + escapeAttr(n) + '"></option>').join("");
+  liqFilas = await fetch("/api/liquidacion").then(r => r.json()).catch(() => []);
+  pintarTablaLiq();
+}
+document.getElementById("liq-modelo").addEventListener("change", async () => {
+  const modelo = document.getElementById("liq-modelo").value.trim();
+  const sel = document.getElementById("liq-talla");
+  liqTarifaFilas = [];
+  sel.innerHTML = '<option value="">—</option>';
+  if (!modelo) return;
+  const d = await fetch("/api/tarifas/tabla?stockModel=" + encodeURIComponent(modelo)).then(r => r.json()).catch(() => ({}));
+  liqTarifaFilas = d.ok ? d.filas : [];
+  sel.innerHTML = '<option value="">—</option>' + liqTarifaFilas.map(f => '<option value="' + escapeAttr(f.talla) + '">' + escapeAttr(f.talla) + "</option>").join("");
+  if (!d.ok) document.getElementById("liq-msg").textContent = "Ese producto no está en Tarifas: pon el coste y el envío a mano.";
+});
+document.getElementById("liq-talla").addEventListener("change", () => {
+  const f = liqTarifaFilas.find(x => x.talla === document.getElementById("liq-talla").value);
+  const fmt = (v) => v == null ? "" : String(Math.round(v * 100) / 100).replace(".", ",");
+  document.getElementById("liq-coste").value = f ? fmt(f.coste) : "";
+  document.getElementById("liq-envio").value = f && f.envios ? fmt(f.envios.ES) : "";
+  document.getElementById("liq-msg").textContent = f && (f.coste == null || !f.envios || f.envios.ES == null) ? "Falta coste o envío en Tarifas para esta medida: rellénalo a mano." : "";
+  pintarCalculoLiq();
+});
+["liq-coste", "liq-envio"].forEach(id => document.getElementById(id).addEventListener("input", pintarCalculoLiq));
+function pintarCalculoLiq() {
+  const c = liqCalcular(numEs(document.getElementById("liq-coste").value), numEs(document.getElementById("liq-envio").value));
+  document.getElementById("liq-calculo").innerHTML = c
+    ? "Precio liquidación: <b>" + fmtPrecio(c.precio) + "</b> · Precio tachado: <b>" + fmtPrecio(c.tachado) + "</b> (−80%)"
+    : "";
+}
+document.getElementById("liq-anadir").addEventListener("click", async () => {
+  const modelo = document.getElementById("liq-modelo").value.trim();
+  const talla = document.getElementById("liq-talla").value;
+  const coste = numEs(document.getElementById("liq-coste").value);
+  const envio = numEs(document.getElementById("liq-envio").value);
+  if (!modelo || !talla) { alert("Elige el producto y la medida."); return; }
+  if (!liqCalcular(coste, envio)) { alert("Rellena el coste y el envío."); return; }
+  const fila = { modelo, talla, coste, envio, sku: document.getElementById("liq-sku").value.trim(), nota: document.getElementById("liq-nota").value.trim(), usuario: currentUser || "" };
+  const r = await fetch("/api/liquidacion", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ anadir: fila }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.ok) { alert(d.error || "No se ha podido guardar."); return; }
+  liqFilas = d.filas;
+  pintarTablaLiq();
+  ["liq-sku", "liq-nota"].forEach(id => { document.getElementById(id).value = ""; });
+  document.getElementById("liq-msg").textContent = "✓ Añadido: " + modelo + " " + talla;
+  setTimeout(() => { document.getElementById("liq-msg").textContent = ""; }, 3000);
+});
+document.getElementById("liq-buscar").addEventListener("input", pintarTablaLiq);
+function liqFilasVistas() {
+  const q = document.getElementById("liq-buscar").value.trim().toLowerCase();
+  return liqFilas.filter(f => !q || [f.modelo, f.talla, f.sku, f.nota].join(" ").toLowerCase().includes(q));
+}
+// Fichero para Shopify, mismo formato que el de Precios BEZEN (BLACK).
+document.getElementById("liq-descargar-btn").addEventListener("click", () => {
+  const vistas = liqFilasVistas();
+  const conSku = vistas.filter(f => f.sku);
+  if (!conSku.length) { alert("No hay ninguna fila con SKU para descargar."); return; }
+  if (conSku.length < vistas.length && !confirm((vistas.length - conSku.length) + " fila(s) no tienen SKU y no saldrán en el fichero. ¿Descargar igualmente?")) return;
+  const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(conSku.map(f => {
+    const c = liqCalcular(f.coste, f.envio);
+    return [f.sku, Math.round(c.precio * 100), c.precio, c.tachado];
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Precios");
+  XLSX.writeFile(wb, "Precios liquidación " + new Date().toISOString().slice(0, 10) + ".xlsx");
+});
+function pintarTablaLiq() {
+  const vistas = liqFilasVistas();
+  document.getElementById("liq-count").textContent = vistas.length + " de " + liqFilas.length + " productos en liquidación";
+  document.querySelector("#liq-tabla tbody").innerHTML = vistas.length ? vistas.map(f => {
+    const c = liqCalcular(f.coste, f.envio) || {};
+    return "<tr><td>" + escapeAttr(f.modelo) + "</td><td>" + escapeAttr(f.talla) + "</td><td>" + escapeAttr(f.sku) + "</td><td>" + fmtPrecio(f.coste) + "</td><td>" + fmtPrecio(f.envio)
+      + "</td><td><b>" + fmtPrecio(c.precio) + "</b></td><td>" + fmtPrecio(c.tachado) + "</td><td>" + escapeAttr(f.nota) + "</td><td>" + escapeAttr((f.creado || "").slice(0, 10)) + (f.usuario ? " · " + escapeAttr(f.usuario) : "")
+      + '</td><td><button type="button" class="secondary" data-liq-borrar="' + escapeAttr(f.id) + '">✕</button></td></tr>';
+  }).join("") : '<tr><td colspan="10" style="color:var(--muted)">Todavía no hay productos en liquidación.</td></tr>';
+}
+document.getElementById("liq-tabla").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-liq-borrar]");
+  if (!b) return;
+  const f = liqFilas.find(x => x.id === b.dataset.liqBorrar);
+  if (!f || !confirm("¿Quitar " + f.modelo + " " + f.talla + " de liquidación?")) return;
+  const r = await fetch("/api/liquidacion", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ borrar: f.id }) });
+  const d = await r.json().catch(() => ({}));
+  if (d.ok) { liqFilas = d.filas; pintarTablaLiq(); }
 });
 
 const preciosBezenToggle = document.getElementById("precios-bezen-toggle");
@@ -4458,15 +7874,23 @@ async function verPB(id) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) { document.getElementById("pb-count").textContent = data.error || "No se ha podido cargar."; return; }
   pbDatos = data;
+  // Buscar también por el nombre de fábrica (Jennifer, 2026-10-29: "astra"
+  // no encontraba el canapé de madera esquinas rectas), como en Tarifas.
+  if (!tarifasNombresFabrica) {
+    try { tarifasNombresFabrica = await (await fetch("/api/tarifas/nombres-fabrica")).json(); } catch (e) { tarifasNombresFabrica = {}; }
+  }
   renderPB();
 }
 function pbIguales(a, b) { return a != null && b != null && Math.abs(Number(a) - Number(b)) < 0.005; }
 function filasFiltradasPB() {
   if (!pbDatos) return [];
-  const q = normBuscaProducto(document.getElementById("pb-buscar").value).split(" ").filter(Boolean);
+  // Varias búsquedas a la vez separadas por coma (Jennifer, 2026-10-21: ver
+  // el pack junto al canapé y el cabecero sueltos para comparar precios).
+  const grupos = document.getElementById("pb-buscar").value.split(",").map(g => normBuscaProducto(g).split(" ").filter(Boolean)).filter(g => g.length);
   const filtro = document.getElementById("pb-filtro").value;
   return pbDatos.filas.filter(f => {
-    if (q.length) { const t = normBuscaProducto(f.producto + " " + f.variante + " " + f.sku); if (!q.every(w => t.includes(w))) return false; }
+    // "-palabra" excluye (Jennifer, 2026-10-21: "tela zen natural -cabecero").
+    if (grupos.length) { const fab = (tarifasNombresFabrica || {})[f.tarifaModelo || f.producto] || ""; const t = normBuscaProducto(f.producto + " " + f.variante + " " + f.sku + " " + fab); if (!grupos.some(q => q.every(w => w.length > 1 && w[0] === "-" ? !t.includes(w.slice(1)) : t.includes(w)))) return false; }
     if (filtro === "dif") return f.tarifa != null && f.precio != null && !pbIguales(f.precio, f.tarifa);
     if (filtro === "debajo") return f.tarifa != null && f.precio != null && f.precio < f.tarifa - 0.005;
     if (filtro === "encima") return f.tarifa != null && f.precio != null && f.precio > f.tarifa + 0.005;
@@ -4474,15 +7898,381 @@ function filasFiltradasPB() {
     if (filtro === "nuevo") return f.precioNuevo != null;
     if (filtro === "cambiado") return pbDatos.anterior && f.precioAnterior !== undefined && !pbIguales(f.precioAnterior, f.precio);
     if (filtro === "sinsku") return !f.sku;
+    if (filtro === "packs") return !!f.packPiezas;
     return true;
   });
+}
+// PACKS (Jennifer, 2026-10-20): el pack tiene un precio en BLACK y otro
+// cuando acaba el BLACK. Pack BLACK = suma de los BLACK de sus piezas; pack
+// nuevo = suma de los "precio nuevo revisión" de sus piezas. Si a una pieza
+// le falta ese precio, se usa su precio fijo (15/10) y, si no, el web.
+function precioPiezaPack(p, campo) {
+  const v = p[campo] != null ? p[campo] : p.precioFijo != null ? p.precioFijo : p.precio != null ? p.precio : p.tarifa;
+  return { valor: v, origen: p[campo] != null ? campo : p.precioFijo != null ? "precioFijo" : p.precio != null ? "precio" : p.tarifa != null ? "tarifa" : null };
+}
+function precioPackPB(f, campo) {
+  if (!f.packPiezas || f.packError) return null;
+  let suma = 0;
+  for (const p of f.packPiezas) {
+    const v = precioPiezaPack(p, campo).valor;
+    if (v == null) return null;
+    suma += v * (p.cantidad || 1);
+  }
+  const dto = Math.max(0, Math.min(90, Number(document.getElementById("pb-pack-dto").value) || 0));
+  return Math.ceil(suma * (1 - dto / 100) - 0.000001);
+}
+// EDITOR DE PACK EN LA FILA (Jennifer, 2026-10-20): en BLACK y en Precio
+// nuevo, para cada pieza (Canapé, Colchón…) se elige "= actual", "= nuevo"
+// o "= 15/10", cada opción con el margen que deja esa pieza; abajo la rebaja
+// y el resultado (precio, margen total y ganancia). La rebaja se reparte en
+// proporción. Margen = precio ÷ 1,04 ÷ 1,21 × 0,77 − coste + envío (Tarifas).
+const pbPackSel = new Map(); // sku -> { black: [campos], nuevo: [campos], dtoBlack, dtoNuevo }
+const PBE_OPCIONES = [["tarifa", "PRECIO TARIFA"], ["precioFijo", "PRECIO 15/10"], ["precioBlack", "PRECIO BLACK"], ["precioNuevo", "PRECIO NUEVO ANTES BLACK"], ["precio", "PRECIO ACTUAL"]];
+function nombrePiezaPack(p) {
+  if (p.tipo === "colchon") return "Colchón";
+  if (p.tipo === "almohada") return "Almohada";
+  if (p.tipo === "somier") return "Somier";
+  if (/cabecero/i.test(p.stockModel)) return "Cabecero";
+  if (/^base/i.test(p.stockModel)) return "Base";
+  return "Canapé";
+}
+function estadoPackPB(f) {
+  if (!pbPackSel.has(f.sku)) {
+    const defecto = f.packPiezas.map(p => (["precio", "precioFijo", "tarifa"].find(c => p[c] != null)) || "precio");
+    pbPackSel.set(f.sku, { black: defecto.slice(), nuevo: defecto.slice(), dtoBlack: 0, dtoNuevo: 0 });
+  }
+  return pbPackSel.get(f.sku);
+}
+function basePackPB(f) {
+  if (!f.packPiezas || f.packError || f.packPiezas.some(p => p.tarifaBase == null)) return null;
+  return f.packPiezas.reduce((s, p) => s + p.tarifaBase * (p.cantidad || 1), 0);
+}
+// Envío del pack en Furniture (Jennifer, 2026-10-20): CANAPÉ + COLCHÓN = 65 €.
+// Si los envíos de las piezas sueltas suman más, la diferencia se suma al
+// margen; si suman menos, se resta. Otras combinaciones: sin ajuste (aún no
+// hay precio de envío de pack para ellas).
+// Resto de combinaciones (Jennifer, 2026-10-20): BASE + COLCHÓN = 54 €;
+// cada CABECERO va aparte a 41 €; canapé + cabecero (sin colchón) = envío
+// suelto del canapé + 41 €; las ALMOHADAS no se cobran (0 €).
+const ENVIO_CABECERO_FURNITURE = 41;
+function envioPackPB(f) {
+  if (!f.packPiezas || f.packError) return null;
+  if (f.packPiezas.some(p => p.tipo !== "almohada" && p.tarifaEnvio == null)) return null;
+  const tipos = f.packPiezas.map(nombrePiezaPack);
+  const n = t => f.packPiezas.filter(p => nombrePiezaPack(p) === t).reduce((s, p) => s + (p.cantidad || 1), 0);
+  let envio = null, nombre = "";
+  if (n("Canapé") && n("Colchón")) { envio = 65; nombre = "canapé + colchón 65 €"; }
+  else if (n("Base") && n("Colchón")) { envio = 54; nombre = "base + colchón 54 €"; }
+  // Somier articulado + colchón, con montaje (Jennifer, 2026-10-27).
+  else if (n("Somier") && n("Colchón")) { envio = 73; nombre = "somier + colchón con montaje 73 €"; }
+  else if (n("Canapé")) { envio = f.packPiezas.filter(p => nombrePiezaPack(p) === "Canapé").reduce((s, p) => s + p.tarifaEnvio * (p.cantidad || 1), 0); nombre = "canapé suelto " + fmtPrecio(envio); }
+  if (envio == null) return null;
+  if (n("Cabecero")) { envio += ENVIO_CABECERO_FURNITURE * n("Cabecero"); nombre += " + cabecero " + ENVIO_CABECERO_FURNITURE + " €"; }
+  if (n("Almohada")) nombre += " + almohadas 0 €";
+  const sumaPiezas = f.packPiezas.reduce((s, p) => s + (p.tarifaEnvio || 0) * (p.cantidad || 1), 0);
+  return { sumaPiezas, envio, ajuste: sumaPiezas - envio, nombre };
+}
+// PROMO BLACK (Jennifer, 2026-10-20): con cada pack se regalan almohadas
+// Sea Foam (se liquidan). Coste de fábrica según el ancho del pack: hasta
+// 120 → 1 de 90 (16 €); 135 y 140 → 2 de 67,5 (25 €); 150 → 2 (28 €);
+// 160 → 2 de 75 (28 €); 180 → 2 de 90 (32 €). Se resta en la columna BLACK.
+// Se puede quitar desde la regla del pack (Jennifer: "me gustaría que también
+// me lo preguntaras"). Por defecto, activado.
+let pbRestarRegalo = true;
+// Packs que NO llevan el regalo de almohadas (Jennifer, 2026-11-03: "natural
+// y madera no tiene incluido el regalo de la almohada, por eso no están
+// saliendo bien los costes").
+const PACKS_SIN_REGALO_PB = [/pack can.p. abatible madera colch.n h.brido natural zen/i];
+function regaloBlackPB(f) {
+  if (!pbRestarRegalo || !f.packPiezas || f.packError) return null;
+  if (PACKS_SIN_REGALO_PB.some(re => re.test(f.producto || ""))) return null;
+  return seaFoamPorMedidaPB(f);
+}
+// Colchón Spring Zen suelto con almohadas Sea Foam (Jennifer, 2026-10-21:
+// "ponme la opción de incluir las almohadas sea foam"): mismas almohadas y
+// costes que el regalo de los packs. Por defecto, sin incluir.
+let pbSeaFoamSpring = false;
+function seaFoamSpringPB(f) {
+  if (!pbSeaFoamSpring || f.packPiezas || !/spring zen/i.test(f.producto || "")) return null;
+  return seaFoamPorMedidaPB(f);
+}
+// Regalo solo a partir de un ancho (Jennifer, 2026-10-21: "aplicar el regalo
+// de las almohadas a partir de una determinada medida"). 0 = todas.
+let pbSeaFoamDesde = 135; // por defecto desde 135 (Jennifer, 2026-10-21)
+function seaFoamPorMedidaPB(f) {
+  const m = /(\\d{2,3})\\s*[x×]\\s*\\d{2,3}/i.exec((f.variante || "") + " " + (f.sku || ""));
+  if (!m) return null;
+  const a = Number(m[1]);
+  if (a < pbSeaFoamDesde) return null;
+  if (a <= 120) return { texto: "1 almohada Sea Foam 90", coste: 16 };
+  if (a <= 140) return { texto: "2 almohadas Sea Foam 67,5", coste: 25 };
+  if (a <= 150) return { texto: "2 almohadas Sea Foam", coste: 28 };
+  if (a <= 160) return { texto: "2 almohadas Sea Foam 75", coste: 28 };
+  if (a <= 180) return { texto: "2 almohadas Sea Foam 90", coste: 32 };
+  return { texto: "2 almohadas Sea Foam 90", coste: 32 }; // 200: igual que 180 (confirmado por Jennifer)
+}
+function margenPackPB(f, precio, col) {
+  const base = basePackPB(f);
+  if (precio == null || base == null) return null;
+  const queda = precio / 1.04 / 1.21 * 0.77;
+  const env = envioPackPB(f);
+  const regalo = col === "black" ? regaloBlackPB(f) : null;
+  const ganancia = queda - base + (env ? env.ajuste : 0) - (regalo ? regalo.coste : 0);
+  return { ganancia, pct: queda > 0 ? ganancia / queda * 100 : null, ajusteEnvio: env, regalo };
+}
+function txtEnvioPackPB(f) {
+  const e = envioPackPB(f);
+  if (!e) return "";
+  return '<div style="font-size:11px;color:var(--muted)">Envío: piezas sueltas ' + fmtPrecio(Math.round(e.sumaPiezas * 100) / 100) + " → pack Furniture " + fmtPrecio(e.envio) + " (" + escapeAttr(e.nombre) + ")"
+    + ' <span style="color:' + (e.ajuste >= 0 ? "#15803d" : "#b91c1c") + '">(' + (e.ajuste >= 0 ? "+" : "") + fmtPrecio(Math.round(e.ajuste * 100) / 100) + " al margen)</span></div>";
+}
+function txtMargenPB(m) {
+  return m ? fmtPrecio(Math.round(m.ganancia * 100) / 100) + " (" + (m.pct != null ? m.pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) : "—") + " %)" : "—";
+}
+// Margen del pack con un precio dado (precio actual, BLACK guardado…).
+function margenPackHtmlPB(f, precio, col) {
+  if (!f.packPiezas || f.packError || precio == null) return "";
+  const m = margenPackPB(f, precio, col);
+  return '<div style="font-size:11px;margin-top:3px;white-space:nowrap;color:' + (m && m.ganancia < 0 ? "#b91c1c" : "#15803d") + '">' + (m ? "Margen pack " + txtMargenPB(m) : '<span style="color:var(--muted)">margen: falta coste de alguna pieza</span>') + "</div>";
+}
+// Precio del pack con lo elegido en cada pieza y la rebaja de esa columna.
+function calcEditorPack(f, col) {
+  const st = estadoPackPB(f);
+  const sel = st[col];
+  const dto = col === "black" ? st.dtoBlack : st.dtoNuevo;
+  let suma = 0, completo = true;
+  f.packPiezas.forEach((p, k) => { const v = p[sel[k]]; if (v == null) completo = false; else suma += v * (p.cantidad || 1); });
+  const precio = completo ? Math.ceil(suma * (1 - dto / 100) - 0.000001) : null;
+  return { suma: completo ? suma : null, precio, dto, m: precio != null ? margenPackPB(f, precio, col) : null };
+}
+function editorPackPB(f, i, col) {
+  if (!f.packPiezas || f.packError) return "";
+  const st = estadoPackPB(f);
+  const sel = st[col];
+  const dto = col === "black" ? st.dtoBlack : st.dtoNuevo;
+  let suma = 0, completo = true;
+  const lineas = f.packPiezas.map((p, k) => {
+    const opciones = PBE_OPCIONES.map(([c, t]) => {
+      const v = p[c];
+      const m = v != null ? margenPiezaPack(p, v) : null;
+      return '<option value="' + c + '"' + (sel[k] === c ? " selected" : "") + (v == null ? " disabled" : "") + ">" + t + (v != null ? " " + fmtPrecio(v) + (m ? " · margen " + fmtPrecio(Math.round(m.margen * 100) / 100) : "") : " (—)") + "</option>";
+    }).join("");
+    const v = p[sel[k]];
+    if (v == null) completo = false; else suma += v * (p.cantidad || 1);
+    return '<div style="margin-top:3px;font-size:12px">' + escapeAttr(nombrePiezaPack(p)) + (p.cantidad > 1 ? " ×" + p.cantidad : "") + (p.medidaUsada ? ' <span style="color:#b45309" title="Esta medida no se vende suelta: precios de la medida más cercana por encima">(precios de ' + escapeAttr(p.medidaUsada) + ")</span>" : "") + (p.colorUsado ? ' <span style="color:#b45309" title="Este color no se vende suelto: precios de la misma medida en otro color">(precios de ' + escapeAttr(p.colorUsado) + ")</span>" : "") + ': <select class="pbe-sel" data-sku="' + escapeAttr(f.sku) + '" data-col="' + col + '" data-k="' + k + '" style="font-size:12px;max-width:230px">' + opciones + "</select></div>";
+  }).join("");
+  const precio = completo ? Math.ceil(suma * (1 - dto / 100) - 0.000001) : null;
+  const m = precio != null ? margenPackPB(f, precio, col) : null;
+  return '<div class="pbe-caja" data-sku="' + escapeAttr(f.sku) + '" data-col="' + col + '" style="margin-top:6px;padding:6px 8px;border:1px dashed var(--border);border-radius:6px;white-space:nowrap">'
+    + '<div style="font-size:11px;color:var(--muted)">Pack: elige el precio de cada pieza</div>' + lineas
+    + '<div style="margin-top:4px;font-size:12px">Suma: <strong>' + (completo ? fmtPrecio(suma) : "—") + "</strong> · Rebaja: " + '<input type="number" class="pbe-dto" data-sku="' + escapeAttr(f.sku) + '" data-col="' + col + '" min="0" max="90" step="1" value="' + dto + '" style="width:52px;font-size:12px"> %</div>'
+    + '<div style="font-size:12px">Precio: <strong>' + (precio != null ? fmtPrecio(precio) : "—") + "</strong> · Margen: <strong style=\\"color:" + (m && m.ganancia < 0 ? "#b91c1c" : "#15803d") + "\\">" + (m ? (m.pct != null ? m.pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + " %" : "—") : "—") + "</strong> · Ganancia: <strong>" + (m ? fmtPrecio(Math.round(m.ganancia * 100) / 100) : "—") + "</strong></div>"
+    + txtEnvioPackPB(f)
+    + (col === "black" && regaloBlackPB(f) ? '<div style="font-size:11px;color:#b45309">Regalo BLACK: ' + escapeAttr(regaloBlackPB(f).texto) + " (−" + fmtPrecio(regaloBlackPB(f).coste) + " al margen)</div>" : "")
+    + (precio != null ? '<button type="button" class="secondary pbe-guardar" data-i="' + i + '" data-col="' + col + '" data-precio="' + precio + '" style="margin-top:4px;font-size:12px;padding:2px 8px">Guardar ' + fmtPrecio(precio) + (col === "black" ? " en BLACK" : " en precio nuevo") + "</button>" : "")
+    + "</div>";
+}
+function recalcularEditorPack(e) {
+  const sel = e.target.closest(".pbe-sel");
+  const dto = e.target.closest(".pbe-dto");
+  if (e.type === "input" && !dto) return;
+  if (!sel && !dto) return;
+  const f = pbDatos && pbDatos.filas.find(x => x.sku === (sel || dto).dataset.sku);
+  if (!f) return;
+  const st = estadoPackPB(f);
+  if (sel) st[sel.dataset.col][Number(sel.dataset.k)] = sel.value;
+  if (dto) st[dto.dataset.col === "black" ? "dtoBlack" : "dtoNuevo"] = Math.max(0, Math.min(90, Number(dto.value) || 0));
+  // Solo se repinta ese pack (Jennifer, 2026-10-20: "va muy lento"): sus
+  // dos cajas y su resumen, no la tabla entera.
+  const foco = dto ? { sku: dto.dataset.sku, col: dto.dataset.col, pos: dto.value.length } : null;
+  const i = pbDatos.filas.indexOf(f);
+  document.querySelectorAll("#pb-table .pbe-caja").forEach(caja => {
+    if (caja.dataset.sku === f.sku && (!foco || caja.dataset.col === foco.col || sel)) caja.outerHTML = editorPackPB(f, i, caja.dataset.col);
+  });
+  document.querySelectorAll("#pb-table .pb-pack-btn").forEach(btn => {
+    if (btn.dataset.sku !== f.sku) return;
+    btn.outerHTML = celdaPackPB(f, i);
+  });
+  // Mientras se escribe la rebaja, el cursor sigue en su casilla.
+  if (foco) {
+    const inp = [...document.querySelectorAll(".pbe-dto")].find(x => x.dataset.sku === foco.sku && x.dataset.col === foco.col);
+    if (inp) { inp.focus(); try { inp.setSelectionRange(foco.pos, foco.pos); } catch (er) { /* type=number */ } }
+  }
+}
+document.getElementById("pb-table").addEventListener("change", recalcularEditorPack);
+document.getElementById("pb-table").addEventListener("input", recalcularEditorPack);
+document.getElementById("pb-table").addEventListener("click", (e) => {
+  const b = e.target.closest(".pb-pack-btn");
+  if (b && pbDatos) abrirDesglosePackPB(pbDatos.filas[Number(b.dataset.i)]);
+});
+document.getElementById("pb-table").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".pbe-guardar");
+  if (!btn) return;
+  const f = pbDatos.filas[Number(btn.dataset.i)];
+  const scroll = document.getElementById("pb-table-wrap").scrollLeft;
+  await guardarPreciosNuevosPB([{ sku: f.sku, precio: Number(btn.dataset.precio) }], btn.dataset.col === "black" ? "black2026" : undefined);
+  document.getElementById("pb-table-wrap").scrollLeft = scroll;
+});
+// REGLA PARA TODO UN PACK (Jennifer, 2026-10-20): misma elección de precio
+// por pieza y misma rebaja para todas las variantes de pack que se ven
+// (buscando p. ej. "PACKCANPOL COLGEZ" salen todas sus medidas y colores).
+const pbRegla = { black: { dto: 0 }, nuevo: { dto: 0 } };
+let pbReglaTipos = "";
+function packsVisiblesPB(filas) {
+  const vistos = new Set();
+  return (filas || filasFiltradasPB()).filter(f => f.sku && f.packPiezas && !f.packError && !vistos.has(f.sku) && vistos.add(f.sku));
+}
+function pintarReglaPackPB(filas) {
+  const caja = document.getElementById("pb-regla-pack");
+  const packs = packsVisiblesPB(filas);
+  if (!packs.length) { caja.style.display = "none"; pbReglaTipos = ""; return; }
+  const tipos = [...new Set(packs.flatMap(f => f.packPiezas.map(nombrePiezaPack)))];
+  const clave = tipos.join("|") + "#" + packs.length;
+  caja.style.display = "";
+  if (clave === pbReglaTipos) return; // no se repinta: se mantiene lo elegido
+  pbReglaTipos = clave;
+  const bloque = (col, titulo) => '<div style="display:inline-block;vertical-align:top;margin-right:24px"><strong>' + titulo + "</strong>"
+    + tipos.map(t => '<div style="margin-top:4px;font-size:13px">' + escapeAttr(t) + ': <select class="pbr-sel" data-col="' + col + '" data-tipo="' + escapeAttr(t) + '" style="font-size:12px"><option value="">(no cambiar)</option>'
+      + PBE_OPCIONES.map(([c, n]) => '<option value="' + c + '"' + (pbRegla[col][t] === c ? " selected" : "") + ">" + n + "</option>").join("") + "</select></div>").join("")
+    + '<div style="margin-top:4px;font-size:13px">Rebaja: <input type="number" class="pbr-dto" data-col="' + col + '" min="0" max="90" step="1" value="' + (pbRegla[col].dto || 0) + '" style="width:56px"> %</div></div>';
+  caja.innerHTML = '<div style="font-weight:700;margin-bottom:4px">Regla para todo el pack · se aplica a las <span id="pbr-n">' + packs.length + "</span> variantes de pack que se ven</div>"
+    + bloque("black", "Precios BLACK") + bloque("nuevo", "Precio nuevo antes BLACK")
+    + '<div style="margin-top:8px;font-size:13px"><label><input type="checkbox" id="pbr-regalo"' + (pbRestarRegalo ? " checked" : "") + '> <strong>Regalo BLACK: restar del margen el coste de las almohadas Sea Foam</strong></label>'
+    + ' <span style="color:var(--muted);font-size:12px">(hasta 120: 1 de 90 = 16 € · 135/140: 2 de 67,5 = 25 € · 150: 28 € · 160: 2 de 75 = 28 € · 180: 2 de 90 = 32 €)</span></div>'
+    + '<div style="margin-top:8px"><button type="button" id="pbr-aplicar">Aplicar la regla</button> '
+    + '<button type="button" class="secondary" id="pbr-guardar-black">Guardar el BLACK de todas</button> '
+    + '<button type="button" class="secondary" id="pbr-guardar-nuevo">Guardar el precio nuevo de todas</button>'
+    + ' <span style="font-size:12px;color:var(--muted)">Si a una pieza le falta el precio elegido, se queda con el que tenía.</span></div>';
+  document.getElementById("pbr-regalo").addEventListener("change", (e) => {
+    pbRestarRegalo = e.target.checked;
+    const wrap = document.getElementById("pb-table-wrap");
+    const sl = wrap.scrollLeft;
+    renderPB();
+    wrap.scrollLeft = sl;
+  });
+  caja.querySelectorAll(".pbr-sel").forEach(sel => sel.addEventListener("change", () => { pbRegla[sel.dataset.col][sel.dataset.tipo] = sel.value; }));
+  caja.querySelectorAll(".pbr-dto").forEach(inp => inp.addEventListener("change", () => { pbRegla[inp.dataset.col].dto = Math.max(0, Math.min(90, Number(inp.value) || 0)); }));
+  document.getElementById("pbr-aplicar").addEventListener("click", () => {
+    for (const f of packsVisiblesPB()) {
+      const st = estadoPackPB(f);
+      for (const col of ["black", "nuevo"]) {
+        f.packPiezas.forEach((p, k) => { const c = pbRegla[col][nombrePiezaPack(p)]; if (c && p[c] != null) st[col][k] = c; });
+        st[col === "black" ? "dtoBlack" : "dtoNuevo"] = pbRegla[col].dto || 0;
+      }
+    }
+    const wrap = document.getElementById("pb-table-wrap");
+    const sl = wrap.scrollLeft;
+    renderPB();
+    wrap.scrollLeft = sl;
+  });
+  const guardarTodas = async (col) => {
+    const cambios = packsVisiblesPB().map(f => ({ sku: f.sku, precio: calcEditorPack(f, col).precio })).filter(c => c.precio != null);
+    if (!cambios.length) { alert("No hay ningún pack con precio calculado en las filas que se ven."); return; }
+    if (!confirm("¿Guardar el precio de pack calculado en " + (col === "black" ? "Precios BLACK 2026" : "Precio nuevo antes BLACK") + " de " + cambios.length + " variantes? Se sustituye lo que hubiera.")) return;
+    await guardarPreciosNuevosPB(cambios, col === "black" ? "black2026" : undefined);
+  };
+  document.getElementById("pbr-guardar-black").addEventListener("click", () => guardarTodas("black"));
+  document.getElementById("pbr-guardar-nuevo").addEventListener("click", () => guardarTodas("nuevo"));
+}
+// Barra de arriba sincronizada con la tabla (mismo ancho y misma posición).
+function ajustarScrollTopPB() {
+  const wrap = document.getElementById("pb-table-wrap");
+  const tabla = document.getElementById("pb-table");
+  const top = document.getElementById("pb-scroll-top");
+  document.getElementById("pb-scroll-top-inner").style.width = tabla.scrollWidth + "px";
+  top.style.display = tabla.scrollWidth > wrap.clientWidth + 1 ? "" : "none";
+  top.scrollLeft = wrap.scrollLeft;
+}
+(() => {
+  const wrap = document.getElementById("pb-table-wrap");
+  const top = document.getElementById("pb-scroll-top");
+  let moviendo = false;
+  top.addEventListener("scroll", () => { if (moviendo) { moviendo = false; return; } moviendo = true; wrap.scrollLeft = top.scrollLeft; });
+  wrap.addEventListener("scroll", () => { if (moviendo) { moviendo = false; return; } moviendo = true; top.scrollLeft = wrap.scrollLeft; });
+  window.addEventListener("resize", () => { if (document.getElementById("view-precios-bezen").style.display !== "none") ajustarScrollTopPB(); });
+})();
+function celdaPackPB(f, i) {
+  if (!f.packPiezas) return "";
+  if (f.packError) return '<span style="color:#b91c1c;font-size:12px" title="' + escapeAttr(f.packError) + '">⚠ pieza sin identificar</span>';
+  // Con lo elegido en BLACK y en Precio nuevo (se actualiza al cambiarlo).
+  const cb = calcEditorPack(f, "black"), cn = calcEditorPack(f, "nuevo");
+  const pb = cb.precio, pn = cn.precio;
+  return '<button type="button" class="secondary pb-pack-btn" data-sku="' + escapeAttr(f.sku) + '" data-i="' + i + '" title="Ver de qué piezas sale" style="text-align:left;line-height:1.35">BLACK: <strong>' + (pb != null ? fmtPrecio(pb) : "—") + "</strong>" + (cb.m ? " · " + txtMargenPB(cb.m) : "") + "<br>Nuevo: <strong>" + (pn != null ? fmtPrecio(pn) : "—") + "</strong>" + (cn.m ? " · " + txtMargenPB(cn.m) : "") + "</button>";
+}
+const PB_ORIGEN = { precioBlack: "BLACK", precioNuevo: "nuevo", precioFijo: "fijo 15/10", precio: "web", tarifa: "tarifa" };
+// Calculadora de pack (Jennifer, 2026-10-20): en cada pieza se elige qué
+// precio usar (fijo, nuevo, BLACK o web), se aplica el descuento y el
+// descuento se reparte en proporción al precio de cada pieza, para ver el
+// margen que queda en cada una y la ganancia total del pack.
+// Margen = lo que queda tras IVA, comisión y 4 % (precio ÷ 1,04 ÷ 1,21 ×
+// 0,77) menos coste + envío de la pieza (el mismo cálculo que en BLACK).
+function margenPiezaPack(p, precio) {
+  if (precio == null || p.tarifaBase == null) return null;
+  const queda = precio / 1.04 / 1.21 * 0.77;
+  return { margen: queda - p.tarifaBase, pct: queda > 0 ? (queda - p.tarifaBase) / queda * 100 : null };
+}
+function abrirDesglosePackPB(f) {
+  const CAMPOS = [["precioFijo", "Fijo 15/10"], ["precioNuevo", "Nuevo rev."], ["precioBlack", "BLACK"], ["precio", "Web"], ["tarifa", "Tarifa"]];
+  // Por defecto, el primer precio que tenga cada pieza en este orden.
+  const eleccion = f.packPiezas.map(p => (["precioNuevo", "precioBlack", "precioFijo", "precio", "tarifa"].find(c => p[c] != null)) || "manual");
+  // Precio escrito a mano en una pieza (Jennifer, 2026-10-20: piezas que no se venden sueltas).
+  const manual = f.packPiezas.map(() => null);
+  const valorDe = k => eleccion[k] === "manual" ? manual[k] : f.packPiezas[k][eleccion[k]];
+  const ov = document.createElement("div");
+  ov.className = "modal-overlay open";
+  const pctTxt = v => v == null ? "" : v.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + " %";
+  const pintar = () => {
+    const dto = Math.max(0, Math.min(90, Number((ov.querySelector(".pbp-dto") || {}).value != null ? ov.querySelector(".pbp-dto").value : document.getElementById("pb-pack-dto").value) || 0));
+    const valores = f.packPiezas.map((p, k) => valorDe(k) != null ? valorDe(k) * (p.cantidad || 1) : null);
+    const completo = valores.every(v => v != null);
+    const suma = completo ? valores.reduce((x, y) => x + y, 0) : null;
+    const pack = suma != null ? Math.ceil(suma * (1 - dto / 100) - 0.000001) : null;
+    const factor = suma ? pack / suma : null;
+    let gananciaTotal = 0, gananciaOk = completo;
+    const filasHtml = f.packPiezas.map((p, k) => {
+      const opciones = CAMPOS.map(([c, t]) => '<option value="' + c + '"' + (eleccion[k] === c ? " selected" : "") + (p[c] == null ? " disabled" : "") + ">" + t + ": " + (p[c] != null ? fmtPrecio(p[c]) : "—") + "</option>").join("")
+        + '<option value="manual"' + (eleccion[k] === "manual" ? " selected" : "") + ">A mano</option>";
+      const enPack = valores[k] != null && factor != null ? valores[k] * factor : null;
+      const m = enPack != null ? margenPiezaPack(p, enPack / (p.cantidad || 1)) : null;
+      if (m) gananciaTotal += m.margen * (p.cantidad || 1); else gananciaOk = false;
+      return "<tr><td>" + escapeAttr((p.cantidad > 1 ? p.cantidad + "x " : "") + (p.nombre || p.stockModel + " " + p.talla + (p.color ? " " + p.color : ""))) + (p.sku ? "" : '<br><span style="color:#b91c1c;font-size:11px">no está en el listado de la web</span>') + "</td>"
+        + '<td style="white-space:nowrap"><select class="pbp-campo" data-k="' + k + '">' + opciones + "</select>" + (eleccion[k] === "manual" ? ' <input type="number" class="pbp-manual" data-k="' + k + '" min="0" step="1" value="' + (manual[k] != null ? manual[k] : "") + '" placeholder="€" style="width:80px">' : "") + "</td>"
+        + "<td>" + (enPack != null ? fmtPrecio(Math.round(enPack * 100) / 100) : "—") + "</td>"
+        + '<td style="white-space:nowrap' + (m && m.margen < 0 ? ";color:#b91c1c;font-weight:600" : "") + '">' + (m ? fmtPrecio(Math.round(m.margen * 100) / 100) + " (" + pctTxt(m.pct) + ")" : '<span style="color:var(--muted)">sin coste en Tarifas</span>') + "</td></tr>";
+    }).join("");
+    const precioActual = f.precioFijo != null ? f.precioFijo : f.precio;
+    ov.innerHTML = '<div class="modal-box" style="max-width:860px"><h3>Calculadora de pack · ' + escapeAttr(f.variante || "") + "</h3>"
+      + '<p style="color:var(--muted);font-size:13px;margin:0 0 8px">' + escapeAttr(f.producto) + " · " + escapeAttr(f.sku) + "<br>Precio web actual: <strong>" + (f.precio != null ? fmtPrecio(f.precio) : "—") + "</strong> · Precio fijo 15/10: <strong>" + (f.precioFijo != null ? fmtPrecio(f.precioFijo) : "—") + "</strong>"
+      + (f.precioBlack != null ? " · BLACK guardado: " + fmtPrecio(f.precioBlack) : "") + (f.precioNuevo != null ? " · Nuevo guardado: " + fmtPrecio(f.precioNuevo) : "") + "</p>"
+      + '<table style="width:100%"><thead><tr><th>Pieza</th><th>Precio que uso</th><th>Precio en el pack</th><th>Margen de la pieza</th></tr></thead><tbody>' + filasHtml + "</tbody></table>"
+      + '<div style="margin:10px 0;font-size:14px">Suma de las piezas: <strong>' + (suma != null ? fmtPrecio(suma) : "—") + "</strong>"
+      + ' · Descuento: <input type="number" class="pbp-dto" min="0" max="90" step="1" value="' + dto + '" style="width:60px"> %'
+      + " · <span style=\\"font-size:16px\\">PRECIO PACK: <strong>" + (pack != null ? fmtPrecio(pack) : "—") + "</strong></span>"
+      + (pack != null && precioActual != null ? ' <span style="color:var(--muted);font-size:12px">(' + (pack - precioActual >= 0 ? "+" : "") + fmtPrecio(pack - precioActual) + " vs actual)</span>" : "") + "</div>"
+      + '<div style="font-size:14px;margin-bottom:6px">Ganancia total del pack: <strong style="color:' + (gananciaTotal < 0 ? "#b91c1c" : "#15803d") + '">' + (gananciaOk ? fmtPrecio(Math.round(gananciaTotal * 100) / 100) : "— (falta el coste de alguna pieza en Tarifas)") + "</strong></div>"
+      + '<p style="font-size:12px;color:var(--muted);margin:0">El descuento se reparte en proporción al precio de cada pieza. Margen = precio ÷ 1,04 ÷ 1,21 × 0,77 − (coste + envío de la pieza en Tarifas). Ojo: cada pieza lleva su propio envío; en el pack sale todo junto, así que el margen real es algo mayor.</p>'
+      + '<div class="modal-actions"><button type="button" class="secondary pbp-cerrar">Cerrar</button>'
+      + (pack != null ? '<button type="button" class="pbp-guardar" data-campo="black2026">Guardar ' + fmtPrecio(pack) + " como BLACK</button>"
+        + '<button type="button" class="pbp-guardar" data-campo="nuevo">Guardar ' + fmtPrecio(pack) + " como precio nuevo</button>" : "") + "</div></div>";
+    ov.querySelectorAll(".pbp-campo").forEach(sel => sel.addEventListener("change", () => { eleccion[Number(sel.dataset.k)] = sel.value; pintar(); }));
+    ov.querySelectorAll(".pbp-manual").forEach(inp => inp.addEventListener("change", () => { manual[Number(inp.dataset.k)] = inp.value === "" ? null : Number(inp.value); pintar(); }));
+    ov.querySelector(".pbp-dto").addEventListener("change", pintar);
+    ov.querySelector(".pbp-cerrar").addEventListener("click", () => ov.remove());
+    ov.querySelectorAll(".pbp-guardar").forEach(btn => btn.addEventListener("click", async () => {
+      const ok = await guardarPreciosNuevosPB([{ sku: f.sku, precio: pack }], btn.dataset.campo === "black2026" ? "black2026" : undefined);
+      if (ok) { btn.textContent = "✓ Guardado"; btn.disabled = true; }
+    }));
+  };
+  document.body.appendChild(ov);
+  ov.addEventListener("click", e => { if (e.target === ov) ov.remove(); });
+  pintar();
 }
 function renderPB() {
   const filas = filasFiltradasPB();
   const total = pbDatos ? pbDatos.filas.length : 0;
   const conNuevo = pbDatos ? pbDatos.filas.filter(f => f.precioNuevo != null).length : 0;
   document.getElementById("pb-count").textContent = filas.length + " de " + total + " filas" + (filas.length > PB_MAX_FILAS ? " (se ven las " + PB_MAX_FILAS + " primeras, afina la búsqueda)" : "")
-    + " · " + conNuevo + " con precio nuevo"
+    + " · " + conNuevo + " con precio nuevo revisión antes BLACK"
     + (pbDatos && pbDatos.anterior ? " · comparando con la subida del " + new Date(pbDatos.anterior.fecha).toLocaleDateString("es-ES") : " · no hay subida anterior para comparar")
     + (pbDatos && pbDatos.fija ? " · 🔒 Precios fijos: los del " + new Date(pbDatos.fija.fecha).toLocaleDateString("es-ES") + " (guardados; no se borran ni los sustituye otra subida)" : "");
   document.getElementById("pb-th-web").textContent = pbDatos ? "Precio web (" + new Date(pbDatos.subida.fecha).toLocaleDateString("es-ES") + ")" : "Precio web";
@@ -4497,24 +8287,34 @@ function renderPB() {
     // 2026-10-15). Por debajo: rojo.
     const colorDif = !distinto ? "" : dif > 0 ? ";color:#15803d;font-weight:600" : ";color:#b91c1c;font-weight:600";
     const celdaTarifa = "<td style=\\"white-space:nowrap\\">" + (f.tarifa != null ? (f.tarifaModelo ? '<button type="button" class="secondary pb-tarifa-btn" data-i="' + i + '" title="Ver cómo se calcula">' + fmtPrecio(f.tarifa) + "</button>" : fmtPrecio(f.tarifa)) : '<span style="color:var(--muted)">—</span>') + "</td>";
-    const celdaWeb = "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + margenHtmlPB(f, f.precio) + "</td>";
+    const celdaWeb = "<td style=\\"white-space:nowrap\\">" + fmtPrecio(f.precio) + (f.precioDesde ? "<br><span style=\\"color:var(--muted);font-size:11px\\">desde " + new Date(f.precioDesde).toLocaleDateString("es-ES") + "</span>" : "") + margenHtmlPB(f, f.precio) + margenPackHtmlPB(f, f.precio) + "</td>";
     // Precios BLACK 2026 (Jennifer, 2026-10-15): editable, guardado por SKU
     // (no por subida), sustituye a la columna "Precio anterior".
-    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="1" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" />' + (f.precioFijo != null || f.precio != null ? ' <button type="button" class="secondary pb-black-igual" data-i="' + i + '" title="Poner el precio actual (sin rebaja)" style="padding:2px 7px">=</button>' : "") + '<div class="pb-black-margen">' + margenHtmlPB(f, f.precioBlack) + "</div>" : "") + "</td>";
+    const celdaBlack = "<td>" + (f.sku ? '<input type="number" step="1" min="0" class="pb-black" data-i="' + i + '" value="' + (f.precioBlack != null ? f.precioBlack : "") + '" style="width:90px" />'
+      // "= precio 15/10" o "= precio nuevo" (Jennifer, 2026-10-20).
+      + (f.precioFijo != null ? ' <button type="button" class="secondary pb-black-igual" data-i="' + i + '" data-de="fijo" title="Poner el precio fijo del 15/10" style="padding:2px 7px">= 15/10</button>' : "")
+      + (f.precioNuevo != null ? ' <button type="button" class="secondary pb-black-igual" data-i="' + i + '" data-de="nuevo" title="Poner el precio nuevo revisión antes BLACK" style="padding:2px 7px">= nuevo</button>' : "")
+      + (precioPackPB(f, "precioBlack") != null ? ' <button type="button" class="secondary pb-black-igual" data-i="' + i + '" data-de="pack" title="Poner el precio del pack (suma de los BLACK de sus piezas)" style="padding:2px 7px">= pack</button>' : "")
+      + '<div class="pb-black-margen">' + margenHtmlPB(f, f.precioBlack, "black") + margenPackHtmlPB(f, f.precioBlack, "black") + "</div>" + editorPackPB(f, i, "black") : "") + "</td>";
     return "<tr" + (distinto ? (dif > 0 ? ' style="background:rgba(220,252,231,.6)"' : ' style="background:rgba(254,226,226,.6)"') : "") + ">"
       + "<td>" + escapeAttr(f.producto) + "</td><td>" + escapeAttr(f.variante) + "</td><td>" + (f.sku ? escapeAttr(f.sku) : '<span style="color:#b91c1c">sin SKU</span>') + "</td>"
       + celdaTarifa
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (dif != null ? fmtPrecio(dif) : "") + "</td>"
       + "<td style=\\"white-space:nowrap" + colorDif + "\\">" + (pct != null ? pct.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%" : "") + "</td>"
       + celdaWeb + "<td style=\\"white-space:nowrap;font-weight:600\\">" + (f.precioFijo != null ? fmtPrecio(f.precioFijo) : '<span style="color:var(--muted)">—</span>') + "</td>" + celdaBlack
-      + "<td>" + (f.sku ? '<input type="number" step="1" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />' : "") + "</td></tr>";
+      + "<td style=\\"white-space:nowrap\\">" + (f.sku ? '<input type="number" step="1" min="0" class="pb-nuevo" data-i="' + i + '" value="' + (f.precioNuevo != null ? f.precioNuevo : "") + '" style="width:90px" />'
+        // Copiar otro precio (Jennifer, 2026-10-20): "= tarifa" o "= precio actual".
+        + (f.tarifa != null ? ' <button type="button" class="secondary pb-nuevo-igual" data-i="' + i + '" data-de="tarifa" title="Poner el precio de tarifa" style="padding:2px 7px">= tarifa</button>' : "")
+        + (precioActualPB(f) != null ? ' <button type="button" class="secondary pb-nuevo-igual" data-i="' + i + '" data-de="actual" title="Poner el precio actual" style="padding:2px 7px">= actual</button>' : "")
+        + (precioPackPB(f, "precioNuevo") != null ? ' <button type="button" class="secondary pb-nuevo-igual" data-i="' + i + '" data-de="pack" title="Poner el precio del pack (suma de los precios nuevos de sus piezas)" style="padding:2px 7px">= pack</button>' : "") + margenPackHtmlPB(f, f.precioNuevo) + editorPackPB(f, i, "nuevo") : "") + "</td>"
+      + "<td style=\\"white-space:nowrap\\">" + celdaPackPB(f, i) + "</td></tr>";
   }).join("");
   // El margen se recalcula mientras se escribe, antes de guardar (Jennifer,
   // 2026-10-15: "si yo pongo un precio... me podrías calcular cuánto margen").
   document.querySelectorAll(".pb-black").forEach(inp => inp.addEventListener("input", () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
     const caja = inp.parentNode.querySelector(".pb-black-margen");
-    if (caja) caja.innerHTML = margenHtmlPB(f, inp.value === "" ? null : Number(inp.value));
+    if (caja) caja.innerHTML = margenHtmlPB(f, inp.value === "" ? null : Number(inp.value), "black");
   }));
   document.querySelectorAll(".pb-black").forEach(inp => inp.addEventListener("change", async () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
@@ -4522,8 +8322,19 @@ function renderPB() {
   }));
   document.querySelectorAll(".pb-black-igual").forEach(btn => btn.addEventListener("click", () => {
     const f = pbDatos.filas[Number(btn.dataset.i)];
-    guardarPreciosNuevosPB([{ sku: f.sku, precio: precioActualPB(f) }], "black2026");
+    const v = btn.dataset.de === "nuevo" ? f.precioNuevo : btn.dataset.de === "pack" ? precioPackPB(f, "precioBlack") : f.precioFijo;
+    if (v == null) return;
+    guardarPreciosNuevosPB([{ sku: f.sku, precio: Math.ceil(Number(v) - 0.000001) }], "black2026");
   }));
+  document.querySelectorAll(".pb-nuevo-igual").forEach(btn => btn.addEventListener("click", () => {
+    const f = pbDatos.filas[Number(btn.dataset.i)];
+    const v = btn.dataset.de === "tarifa" ? f.tarifa : btn.dataset.de === "pack" ? precioPackPB(f, "precioNuevo") : precioActualPB(f);
+    if (v == null) return;
+    guardarPreciosNuevosPB([{ sku: f.sku, precio: Math.ceil(Number(v) - 0.000001) }]);
+  }));
+  ajustarScrollTopPB();
+  pintarReglaPackPB(filas);
+
   document.querySelectorAll(".pb-tarifa-btn").forEach(btn => btn.addEventListener("click", () => abrirDesgloseTarifaPB(pbDatos.filas[Number(btn.dataset.i)])));
   document.querySelectorAll(".pb-nuevo").forEach(inp => inp.addEventListener("change", async () => {
     const f = pbDatos.filas[Number(inp.dataset.i)];
@@ -4564,14 +8375,22 @@ function margenConPrecioPB(f, precio) {
   const pctTarifa = quedaTarifa > 0 ? margenTarifa / quedaTarifa * 100 : null;
   return { margen, pct: queda > 0 ? margen / queda * 100 : null, margenTarifa, pctTarifa, dif: margen - margenTarifa };
 }
-function margenHtmlPB(f, precio) {
+function margenHtmlPB(f, precio, col) {
   const m = margenConPrecioPB(f, precio);
   if (!m) return "";
+  const regalo = col === "black" ? seaFoamSpringPB(f) : null;
+  if (regalo) {
+    const queda = precio / 1.04 / 1.21 * 0.77;
+    m.margen -= regalo.coste;
+    m.dif -= regalo.coste;
+    m.pct = queda > 0 ? m.margen / queda * 100 : null;
+  }
   const color = m.dif < -0.005 ? "#b91c1c" : "#15803d";
   const pct = (v) => v.toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "%";
   return '<div style="font-size:11px;margin-top:3px;white-space:nowrap;color:' + color + '" title="Coste + envío: ' + fmtPrecio(f.tarifaBase) + " · Margen con el precio de tarifa: " + fmtPrecio(m.margenTarifa) + (m.pctTarifa != null ? " (" + pct(m.pctTarifa) + ")" : "") + " · Margen de la fórmula: " + f.tarifaMargenPct + '%">'
     + "Margen " + fmtPrecio(m.margen) + (m.pct != null ? " (" + pct(m.pct) + ")" : "")
-    + "<br>" + (m.dif >= 0 ? "+" : "") + fmtPrecio(m.dif) + " vs tarifa" + (m.pctTarifa != null ? " (" + pct(m.pctTarifa) + ")" : "") + "</div>";
+    + "<br>" + (m.dif >= 0 ? "+" : "") + fmtPrecio(m.dif) + " vs tarifa" + (m.pctTarifa != null ? " (" + pct(m.pctTarifa) + ")" : "")
+    + (regalo ? '<br><span style="color:#b45309">Con ' + escapeAttr(regalo.texto) + " (−" + fmtPrecio(regalo.coste) + ")</span>" : "") + "</div>";
 }
 async function guardarPreciosNuevosPB(cambios, campo) {
   const res = await fetch("/api/precios-bezen/precio-nuevo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pbDatos.subida.id, cambios, campo: campo || "nuevo", usuario: currentUser }) });
@@ -4585,6 +8404,20 @@ async function guardarPreciosNuevosPB(cambios, campo) {
 document.getElementById("pb-subida").addEventListener("change", e => verPB(e.target.value));
 document.getElementById("pb-buscar").addEventListener("input", renderPB);
 document.getElementById("pb-filtro").addEventListener("change", renderPB);
+document.getElementById("pb-seafoam-desde").addEventListener("change", e => {
+  pbSeaFoamDesde = Number(e.target.value) || 0;
+  const wrap = document.getElementById("pb-table-wrap");
+  const sl = wrap.scrollLeft;
+  renderPB();
+  wrap.scrollLeft = sl;
+});
+document.getElementById("pb-seafoam-spring").addEventListener("change", e => {
+  pbSeaFoamSpring = e.target.checked;
+  const wrap = document.getElementById("pb-table-wrap");
+  const sl = wrap.scrollLeft;
+  renderPB();
+  wrap.scrollLeft = sl;
+});
 document.getElementById("pb-subir-btn").addEventListener("click", () => document.getElementById("pb-subir-input").click());
 document.getElementById("pb-subir-input").addEventListener("change", async e => {
   const file = e.target.files[0];
@@ -4629,6 +8462,23 @@ document.getElementById("pb-fijo-a-black-btn").addEventListener("click", async (
   if (!confirm("¿Poner el precio actual como precio BLACK en " + filas.length + " variantes (solo las que tienen el BLACK vacío)?")) return;
   await guardarPreciosNuevosPB(filas.map(f => ({ sku: f.sku, precio: precioActualPB(f) })), "black2026");
 });
+// Descuento de pack: se recuerda en este navegador y repinta al cambiarlo.
+try { const d = localStorage.getItem("pbPackDto"); if (d != null) document.getElementById("pb-pack-dto").value = d; } catch (e) { /* sin almacenamiento */ }
+document.getElementById("pb-pack-dto").addEventListener("change", () => {
+  try { localStorage.setItem("pbPackDto", document.getElementById("pb-pack-dto").value); } catch (e) { /* sin almacenamiento */ }
+  if (pbDatos) renderPB();
+});
+document.getElementById("pb-pack-a-columnas-btn").addEventListener("click", async () => {
+  if (!pbDatos) return;
+  const vistos = new Set();
+  const filas = filasFiltradasPB().filter(f => f.sku && f.packPiezas && !f.packError && !vistos.has(f.sku) && vistos.add(f.sku));
+  const black = filas.map(f => ({ sku: f.sku, precio: precioPackPB(f, "precioBlack") })).filter(c => c.precio != null);
+  const nuevo = filas.map(f => ({ sku: f.sku, precio: precioPackPB(f, "precioNuevo") })).filter(c => c.precio != null);
+  if (!black.length && !nuevo.length) { alert("Ninguna de las filas que se ven es un pack con precio calculado."); return; }
+  if (!confirm("¿Poner el precio de pack calculado en " + filas.length + " packs?\\n\\n· Precios BLACK 2026: " + black.length + " variantes\\n· Precio nuevo revisión antes BLACK: " + nuevo.length + " variantes\\n\\nSe sustituye lo que hubiera en esas casillas.")) return;
+  if (black.length) await guardarPreciosNuevosPB(black, "black2026");
+  if (nuevo.length) await guardarPreciosNuevosPB(nuevo);
+});
 document.getElementById("pb-quitar-nuevo-btn").addEventListener("click", async () => {
   if (!pbDatos) return;
   const filas = filasFiltradasPB().filter(f => f.sku && f.precioNuevo != null);
@@ -4659,18 +8509,49 @@ document.getElementById("pb-descargar-btn").addEventListener("click", () => {
   if (!pbDatos) return;
   const campo = document.getElementById("pb-descargar-columna").value;
   const vistos = new Set();
-  const filas = pbDatos.filas.filter(f => f.sku && !vistos.has(f.sku) && vistos.add(f.sku));
+  // Solo unos productos concretos (Jennifer, 2026-10-20): las filas que deja
+  // ver el buscador y el filtro.
+  const soloVistas = document.getElementById("pb-descargar-solo-vistas").checked;
+  const filas = (soloVistas ? filasFiltradasPB() : pbDatos.filas).filter(f => f.sku && !vistos.has(f.sku) && vistos.add(f.sku));
   // Vacía -> precio fijo (15/10); si el SKU no estaba entonces, precio web.
   // Precios de la web SIEMPRE sin decimales, redondeo al alza (Jennifer, 2026-10-15).
   const precioDe = (f) => { const p = f[campo] != null ? f[campo] : f.precioFijo != null ? f.precioFijo : f.precio; return p == null ? null : Math.ceil(p - 0.000001); };
   const conPrecio = filas.filter(f => precioDe(f) != null);
   if (!conPrecio.length) { alert("No hay precios para descargar."); return; }
   // VARIANTE CON 0: el precio con dos ceros al final (268 -> 26800).
-  const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(conPrecio.map(f => [f.sku, Math.round(precioDe(f) * 100), precioDe(f), precioTachadoPB(f, precioDe(f))]));
+  // En el fichero del BLACK el tachado NO se recalcula con el precio Black
+  // (Jennifer, 2026-10-29): es el mismo tachado que el del fichero de
+  // "precio nuevo revisión antes del Black".
+  const campoTachado = campo === "precioBlack" ? "precioNuevo" : campo;
+  const precioRefDe = (f) => { const p = f[campoTachado] != null ? f[campoTachado] : f.precioFijo != null ? f.precioFijo : f.precio; return p == null ? null : Math.ceil(p - 0.000001); };
+  // CAMBIO (Jennifer, 2026-11-02): el esquinas rectas ya no copia el tachado
+  // del Zenit; el precio tiene que salir un 80% más barato que el tachado →
+  // tachado = precio del fichero ÷ 0,20 (como Precios de la web liquidación).
+  const tachadoSuelto = (f) => f.producto === "Canapé de madera esquinas rectas" ? Math.round(precioDe(f) / 0.20) : precioTachadoPB(f, precioRefDe(f));
+  // Pack (Jennifer, 2026-10-29): su tachado es la SUMA de los tachados de
+  // sus piezas sueltas (mismo precio de referencia por pieza que en el pack:
+  // el de la columna, si no el fijo, el web o la tarifa). Si a una pieza le
+  // falta precio, el tachado normal del pack.
+  const tachadoPack = (f) => {
+    let suma = 0;
+    for (const p of f.packPiezas) {
+      const v = p[campoTachado] != null ? p[campoTachado] : p.precioFijo != null ? p.precioFijo : p.precio != null ? p.precio : p.tarifa;
+      if (v == null) return null;
+      const t = precioTachadoPB({ variante: p.talla || "", sku: "" }, Math.ceil(v - 0.000001));
+      if (t === "") return null;
+      suma += t * (p.cantidad || 1);
+    }
+    return suma;
+  };
+  const tachadoDe = (f) => {
+    const t = f.packPiezas && !f.packError ? tachadoPack(f) : null;
+    return t != null ? t : tachadoSuelto(f);
+  };
+  const aoa = [["SKU", "VARIANTE CON 0", "PRECIO", "PRECIO TACHADO"]].concat(conPrecio.map(f => [f.sku, Math.round(precioDe(f) * 100), precioDe(f), tachadoDe(f)]));
   const nombre = { precioBlack: "BLACK 2026", precioNuevo: "nuevos", precioFijo: "fijos", precio: "web" }[campo];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Precios");
-  XLSX.writeFile(wb, "Precios " + nombre + " " + new Date().toISOString().slice(0, 10) + ".xlsx");
+  XLSX.writeFile(wb, "Precios " + nombre + (soloVistas ? " (selección)" : "") + " " + new Date().toISOString().slice(0, 10) + ".xlsx");
 });
 document.getElementById("pb-borrar-btn").addEventListener("click", async () => {
   if (!pbDatos) return;
@@ -4732,9 +8613,9 @@ function renderHistoricoRepGc() {
   document.getElementById("historico-rep-count").textContent = items.length + " registrados";
   document.querySelector("#historico-rep-table tbody").innerHTML = items.map(b => {
     const o = allOrders.find(x => x.id === b.orderId) || {};
-    const tipoLabel = b.gestoComercial ? "GC" : "REP";
+    const tipoLabel = b.gestoComercial ? "GC" : b.servicioMontaje ? "MONTAJE" : b.revisionMontaje ? "REVISIÓN" : "REP";
     const pedidoBase = o.platform && o.platform !== "Shopify" && o.orderRef ? o.orderRef : "BEZEN" + b.orderNumber;
-    const agencia = b.agenciaReposicion || (b.gestoComercial ? "SEUR" : "");
+    const agencia = b.agenciaReposicion || (b.gestoComercial ? (b.gcFurniture ? "FURNITURE" : "SEUR") : "");
     let recogida = "—";
     if (b.tipo === "colchon" && b.agenciaReposicion === "FURNITURE") {
       recogida = b.recogida ? ("Sí — " + (b.recogidaDestino === "desechar" ? "desechar" : "instalaciones")) : "No";
@@ -4750,13 +8631,31 @@ function renderHistoricoRepGc() {
         <td>\${b.cantidad}</td>
         <td>\${escapeAttr(b.piezaTexto || "")}</td>
         <td>\${agencia}</td>
-        <td>\${recogida}</td>
+        <td>\${recogida}\${(b.serviciosReposicion || []).length ? '<div style="font-size:11.5px;margin-top:2px">' + escapeAttr(b.serviciosReposicion.join(" + ")) + "</div>" : ""}\${b.reposicion && b.estado === "pendiente" && (agencia === "FURNITURE" || (!agencia && b.tipo !== "colchon")) ? '<button type="button" class="secondary rep-servicios-btn" data-id="' + escapeAttr(b.id) + '" style="font-size:11px;padding:2px 6px;margin-top:3px">Servicios Furniture</button>' : ""}</td>
         <td>\${b.estado}</td>
         <td>\${new Date(parseFechaGenerica(b.fecha)).toLocaleDateString("es-ES")}</td>
       </tr>
     \`;
   }).join("");
 }
+// Cambiar los servicios adicionales de una reposición ya creada (Jennifer,
+// 2026-10-20, REPBEZEN11705). Varios separados por "+".
+document.getElementById("historico-rep-table").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".rep-servicios-btn");
+  if (!btn) return;
+  const b = backorders.find(x => x.id === btn.dataset.id);
+  if (!b) return;
+  const OPCIONES = ["MONTAJE, DESMONTAJE Y RETIRADA DE LA MERCANCÍA PARA DEVOLVER A TIENDA", "MONTAJE, DESMONTAJE Y LLEVAR A DESECHAR", "RETIRAR MERCANCÍA Y DEVOLVER A TIENDA"];
+  const actual = (b.serviciosReposicion || []).join(" + ");
+  const txt = prompt("Servicio adicional en Furniture para " + refLabel(b) + ". Escribe el número o el texto de otro servicio:\\n1 = Montaje, desmontaje y retirada de la mercancía para devolver a tienda\\n2 = Montaje, desmontaje y llevar a desechar\\n3 = Retirar mercancía y devolver a tienda\\n\\nVacío = ninguno." + (actual ? "\\n\\nAhora: " + actual : ""), "");
+  if (txt === null) return;
+  const t = txt.trim();
+  const serviciosReposicion = !t ? [] : /^[123]$/.test(t) ? [OPCIONES[Number(t) - 1]] : [t.toUpperCase()];
+  const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: b.id, serviciosReposicion }) });
+  if (!res.ok) { alert("No se han podido guardar los servicios."); return; }
+  b.serviciosReposicion = serviciosReposicion;
+  renderHistoricoRepGc();
+});
 document.getElementById("historico-pedido-search").addEventListener("input", renderHistoricoRepGc);
 document.getElementById("historico-referencia-search").addEventListener("input", renderHistoricoRepGc);
 document.getElementById("historico-tipo-filter").addEventListener("change", renderHistoricoRepGc);
@@ -4859,8 +8758,77 @@ const TARIFAS_COLUMNAS = [
   { key: "MAISON_IT", label: "MAISON IT" },
   { key: "RESTO_IT", label: "RESTO IT" },
   { key: "RESTO_AL", label: "RESTO AL" },
+  // Solo la Base Silver por ahora (Jennifer, 2026-10-27).
+  { key: "GROUPON", label: "GROUPON" },
 ];
 let tarifasFilasActuales = [];
+// Categorías de Tarifas (Jennifer, 2026-10-20): primero la categoría y luego
+// el producto. La tapicería solo se envía a España: solo columnas ES.
+const TARIFAS_CATEGORIAS = {
+  colchones: ["Colchones"],
+  tapiceria: ["Canapé", "Canapé fijo", "Base", "Cabecero", "Somier"],
+  complementos: ["Almohada", "Topper", "Protector de colchón"],
+};
+function tarifasCategoria() {
+  return document.getElementById("tarifas-categoria-select").value;
+}
+function tarifasModelosCategoria() {
+  const tipos = TARIFAS_CATEGORIAS[tarifasCategoria()] || [];
+  return [...catalogoProducts, ...(tarifasModelosExtra || [])].filter(p => tipos.includes(p.product_type) && !p.excluido && !/liquidaci/i.test(p.stockModel || ""));
+}
+// Columnas que tiene el modelo/categoría (antes de ocultar ninguna).
+function tarifasColumnasDisponibles() {
+  const conGroupon = tarifasFilasActuales.some(f => f.columnas && f.columnas.GROUPON);
+  return tarifasCategoria() === "tapiceria"
+    ? TARIFAS_COLUMNAS.filter(c => ["BEZEN", "MAISON_ES", "RESTO_ES"].includes(c.key) || (c.key === "GROUPON" && conGroupon))
+    : TARIFAS_COLUMNAS.filter(c => c.key !== "GROUPON" || conGroupon);
+}
+// Ocultar columnas de precios (Jennifer, 2026-11-03: "la de Groupon me
+// aparece la última y tengo que seguir mucho con la vista"). Se recuerda en
+// este navegador.
+let tarifasColumnasOcultas = new Set();
+try { tarifasColumnasOcultas = new Set(JSON.parse(localStorage.getItem("tarifasColumnasOcultas") || "[]")); } catch (e) { /* sin almacenamiento */ }
+function guardarColumnasOcultasTarifas() {
+  try { localStorage.setItem("tarifasColumnasOcultas", JSON.stringify([...tarifasColumnasOcultas])); } catch (e) { /* sin almacenamiento */ }
+}
+function tarifasColumnasVisibles() {
+  return tarifasColumnasDisponibles().filter(c => !tarifasColumnasOcultas.has(c.key));
+}
+function pintarCabeceraTarifas() {
+  document.querySelector("#tarifas-table thead").innerHTML = "<tr><th>Talla</th><th>Coste</th>" + tarifasColumnasVisibles().map(c => "<th>" + c.label + "</th>").join("") + "</tr>";
+  pintarBarraColumnasTarifas();
+}
+function pintarBarraColumnasTarifas() {
+  const bar = document.getElementById("tarifas-columnas-bar");
+  if (!bar) return;
+  const disp = tarifasColumnasDisponibles();
+  const ocultas = disp.filter(c => tarifasColumnasOcultas.has(c.key));
+  bar.innerHTML = '<span style="font-size:13px;color:var(--muted)">Columnas:</span>'
+    + disp.map(c => {
+      const oculta = tarifasColumnasOcultas.has(c.key);
+      return '<button type="button" class="secondary tarifas-col-toggle" data-col="' + c.key + '" title="' + (oculta ? "Oculta: pulsa para mostrarla" : "Pulsa para ocultarla") + '"'
+        + ' style="padding:3px 10px;font-size:12px;border-radius:999px;' + (oculta ? "opacity:.45;text-decoration:line-through" : "font-weight:700") + '">'
+        + (oculta ? "🙈 " : "") + c.label + "</button>";
+    }).join("")
+    + (ocultas.length
+      ? '<span style="font-size:12.5px;font-weight:700;color:#b45309;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:2px 8px">Ocultas: ' + ocultas.map(c => c.label).join(", ") + '</span>'
+        + '<button type="button" class="secondary" id="tarifas-col-todas" style="padding:3px 10px;font-size:12px">Mostrar todas</button>'
+      : "");
+  bar.querySelectorAll(".tarifas-col-toggle").forEach(btn => btn.addEventListener("click", () => {
+    const k = btn.dataset.col;
+    if (tarifasColumnasOcultas.has(k)) tarifasColumnasOcultas.delete(k); else tarifasColumnasOcultas.add(k);
+    guardarColumnasOcultasTarifas();
+    pintarCabeceraTarifas();
+    renderTablaTarifas();
+  }));
+  const todas = document.getElementById("tarifas-col-todas");
+  if (todas) todas.addEventListener("click", () => {
+    tarifasColumnasOcultas.clear();
+    guardarColumnasOcultasTarifas();
+    pintarCabeceraTarifas();
+    renderTablaTarifas();
+  });
+}
 function fmtPrecio(v) {
   return v == null ? "—" : v.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + "€";
 }
@@ -4878,14 +8846,46 @@ async function loadTarifas() {
   // Los modelos "LIQUIDACIÓN" con stockModel propio (ej. "Siberian Zen -
   // LIQUIDACION") no interesan en Tarifas (Jennifer, 2026-09-23) — se
   // excluyen del buscador aunque sigan en el Catálogo normal.
-  const nombresUnicos = [...new Set(
-    catalogoProducts
-      .filter(p => p.product_type === "Colchones" && !p.excluido && !/liquidaci/i.test(p.stockModel || ""))
-      .map(p => p.stockModel)
-  )].sort((a, b) => a.localeCompare(b));
+  if (!tarifasModelosExtra) {
+    try { tarifasModelosExtra = await (await fetch("/api/tarifas/modelos-extra")).json(); } catch (e) { tarifasModelosExtra = []; }
+  }
+  const nombresUnicos = [...new Set(tarifasModelosCategoria().map(p => p.stockModel))].sort((a, b) => a.localeCompare(b));
   document.getElementById("tarifas-modelos-datalist").innerHTML = nombresUnicos.map(nombre => \`<option value="\${escapeAttr(nombre)}"></option>\`).join("");
+  // Todos los modelos de la categoría a la vista, sin desplegar ni hacer
+  // scroll (Jennifer, 2026-10-20): un botón por modelo.
+  // En lista, con el nombre de fábrica al lado (Jennifer, 2026-10-20).
+  if (!tarifasNombresFabrica) {
+    try { tarifasNombresFabrica = await (await fetch("/api/tarifas/nombres-fabrica")).json(); } catch (e) { tarifasNombresFabrica = {}; }
+  }
+  document.getElementById("tarifas-modelos-grid").innerHTML = nombresUnicos.map(nombre => {
+    const fabrica = tarifasNombresFabrica[nombre] || "";
+    return '<button type="button" class="secondary tarifa-modelo-chip" data-modelo="' + escapeAttr(nombre) + '" title="' + escapeAttr(nombre) + '"'
+      + ' style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;width:100%;text-align:left;padding:5px 10px;font-size:12.5px;border-radius:6px">'
+      + "<span>" + escapeAttr(nombre) + "</span>"
+      + '<span class="tarifa-fabrica" style="white-space:nowrap;font-weight:700;opacity:.75">' + (fabrica ? "Fábrica: " + escapeAttr(fabrica) : "") + "</span></button>";
+  }).join("");
   await cargarTablaTarifas();
 }
+let tarifasNombresFabrica = null;
+// Modelos que solo existen en Tarifas, no en el Catálogo (Jennifer,
+// 2026-10-27: el Somier Kilimanjaro).
+let tarifasModelosExtra = null;
+function marcarChipTarifas() {
+  const actual = document.getElementById("tarifas-modelo-select").value.trim().toLowerCase();
+  document.querySelectorAll(".tarifa-modelo-chip").forEach(b => {
+    const activo = b.dataset.modelo.toLowerCase() === actual;
+    b.style.background = activo ? "var(--accent, #2563eb)" : "";
+    b.style.color = activo ? "#fff" : "";
+    b.style.display = !actual || activo || b.dataset.modelo.toLowerCase().includes(actual) || b.textContent.toLowerCase().includes(actual) ? "flex" : "none";
+  });
+}
+document.getElementById("tarifas-modelos-grid").addEventListener("click", (e) => {
+  const chip = e.target.closest(".tarifa-modelo-chip");
+  if (!chip) return;
+  const input = document.getElementById("tarifas-modelo-select");
+  input.value = input.value.trim().toLowerCase() === chip.dataset.modelo.toLowerCase() ? "" : chip.dataset.modelo;
+  cargarTablaTarifas();
+});
 // Lista de ficheros de precio por plataforma ya cargados en el sistema
 // (Jennifer, 2026-09-23: "necesito tener este fichero en el sistema para
 // que si hacemos alguna actualización de precio, ese fichero se
@@ -4935,7 +8935,9 @@ async function cargarPlataformasExport() {
   }
 }
 async function cargarTablaTarifas() {
+  pintarCabeceraTarifas();
   const typed = document.getElementById("tarifas-modelo-select").value.trim();
+  marcarChipTarifas();
   const avisoEl = document.getElementById("tarifas-aviso");
   if (!typed) {
     document.querySelector("#tarifas-table tbody").innerHTML = "";
@@ -4943,7 +8945,7 @@ async function cargarTablaTarifas() {
     avisoEl.style.display = "none";
     return;
   }
-  const modelos = catalogoProducts.filter(p => p.product_type === "Colchones" && !p.excluido && !/liquidaci/i.test(p.stockModel || ""));
+  const modelos = tarifasModelosCategoria();
   const stockModel = modelos.find(p => p.stockModel === typed)?.stockModel
     || modelos.find(p => p.stockModel.toLowerCase() === typed.toLowerCase())?.stockModel
     || null;
@@ -4963,16 +8965,19 @@ async function cargarTablaTarifas() {
     return;
   }
   tarifasFilasActuales = data.filas;
+  // La columna GROUPON solo sale si el modelo la tiene.
+  pintarCabeceraTarifas();
   renderTablaTarifas();
 }
 function renderTablaTarifas() {
   // Orden numérico de talla (Jennifer, 2026-09-23): 80X180, 80X190, 80X200,
   // 90X180... hasta 200X200 — nunca el orden en que vengan del Catálogo.
   // Mismo comparador que ya usa Inventario > Stock (parseTalla).
+  // "160X190 GEMELOS" va justo detrás de su 160X190 (partido).
   const filas = [...tarifasFilasActuales].sort((a, b) => {
-    const [aw, ah] = parseTalla(a.talla);
-    const [bw, bh] = parseTalla(b.talla);
-    return aw - bw || ah - bh;
+    const [aw, ah] = parseTalla(String(a.talla).split(" ")[0]);
+    const [bw, bh] = parseTalla(String(b.talla).split(" ")[0]);
+    return aw - bw || ah - bh || String(a.talla).localeCompare(String(b.talla));
   });
   const avisoEl = document.getElementById("tarifas-aviso");
   const sinDatos = filas.filter(f => f.error);
@@ -4985,9 +8990,9 @@ function renderTablaTarifas() {
     + (primeraConCoste ? " — coste de " + primeraConCoste.costeProveedor + " (" + primeraConCoste.costePeriodo + ")" : "");
   document.querySelector("#tarifas-table tbody").innerHTML = filas.map(f => {
     if (!f.columnas) {
-      return \`<tr><td>\${f.talla}</td><td colspan="9" style="color:#991b1b">\${escapeAttr(f.error || "Sin datos")}</td></tr>\`;
+      return \`<tr><td>\${f.talla}</td><td colspan="\${tarifasColumnasVisibles().length + 1}" style="color:#991b1b">\${escapeAttr(f.error || "Sin datos")}</td></tr>\`;
     }
-    const cells = TARIFAS_COLUMNAS.map(c => {
+    const cells = tarifasColumnasVisibles().map(c => {
       const col = f.columnas[c.key];
       if (!col || col.precio == null) return "<td>—</td>";
       return \`<td><button type="button" class="secondary tarifa-precio-btn" data-talla="\${escapeAttr(f.talla)}" data-col="\${c.key}">\${fmtPrecio(col.precio)}</button></td>\`;
@@ -5007,6 +9012,10 @@ function renderTablaTarifas() {
   });
 }
 document.getElementById("tarifas-modelo-select").addEventListener("input", cargarTablaTarifas);
+document.getElementById("tarifas-categoria-select").addEventListener("change", () => {
+  document.getElementById("tarifas-modelo-select").value = "";
+  loadTarifas();
+});
 
 function abrirDesgloseTarifa(talla, colKey) {
   const fila = tarifasFilasActuales.find(f => f.talla === talla);
@@ -5109,6 +9118,99 @@ async function loadStock() {
 // (distinto de la campana): un colchón de un pedido de Furniture que se
 // puede cubrir con un abierto de la misma medida ("Usar el abierto") o
 // cortando uno abierto MÁS GRANDE del mismo modelo ("Cortar").
+// Stock de tapicería (Jennifer, 2026-10-20): canapés o piezas en el almacén.
+let stockTapiceriaRows = [];
+const TIPOS_TAPICERIA = ["Canapé", "Canapé fijo", "Base", "Cabecero"];
+function colorTapKey(c) {
+  return String(c || "").replace(/^(tela|polipiel)\\s*-\\s*/i, "").normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase().replace(/-/g, " ").replace(/\\s+/g, " ").trim();
+}
+// Pendientes de tapicería sin pedir (o ya pedidos, avisando) que encajan con la ficha.
+function candidatosStockTapiceria(s) {
+  return backorders.filter(b => b.tipo === "tapiceria" && b.estado === "pendiente" && !b.reposicion && !b.gestoComercial && !b.stockTapiceriaId
+    && b.stockModel === s.stockModel && b.talla === s.talla && colorTapKey(b.color) === colorTapKey(s.color)
+    && !(b.piezasStockTexto || []).some(t => t.split(" (")[0] === String(s.pieza || "").toUpperCase()));
+}
+async function loadStockTapiceria() {
+  try {
+    const [st, bo] = await Promise.all([fetch("/api/inventario/stock-tapiceria").then(r => r.json()), fetch("/api/inventario/pendientes").then(r => r.json())]);
+    stockTapiceriaRows = st;
+    backorders = bo;
+  } catch (e) { stockTapiceriaRows = []; }
+  if (!catalogoProducts.length) {
+    try { catalogoProducts = await (await fetch("/api/inventario/catalogo")).json(); } catch (e) { /* sin catálogo no hay modelos que elegir */ }
+  }
+  const modelos = [...new Set(catalogoProducts.filter(p => TIPOS_TAPICERIA.includes(p.product_type)).map(p => p.stockModel))].sort();
+  document.getElementById("st-modelos-datalist").innerHTML = modelos.map(m => '<option value="' + escapeAttr(m) + '"></option>').join("");
+  renderStockTapiceria();
+}
+function renderStockTapiceria() {
+  const verSalidos = document.getElementById("st-ver-salidos").checked;
+  const filas = stockTapiceriaRows.filter(s => verSalidos || s.estado !== "salido")
+    .sort((a, b) => (a.estado === "disponible" ? 0 : 1) - (b.estado === "disponible" ? 0 : 1) || a.stockModel.localeCompare(b.stockModel) || a.talla.localeCompare(b.talla));
+  const libres = stockTapiceriaRows.filter(s => s.estado === "disponible");
+  document.getElementById("st-count").textContent = libres.length + " disponible(s) · " + stockTapiceriaRows.filter(s => s.estado === "asignado").length + " asignado(s) a un pedido";
+  const conCandidato = libres.filter(s => candidatosStockTapiceria(s).length).length;
+  const badge = document.getElementById("stock-tapiceria-badge");
+  if (badge) { badge.textContent = conCandidato; badge.style.display = conCandidato ? "" : "none"; }
+  document.querySelector("#st-table tbody").innerHTML = filas.map(s => {
+    const estado = s.estado === "disponible" ? '<span style="color:#15803d;font-weight:700">EN STOCK</span>'
+      : (s.estado === "asignado" ? '<span style="color:#b45309;font-weight:700">ASIGNADO</span> a ' : '<span style="color:var(--muted)">SALIÓ</span> con ') + escapeAttr(s.asignadoA ? refLabel(s.asignadoA) : "");
+    const cands = s.estado === "disponible" ? candidatosStockTapiceria(s) : [];
+    const candHtml = cands.map(b => '<button type="button" class="secondary st-asignar" data-id="' + escapeAttr(s.id) + '" data-bo="' + escapeAttr(b.id) + '" title="' + escapeAttr((b.color || "") + (b.pedidoGenerado ? " · YA PEDIDO a fábrica" + (b.referencia ? " (" + b.referencia + ")" : "") : " · sin pedir")) + '">Usar en ' + escapeAttr(refLabel(b)) + (b.pedidoGenerado ? " ⚠" : "") + "</button>").join(" ");
+    return "<tr><td>" + escapeAttr(s.stockModel) + "</td><td>" + escapeAttr(s.talla) + "</td><td>" + escapeAttr(s.color || "—") + "</td><td><strong>" + escapeAttr(s.referencia || "—") + "</strong></td><td>" + (s.completo ? "Completo" : "Pieza: <strong>" + escapeAttr(s.pieza || "?") + "</strong>") + "</td><td>" + escapeAttr(s.nota || "") + "</td><td>" + estado + "</td><td>" + (candHtml || '<span style="color:var(--muted)">—</span>') + "</td><td>"
+      + (s.estado !== "asignado" ? '<button type="button" class="secondary st-baja" data-id="' + escapeAttr(s.id) + '">Quitar</button>' : "") + "</td></tr>";
+  }).join("") || '<tr><td colspan="9" style="color:var(--muted)">No hay tapicería en el almacén.</td></tr>';
+}
+document.getElementById("st-ver-salidos").addEventListener("change", renderStockTapiceria);
+document.getElementById("st-completo").addEventListener("change", () => {
+  document.getElementById("st-pieza").style.display = document.getElementById("st-completo").value === "1" ? "none" : "";
+});
+document.getElementById("st-modelo").addEventListener("change", () => {
+  const p = catalogoProducts.find(x => x.stockModel === document.getElementById("st-modelo").value);
+  document.getElementById("st-tallas-datalist").innerHTML = ((p && p.tallas) || []).map(t => '<option value="' + escapeAttr(t) + '"></option>').join("");
+});
+document.getElementById("st-alta").addEventListener("click", async () => {
+  const stockModel = document.getElementById("st-modelo").value.trim();
+  const talla = document.getElementById("st-talla").value.trim().toUpperCase().replace(/\\s+/g, "").replace(/CM/g, "");
+  const color = document.getElementById("st-color").value.trim();
+  const referencia = document.getElementById("st-referencia").value.trim();
+  const completo = document.getElementById("st-completo").value === "1";
+  const pieza = document.getElementById("st-pieza").value.trim();
+  const nota = document.getElementById("st-nota").value.trim();
+  const out = document.getElementById("st-result");
+  if (!stockModel || !talla) { out.textContent = "Elige el modelo y escribe la medida."; return; }
+  if (!color) { out.textContent = "Escribe el color: se usa para cogerlo solo en un pedido igual."; return; }
+  if (!completo && !pieza) { out.textContent = "Escribe qué pieza es (TAPA, CAJÓN, FONDO…)."; return; }
+  const res = await fetch("/api/inventario/stock-tapiceria/alta", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ stockModel, talla, color, referencia, completo, pieza, nota, usuario: currentUser }) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { out.textContent = r.error || "No se ha podido dar de alta."; return; }
+  out.textContent = "Dado de alta: " + stockModel + " " + r.ficha.talla + (color ? " " + color : "") + (referencia ? " (" + r.ficha.referencia + ")" : "") + ".";
+  ["st-color", "st-referencia", "st-nota", "st-pieza"].forEach(id => { document.getElementById(id).value = ""; });
+  loadStockTapiceria();
+});
+document.getElementById("st-table").addEventListener("click", async (e) => {
+  const baja = e.target.closest(".st-baja");
+  const asignar = e.target.closest(".st-asignar");
+  if (baja) {
+    if (!confirm("¿Quitar esta ficha del stock de tapicería?")) return;
+    const res = await fetch("/api/inventario/stock-tapiceria/baja", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: baja.dataset.id }) });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok || !r.ok) { alert(r.error || "No se ha podido quitar."); return; }
+    loadStockTapiceria();
+  } else if (asignar) {
+    const s = stockTapiceriaRows.find(x => x.id === asignar.dataset.id);
+    const b = backorders.find(x => x.id === asignar.dataset.bo);
+    if (!s || !b) return;
+    const aviso = b.pedidoGenerado ? "\\n\\n⚠ OJO: este artículo YA SE HA PEDIDO a fábrica" + (b.referencia ? " con la referencia " + b.referencia : "") + ". Tendrás que avisar para anularlo." : "";
+    if (!confirm("¿Usar " + s.stockModel + " " + s.talla + " " + (s.color || "") + (s.referencia ? " (" + s.referencia + ")" : "") + " para " + refLabel(b) + "?" + (s.completo ? "\\n\\nSale del almacén con esa referencia y ya no se pide a fábrica." : "\\n\\nEs una pieza: queda apuntada en el pedido y el resto se sigue pidiendo.") + aviso)) return;
+    const res = await fetch("/api/inventario/stock-tapiceria/asignar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: s.id, backorderId: b.id }) });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok || !r.ok) { alert(r.error || "No se ha podido asignar."); return; }
+    if (r.avisos && r.avisos.length) alert(r.avisos.join("\\n"));
+    loadStockTapiceria();
+  }
+});
+
 let abiertosRows = [];
 async function cargarAbiertos() {
   try {
@@ -5180,6 +9282,9 @@ function abiertoTagHtml(b) {
 }
 function nombreCortoModelo(stockModel) {
   const partes = String(stockModel || "").split("|").map(s => s.trim()).filter(Boolean);
+  // Base: nunca solo el color (Jennifer, 2026-10-19: "tienes que poner
+  // delante BASE TAPIZADA").
+  if (partes.length > 1 && /^base tapizada/i.test(partes[0])) return "BASE TAPIZADA " + partes[partes.length - 1];
   return partes[partes.length - 1] || stockModel || "";
 }
 async function usarAbierto(id) {
@@ -5301,7 +9406,11 @@ async function ajustarAbiertos(query, talla, delta, nota) {
 function populateStockModelSelect() {
   const datalist = document.getElementById("stock-models-datalist");
   const models = [...new Set(stockRows.map(r => r.stockModel))].sort((a, b) => a.localeCompare(b));
-  datalist.innerHTML = models.map(m => \`<option value="\${escapeAttr(m)}"></option>\`).join("");
+  // Búsqueda sin tildes (Jennifer, 2026-10-29: escribiendo "latex gel" no
+  // salía "Látex Gel"): Chrome también filtra por el label de cada opción,
+  // así que el label lleva el nombre sin tildes.
+  const sinTildes = (s) => s.normalize("NFD").replace(/[\\u0300-\\u036f]/g, "");
+  datalist.innerHTML = models.map(m => \`<option value="\${escapeAttr(m)}" label="\${escapeAttr(sinTildes(m) === m ? "" : sinTildes(m))}"></option>\`).join("");
 }
 
 function populateStockSkuDatalist() {
@@ -5361,9 +9470,12 @@ function renderStock() {
 
   const porMedida = !model;
   document.getElementById("stock-modelo-head").style.display = porMedida ? "" : "none";
+  // Buscando solo por medida, siempre solo lo que tiene stock real
+  // (Jennifer, 2026-10-19: "no necesito que me muestres el resto").
+  const conStock = soloConStock || porMedida;
   const sorted = stockRows.filter(r => (!model || r.stockModel === model)
       && (!tallaTxt || normTalla(r.talla).includes(tallaTxt))
-      && (!soloConStock || r.cantidad > 0))
+      && (!conStock || r.cantidad > 0))
     .sort((a, b) => porMedida
       ? (compareTalla(a.talla, b.talla) || nombreCortoModelo(a.stockModel).localeCompare(nombreCortoModelo(b.stockModel)))
       : compareTalla(a.talla, b.talla));
@@ -5392,7 +9504,7 @@ function renderStock() {
   }).join("");
   const totalReal = sorted.reduce((n, r) => n + Math.max(0, r.cantidad || 0), 0);
   document.getElementById("stock-count").textContent = porMedida
-    ? (sorted.length ? sorted.length + " modelos/medidas que coinciden con " + tallaTxt + " · " + totalReal + " unidades en stock real" : "No hay nada con la medida " + tallaTxt + (soloConStock ? " con stock real." : "."))
+    ? (sorted.length ? sorted.length + " modelos con stock en " + tallaTxt + " · " + totalReal + " unidades en stock real" : "No hay ningún colchón con stock real en la medida " + tallaTxt + ".")
     : sorted.length + " tallas de " + model + (tallaTxt ? " (medida " + tallaTxt + ")" : "");
 
   tbody.querySelectorAll(".stock-adjust").forEach(btn => {
@@ -5414,6 +9526,7 @@ async function adjustStock(stockModel, talla, delta, field) {
 // botón de Proveedores): a la carga de hoy/mañana, o a la fecha programada
 // con email de reserva al almacén.
 async function marcarRecibidoSeur(bo) {
+  if (bo.orderId !== undefined && retenidoSinFechaSeur(bo)) return recibirRetenidoSeur(bo);
   const programada = bo.orderId !== undefined ? fechaProgramadaSeur(bo) : null;
   const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/resolver-seur", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha: programada || "auto" }),
@@ -5445,7 +9558,15 @@ async function marcarRecibidoSeur(bo) {
 // las unidades dadas de alta se marca recibido (como el botón) y esa unidad
 // no se queda en el stock. Los que no van por SEUR (Furniture, recogida,
 // cuarentena, revisión...) no se tocan, solo se avisa.
-async function asignarAltaAPendientes(stockModel, talla, unidades) {
+// Devoluciones (Jennifer, 2026-10-28): "devolucion" es la referencia del
+// pedido devuelto. En SEUR la línea sale en el listado del almacén como
+// "ES UNA DEVOLUCIÓN"; los que van por Furniture se marcan recibidos con esa
+// unidad (sube a la carga si ya está todo, o se manda el email de reserva
+// al almacén si todavía espera a otra cosa, igual que «Marcar recibido»).
+function pedidoCanceladoCliente(o) {
+  return !!(o && (o.cancelado || o.shopifyCancelado || /cancelad|reembolsad|rechazad|anulad/i.test(o.estado || "")));
+}
+async function asignarAltaAPendientes(stockModel, talla, unidades, devolucion) {
   if (!(unidades > 0)) return;
   try { backorders = await (await fetch("/api/inventario/pendientes")).json(); } catch (e) { return; }
   const tallaU = String(talla).toUpperCase();
@@ -5454,22 +9575,50 @@ async function asignarAltaAPendientes(stockModel, talla, unidades) {
     .sort((a, b) => parseFechaGenerica(a.fecha) - parseFechaGenerica(b.fecha));
   if (!todos.length) return;
   const recoge = b => { const o = allOrders.find(x => String(x.id) === String(b.orderId)); return !!(o && o.recogeCliente); };
-  const motivoNoSeur = b => b.cuarentena ? "en cuarentena" : b.revision ? "en revisión" : recoge(b) ? "lo recoge el cliente"
+  // Pedido cancelado/reembolsado (Jennifer, 2026-11-05, Carrefour 76441060-A:
+  // al dar de alta un París se lo asignó y entró en la carga de SEUR).
+  const cancelado = b => pedidoCanceladoCliente(allOrders.find(x => String(x.id) === String(b.orderId)));
+  const motivoNoSeur = b => cancelado(b) ? "el pedido está CANCELADO" : b.cuarentena ? "en cuarentena" : b.revision ? "en revisión" : recoge(b) ? "lo recoge el cliente"
     : (b.transformadoDesde || b.tipoEnvio === "FUR" || (b.reposicion && b.agenciaReposicion === "FURNITURE")) ? "va por Furniture"
     : b.stockPedidoId ? "esperando un pedido para stock" : "";
   let restante = unidades;
   const metidos = [];
   const otros = [];
+  const marcaDevolucion = async (b) => {
+    if (!devolucion) return;
+    await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: b.id, desdeDevolucion: { ref: devolucion, fecha: new Date().toISOString(), usuario: currentUser || null } }) });
+  };
+  const descontarStock = (b, ref) => fetch("/api/inventario/stock", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stockModel, talla, delta: -b.cantidad, field: "cantidad", usuario: currentUser, origen: "alta-a-pendiente", orderRef: ref }) });
   for (const b of todos) {
     const ref = refLabel(b) + (b.refSuffix || "");
     const motivo = motivoNoSeur(b);
+    const porFurniture = motivo === "va por Furniture" && !b.transformadoDesde;
+    if (porFurniture && restante >= b.cantidad) {
+      const entry = await resolverPendiente(b.id, { sinPreguntar: true, recibido: true });
+      if (entry && entry.recibidoFabrica) {
+        await marcaDevolucion(b);
+        await descontarStock(b, ref);
+        restante -= b.cantidad;
+        const pedido = allOrders.find(x => String(x.id) === String(b.orderId));
+        metidos.push(ref + " → FURNITURE: marcado recibido" + (devolucion ? " (es una devolución)" : "")
+          + (entry.avisoReserva ? (entry.avisoReserva.ok ? ", email de reserva enviado al almacén" : ", ¡NO se pudo mandar el email de reserva, avisa tú al almacén!")
+            : pedido && pedido.cargaId ? ", ya está en la carga de Furniture" : ", entra en la carga de Furniture cuando esté todo el pedido"));
+        continue;
+      }
+      otros.push(ref + " (va por Furniture: no se ha podido marcar recibido)");
+      continue;
+    }
     if (!motivo && restante >= b.cantidad) {
       const r = await marcarRecibidoSeur(b);
       if (r.ok) {
-        await fetch("/api/inventario/stock", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ stockModel, talla, delta: -b.cantidad, field: "cantidad", usuario: currentUser, origen: "alta-a-pendiente", orderRef: ref }) });
+        await marcaDevolucion(b);
+        await descontarStock(b, ref);
         restante -= b.cantidad;
-        metidos.push(ref + " → " + (r.programada
+        metidos.push(ref + (devolucion ? " (ES UNA DEVOLUCIÓN)" : "") + " → " + (r.retenido
+          ? "RETENIDO sin fecha, en SEUR > Retenidos sin fecha" + (r.emailOk ? " (email de reserva enviado al almacén)" : " (¡NO se pudo mandar el email de reserva, avisa tú al almacén!)")
+          : r.programada
           ? "carga de SEUR del " + r.programada.slice(8, 10) + "/" + r.programada.slice(5, 7) + (r.emailOk ? " (email de reserva enviado al almacén)" : " (¡NO se pudo mandar el email de reserva, avisa tú al almacén!)")
           : r.carga ? formatSeurCargaTitulo(r.carga) : "carga de SEUR"));
         continue;
@@ -5482,7 +9631,8 @@ async function asignarAltaAPendientes(stockModel, talla, unidades) {
   const NL = String.fromCharCode(10);
   let txt = "";
   if (metidos.length) txt += "Había " + (metidos.length === 1 ? "un pedido esperando" : "pedidos esperando") + " " + nombreCortoModelo(stockModel) + " " + talla
-    + ", así que " + (metidos.length === 1 ? "lo he metido" : "los he metido") + " en la carga de SEUR (esa unidad no se queda en el stock):" + NL + metidos.map(m => "• " + m).join(NL);
+    + (devolucion ? " (alta de la devolución " + devolucion + ")" : "")
+    + ", así que " + (metidos.length === 1 ? "se lo he asignado" : "se lo he asignado a cada uno") + " (esa unidad no se queda en el stock):" + NL + metidos.map(m => "• " + m).join(NL);
   if (otros.length) txt += (txt ? NL + NL : "") + "Ojo: " + (otros.length === 1 ? "hay otro pendiente" : "hay otros pendientes") + " de este colchón que no he tocado:" + NL + otros.map(m => "• " + m).join(NL);
   if (txt) alert(txt);
 }
@@ -5548,15 +9698,20 @@ async function loadPendientes() {
 // colchón con la tarifa del proveedor"). Se piden al servidor solo los
 // modelo+medida que aún no se tienen; al llegar se vuelve a pintar.
 const costesTarifa = new Map();
+// Canapé de 160 en GEMELOS: la tarifa de Polival tiene su propio precio
+// (Jennifer, 2026-10-20), guardado como "160X190 GEMELOS".
+function tallaTarifa(b) {
+  return b.formato160 === "GEMELOS" && /^160X/.test(b.talla || "") ? b.talla + " GEMELOS" : b.talla;
+}
 let costesTarifaPidiendo = false;
 async function cargarCostesTarifa(lista) {
   const faltan = [];
   const vistos = new Set();
   for (const b of lista) {
-    const k = b.stockModel + "|" + b.talla;
+    const k = b.stockModel + "|" + tallaTarifa(b);
     if (costesTarifa.has(k) || vistos.has(k)) continue;
     vistos.add(k);
-    faltan.push({ stockModel: b.stockModel, talla: b.talla });
+    faltan.push({ stockModel: b.stockModel, talla: tallaTarifa(b) });
   }
   if (!faltan.length) return;
   // Si ya hay una petición en marcha, se espera a que acabe y se reintenta
@@ -5577,7 +9732,7 @@ function formatoEuros(n) {
   return n.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
 }
 function costeTarifaCell(b) {
-  const c = costesTarifa.get(b.stockModel + "|" + b.talla);
+  const c = costesTarifa.get(b.stockModel + "|" + tallaTarifa(b));
   if (!c) return '<td class="coste-tarifa">…</td>';
   if (c.coste == null) return '<td class="coste-tarifa" title="Sin precio en la tarifa del proveedor">—</td>';
   const cantidad = b.cantidad || 1;
@@ -5588,7 +9743,7 @@ function costeTarifaCell(b) {
 function totalCostesTarifa(lista) {
   let total = 0, sinPrecio = 0;
   for (const b of lista) {
-    const c = costesTarifa.get(b.stockModel + "|" + b.talla);
+    const c = costesTarifa.get(b.stockModel + "|" + tallaTarifa(b));
     if (c && c.coste != null) total += c.coste * (b.cantidad || 1); else sinPrecio++;
   }
   return { total, sinPrecio };
@@ -5703,26 +9858,329 @@ function mostrarAvisoBreve(texto) {
 let pedidoFabricaSeleccion = new Set();
 // Envíos por NACEX (Jennifer, 2026-10-14): no hay cargas de NACEX, así que
 // se ven aquí, en cualquier pestaña de Proveedores, hasta marcarlos enviados.
+// También en su propia pantalla, Logística › NACEX (Jennifer, 2026-10-28: "a
+// mí no me sale NACEX en ningún sitio").
 function renderNacexAviso() {
-  const cont = document.getElementById("nacex-aviso");
-  if (!cont) return;
+  ["nacex-aviso", "nacex-vista"].forEach(idCont => {
+    const cont = document.getElementById(idCont);
+    if (cont) pintarNacex(cont, idCont === "nacex-vista");
+  });
+  renderNacexEnviados();
+  // Busca la respuesta de NACEX de lo ya documentado (como mucho una vez por minuto).
   const lista = backorders.filter(b => b.agenciaReposicion === "NACEX" && b.estado === "pendiente");
-  if (!lista.length) { cont.innerHTML = ""; return; }
+  if (lista.some(b => b.nacex && b.nacex.threadId) && !nacexLeyendo) {
+    nacexLeyendo = true;
+    fetch("/api/nacex/respuestas", { method: "POST" }).then(r => r.json()).then(d => {
+      const antes = JSON.stringify(nacexRespuestas);
+      if (d && d.ok) nacexRespuestas = d.respuestas || {};
+      if (d && d.enviadosAuto) { if (typeof loadPendientes === "function") loadPendientes(); if (document.getElementById("view-nacex").style.display !== "none") loadNacex(); }
+      else if (JSON.stringify(nacexRespuestas) !== antes) renderNacexAviso();
+    }).catch(() => {}).finally(() => { setTimeout(() => { nacexLeyendo = false; }, 60000); });
+  }
+}
+function pintarNacex(cont, vista) {
+  const lista = backorders.filter(b => b.agenciaReposicion === "NACEX" && b.estado === "pendiente");
+  if (!lista.length) { cont.innerHTML = vista ? '<p style="color:var(--muted)">No hay nada pendiente de enviar por NACEX.</p>' : ""; return; }
   cont.innerHTML = '<div class="nacex-box"><strong>📦 NACEX — ' + lista.length + ' envío(s) que salen por NACEX (no van en ninguna carga)</strong><ul>'
     + lista.map(b => {
       const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
-      return '<li><strong>' + escapeAttr(refLabel(b)) + '</strong> · ' + escapeAttr(o.name || "") + ' · ' + escapeAttr(b.cantidad + "x " + b.stockModel + " " + (b.talla || "")) + ' (' + escapeAttr(b.proveedor || "") + ') — '
-        + (b.recibidoFabrica
-          ? '<span class="nacex-listo">✅ RECIBIDO: prepáralo por NACEX</span> <button type="button" class="secondary nacex-enviado-btn" data-id="' + escapeAttr(b.id) + '">✔ Enviado por NACEX</button>'
-          : 'esperando a que llegue de fábrica')
-        + '</li>';
+      const n = b.nacex || {};
+      const resp = nacexRespuestas[b.id] || {};
+      const id = escapeAttr(b.id);
+      // Etiqueta para pegar en el paquete (Jennifer, 2026-10-28).
+      const etiquetaNacexBtn = ' <a class="secondary" style="display:inline-block;padding:4px 10px;border:1px solid var(--border);border-radius:6px;text-decoration:none" target="_blank" href="/api/nacex/etiqueta?id=' + encodeURIComponent(b.id) + '">🏷️ Etiqueta del paquete</a>';
+      // Recibido → "Documentar envío" (email a NACEX) → nº de recogida y de
+      // expedición (los lee de su respuesta) → "Enviado por NACEX".
+      const pasos = !b.recibidoFabrica
+        ? 'esperando a que llegue de fábrica'
+        : !n.documentado
+          ? '<span class="nacex-listo">✅ RECIBIDO: prepáralo por NACEX</span> <button type="button" class="nacex-documentar-btn" data-id="' + id + '">📧 Documentar envío en NACEX</button>' + etiquetaNacexBtn
+          : (n.bultos > 1 ? '<span style="font-weight:700">📦 ' + n.bultos + ' BULTOS</span> ' : '') + (n.retorno ? '<span style="color:#c00000;font-weight:700">↩ ENVÍO CON RETORNO' + (n.retornoQue ? ': ' + escapeAttr(n.retornoQue) : '') + '</span> ' : '') + '<span class="nacex-listo">📧 Pedido a NACEX el ' + new Date(n.documentado).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) + '</span>'
+            + (resp.texto ? '<br><small>Respuesta de NACEX: ' + escapeAttr(resp.texto) + '</small>' : '<br><small>Sin respuesta de NACEX todavía.</small>')
+            + '<br>Nº recogida <input type="text" class="nacex-recogida" data-id="' + id + '" value="' + escapeAttr(n.recogida || resp.recogida || "") + '" style="width:120px"> '
+            + 'Nº expedición <input type="text" class="nacex-expedicion" data-id="' + id + '" value="' + escapeAttr(n.expedicion || resp.expedicion || "") + '" style="width:140px"> '
+            + (nacexSeguimientoUrl(n.expedicion || resp.expedicion) ? '<a href="' + escapeAttr(nacexSeguimientoUrl(n.expedicion || resp.expedicion)) + '" target="_blank" rel="noopener">🔎 Ver seguimiento</a> ' : "")
+            + '<button type="button" class="secondary nacex-enviado-btn" data-id="' + id + '">✔ Enviado por NACEX</button>' + etiquetaNacexBtn;
+      return '<li><strong>' + escapeAttr(refLabel(b)) + '</strong>' + (b.referencia ? ' · <strong>' + escapeAttr(b.referencia) + '</strong>' : "") + ' · ' + escapeAttr(o.name || "") + ' · ' + escapeAttr(b.cantidad + "x " + b.stockModel + " " + (b.talla || "")) + ' (' + escapeAttr(b.proveedor || "") + ') — '
+        + pasos + '</li>';
     }).join("") + '</ul></div>';
+  cont.querySelectorAll(".nacex-documentar-btn").forEach(btn => btn.addEventListener("click", () => abrirModalNacex(btn.dataset.id)));
   cont.querySelectorAll(".nacex-enviado-btn").forEach(btn => btn.addEventListener("click", async () => {
+    const li = btn.closest("li");
+    const recogida = li.querySelector(".nacex-recogida").value.trim();
+    const expedicion = li.querySelector(".nacex-expedicion").value.trim();
+    if (!expedicion && !confirm("No has puesto el nº de expedición de NACEX. ¿Marcarlo como enviado igualmente?")) return;
     if (!confirm("¿Ya ha salido por NACEX?")) return;
-    const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: btn.dataset.id, estado: "servido" }) });
+    const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: btn.dataset.id, estado: "servido", nacex: { recogida, expedicion, enviado: new Date().toISOString() } }) });
     if (!res.ok) { alert("No se ha podido marcar."); return; }
     loadPendientes();
   }));
+}
+// Lo ya enviado por NACEX, con sus números (solo en Logística › NACEX).
+function renderNacexEnviados() {
+  const tbody = document.querySelector("#nacex-enviados-table tbody");
+  if (!tbody) return;
+  const lista = backorders.filter(b => b.agenciaReposicion === "NACEX" && b.estado === "servido")
+    .sort((a, b) => String((b.nacex && b.nacex.enviado) || b.fechaServido || "").localeCompare(String((a.nacex && a.nacex.enviado) || a.fechaServido || "")));
+  tbody.innerHTML = lista.length ? lista.map(b => {
+    const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+    const n = b.nacex || {};
+    const f = n.enviado || b.fechaServido;
+    return '<tr><td>' + (f ? new Date(f).toLocaleDateString("es-ES") : "") + '</td><td>' + escapeAttr(refLabel(b)) + (b.referencia ? ' · ' + escapeAttr(b.referencia) : "") + '</td><td>' + escapeAttr(o.name || "") + '</td><td>'
+      + escapeAttr(b.cantidad + "x " + (b.piezaTexto || b.stockModel)) + '</td><td>' + escapeAttr(n.recogida || "") + '</td><td>' + escapeAttr(n.expedicion || "") + '</td><td>' + (nacexSeguimientoUrl(n.expedicion) ? '<a href="' + escapeAttr(nacexSeguimientoUrl(n.expedicion)) + '" target="_blank" rel="noopener">🔎 Ver seguimiento</a>' : "") + '</td></tr>';
+  }).join("") : '<tr><td colspan="7" style="color:var(--muted)">Todavía no hay envíos por NACEX desde la app.</td></tr>';
+}
+// Enlace de seguimiento de NACEX (Jennifer, 2026-11-06) a partir del nº de
+// expedición "AGENCIA/ALBARÁN" (ej. 2822/11513310).
+function nacexSeguimientoUrl(expedicion) {
+  const m = String(expedicion || "").replace(/ /g, "").split("/");
+  if (m.length !== 2 || !/^[0-9]+$/.test(m[0]) || !/^[0-9]+$/.test(m[1])) return "";
+  return "https://www.nacex.es/seguimientoDetalle.do?agencia_origen=" + m[0] + "&numero_albaran=" + m[1] + "&estado=1&internacional=0&externo=N&usr=null&pas=null";
+}
+function nacexHistoricoLista() {
+  return backorders.filter(b => b.nacex && b.nacex.documentado && b.estado !== "cancelado")
+    .sort((a, b) => String(b.nacex.documentado).localeCompare(String(a.nacex.documentado)));
+}
+function nacexHistFecha(f, hora) { return f ? new Date(f).toLocaleString("es-ES", hora ? { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" } : { day: "2-digit", month: "2-digit", year: "numeric" }) : ""; }
+function nacexHistoricoFiltrado() {
+  const q = document.getElementById("nacex-hist-buscar").value.trim().toLowerCase();
+  const est = document.getElementById("nacex-hist-estado").value;
+  return nacexHistoricoLista().filter(b => {
+    const enviado = b.estado === "servido";
+    if (est === "pedido" && enviado) return false;
+    if (est === "enviado" && !enviado) return false;
+    if (!q) return true;
+    const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+    return [refLabel(b), b.referencia, o.name, b.nacex.direccion, b.nacex.recogida, b.nacex.expedicion, b.stockModel, b.piezaTexto].join(" ").toLowerCase().includes(q);
+  });
+}
+function renderNacexHistorico() {
+  const lista = nacexHistoricoFiltrado();
+  const total = nacexHistoricoLista();
+  document.getElementById("nacex-hist-count").textContent = lista.length + " de " + total.length + " envíos mandados a NACEX · " + total.filter(b => b.estado === "servido").length + " ya enviados";
+  document.querySelector("#nacex-hist-table tbody").innerHTML = lista.map(b => {
+    const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+    const n = b.nacex || {};
+    const enviado = b.estado === "servido";
+    return "<tr><td>" + escapeAttr(nacexHistFecha(n.documentado, true)) + "</td>" +
+      "<td><strong>" + escapeAttr(refLabel(b)) + "</strong>" + (b.referencia ? "<div style='font-size:11px;color:var(--muted)'>" + escapeAttr(b.referencia) + "</div>" : "") + "</td>" +
+      "<td>" + escapeAttr(o.name || "") + "</td>" +
+      "<td>" + escapeAttr(b.cantidad + "x " + (b.piezaTexto || b.stockModel) + (b.talla ? " " + b.talla : "")) + "</td>" +
+      "<td style='white-space:pre-line;font-size:12px'>" + escapeAttr(n.direccion || "") + "</td>" +
+      "<td>" + (enviado ? "<span style='color:#15803d;font-weight:600'>✔ Enviado</span>" : "<span style='color:#c2410c;font-weight:600'>📧 Pedido a NACEX</span>") + (n.retorno ? "<div style='color:#c00000;font-weight:700;font-size:12px'>↩ CON RETORNO" + (n.retornoQue ? ": " + escapeAttr(n.retornoQue) : "") + "</div>" : "") + "<div style='font-size:12px'>📦 " + (n.bultos || 1) + (Number(n.bultos) > 1 ? " bultos" : " bulto") + "</div></td>" +
+      "<td>" + escapeAttr(n.recogida || "") + "</td><td>" + escapeAttr(n.expedicion || "") + "</td>" +
+      "<td>" + (nacexSeguimientoUrl(n.expedicion) ? "<a href='" + escapeAttr(nacexSeguimientoUrl(n.expedicion)) + "' target='_blank' rel='noopener'>🔎 Ver seguimiento</a>" : "") + "</td>" +
+      "<td>" + escapeAttr(nacexHistFecha(n.enviado || (enviado ? b.fechaServido : ""), false)) + "</td></tr>";
+  }).join("") || "<tr><td colspan='10' style='text-align:center;color:var(--muted)'>Todavía no se ha mandado nada a NACEX.</td></tr>";
+}
+function pendienteRecibirLista() {
+  return backorders.filter(b => b.nacex && b.nacex.retorno && b.estado !== "cancelado")
+    .sort((a, b) => String((b.nacex.documentado || b.fecha || "")).localeCompare(String(a.nacex.documentado || a.fecha || "")));
+}
+function actualizarBadgePendienteRecibir() {
+  const el = document.getElementById("pendiente-recibir-badge");
+  if (!el) return;
+  const n = pendienteRecibirLista().filter(b => !b.nacex.retornoRecibido).length;
+  el.textContent = n;
+  el.style.display = n ? "" : "none";
+}
+function renderPendienteRecibir() {
+  const q = document.getElementById("pend-recibir-buscar").value.trim().toLowerCase();
+  const verRecibidos = document.getElementById("pend-recibir-ver-recibidos").checked;
+  const todas = pendienteRecibirLista();
+  const lista = todas.filter(b => {
+    if (!verRecibidos && b.nacex.retornoRecibido) return false;
+    if (!q) return true;
+    const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+    return [refLabel(b), o.name, b.nacex.retornoQue, b.nacex.expedicion].join(" ").toLowerCase().includes(q);
+  });
+  document.getElementById("pend-recibir-count").textContent = todas.filter(b => !b.nacex.retornoRecibido).length + " pendientes de recibir · " + todas.filter(b => b.nacex.retornoRecibido).length + " ya recibidos";
+  document.querySelector("#pend-recibir-table tbody").innerHTML = lista.map(b => {
+    const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+    const n = b.nacex;
+    const rec = n.retornoRecibido;
+    const url = nacexSeguimientoUrl(n.expedicion);
+    return "<tr" + (rec ? " style='opacity:.6'" : "") + "><td>" + escapeAttr(nacexHistFecha(n.documentado || b.fecha, false)) + "</td>" +
+      "<td><strong>" + escapeAttr(refLabel(b)) + "</strong></td><td>" + escapeAttr(o.name || "") + "</td>" +
+      "<td>" + (n.retornoQue ? "<strong>" + escapeAttr(n.retornoQue) + "</strong>" : "<span style='color:#c00000;font-weight:600'>⚠ Falta indicar qué se recoge</span>") +
+      " <button type='button' class='secondary pend-recibir-que' data-id='" + escapeAttr(b.id) + "' style='font-size:11px;padding:2px 8px'>✏️</button></td>" +
+      "<td>NACEX</td><td>" + escapeAttr(n.expedicion || "") + "</td>" +
+      "<td>" + (url ? "<a href='" + escapeAttr(url) + "' target='_blank' rel='noopener'>🔎 Ver seguimiento</a>" : "") + "</td>" +
+      "<td>" + (rec ? "<span style='color:#15803d;font-weight:600'>✔ Recibido el " + escapeAttr(nacexHistFecha(rec.fecha, true)) + (rec.usuario ? " (" + escapeAttr(rec.usuario) + ")" : "") + "</span>"
+        : !n.documentado ? "<span style='color:var(--muted)'>Aún no se ha pedido a NACEX</span>" : "<span style='color:#c2410c;font-weight:600'>Pendiente de recibir</span>") + "</td>" +
+      "<td>" + (rec ? "<button type='button' class='secondary pend-recibir-deshacer' data-id='" + escapeAttr(b.id) + "' style='font-size:12px'>Deshacer</button>"
+        : "<button type='button' class='pend-recibir-ok' data-id='" + escapeAttr(b.id) + "'>✔ Recibido</button>") + "</td></tr>";
+  }).join("") || "<tr><td colspan='9' style='text-align:center;color:var(--muted)'>No hay mercancía pendiente de recibir.</td></tr>";
+  actualizarBadgePendienteRecibir();
+}
+// Solicitud de material a SEUR (Jennifer, 2026-11-11).
+function fechaCortaEs(dia) { return dia.slice(8, 10) + "/" + dia.slice(5, 7) + "/" + dia.slice(0, 4); }
+async function loadMaterialSeur() {
+  const d = await fetch("/api/seur/material").then(r => r.json()).catch(() => null);
+  if (!d) { document.getElementById("material-seur-msg").textContent = "No se ha podido cargar."; return; }
+  document.getElementById("material-seur-para").textContent = d.para;
+  document.getElementById("material-seur-asunto").textContent = d.asunto;
+  document.getElementById("material-seur-plantilla").textContent = d.plantilla;
+  document.getElementById("material-seur-proximos").textContent = (d.proximos || []).map(p => "jueves " + fechaCortaEs(p)).join(" · ");
+  document.getElementById("material-seur-texto").value = d.texto || "";
+  const tb = document.querySelector("#material-seur-table tbody");
+  const hist = d.historial || [];
+  tb.innerHTML = hist.length ? "" : "<tr><td colspan='4' style='color:var(--muted)'>Todavía no se ha mandado ninguna.</td></tr>";
+  for (const h of hist) {
+    const tr = document.createElement("tr");
+    const celdas = [new Date(h.fecha).toLocaleString("es-ES", { timeZone: "Europe/Madrid", dateStyle: "short", timeStyle: "short" }), h.auto ? "Automático" : "A mano", h.usuario || "", h.ok ? "✔ Enviado" : "✖ " + (h.error || "Error")];
+    for (const c of celdas) { const td = document.createElement("td"); td.textContent = c; tr.appendChild(td); }
+    if (!h.ok) tr.lastChild.style.color = "#c0392b";
+    tb.appendChild(tr);
+  }
+}
+async function guardarTextoMaterialSeur() {
+  const texto = document.getElementById("material-seur-texto").value;
+  if (!texto.trim()) { alert("El texto no puede ir vacío."); return false; }
+  const r = await fetch("/api/seur/material/texto", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texto }) }).then(x => x.json()).catch(() => ({}));
+  if (!r.ok) { alert(r.error || "No se ha podido guardar."); return false; }
+  return true;
+}
+document.getElementById("material-seur-guardar").addEventListener("click", async () => {
+  if (await guardarTextoMaterialSeur()) document.getElementById("material-seur-msg").textContent = "Texto guardado.";
+});
+document.getElementById("material-seur-enviar").addEventListener("click", async (ev) => {
+  if (!confirm("¿Mandar ahora la solicitud de material a SEUR (compras.madrid@seur.net) con la plantilla adjunta?")) return;
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  const msg = document.getElementById("material-seur-msg");
+  msg.textContent = "Enviando...";
+  try {
+    if (!(await guardarTextoMaterialSeur())) { msg.textContent = ""; return; }
+    const r = await fetch("/api/seur/material/enviar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ usuario: currentUser }) }).then(x => x.json()).catch(() => ({}));
+    msg.textContent = r.ok ? "✔ Solicitud enviada a SEUR." : "✖ " + (r.error || "No se ha podido enviar.");
+    await loadMaterialSeur();
+  } finally { btn.disabled = false; }
+});
+
+async function loadPendienteRecibir() {
+  const [pend] = await Promise.all([fetch("/api/inventario/pendientes").then(r => r.json()), allOrders.length ? null : loadOrders()]);
+  backorders = pend;
+  renderPendienteRecibir();
+}
+async function guardarRetornoNacex(id, cambios) {
+  const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, nacex: cambios }) });
+  if (!res.ok) { alert("No se ha podido guardar."); return false; }
+  const b = backorders.find(x => x.id === id);
+  if (b) b.nacex = { ...(b.nacex || {}), ...cambios };
+  return true;
+}
+document.getElementById("pend-recibir-buscar").addEventListener("input", renderPendienteRecibir);
+document.getElementById("pend-recibir-ver-recibidos").addEventListener("change", renderPendienteRecibir);
+document.getElementById("pend-recibir-table").addEventListener("click", async ev => {
+  const ok = ev.target.closest(".pend-recibir-ok");
+  const des = ev.target.closest(".pend-recibir-deshacer");
+  const que = ev.target.closest(".pend-recibir-que");
+  if (ok) {
+    const b = backorders.find(x => x.id === ok.dataset.id);
+    if (!b || !confirm("¿Ha llegado «" + ((b.nacex && b.nacex.retornoQue) || "la mercancía") + "» de " + refLabel(b) + "?")) return;
+    if (await guardarRetornoNacex(b.id, { retornoRecibido: { fecha: new Date().toISOString(), usuario: currentUser || null } })) renderPendienteRecibir();
+  } else if (des) {
+    if (!confirm("¿Volver a ponerlo como pendiente de recibir?")) return;
+    if (await guardarRetornoNacex(des.dataset.id, { retornoRecibido: null })) renderPendienteRecibir();
+  } else if (que) {
+    const b = backorders.find(x => x.id === que.dataset.id);
+    const v = prompt("¿Qué se recoge en casa del cliente?", (b && b.nacex && b.nacex.retornoQue) || "");
+    if (v === null || !v.trim()) return;
+    if (await guardarRetornoNacex(que.dataset.id, { retornoQue: v.trim() })) renderPendienteRecibir();
+  }
+});
+async function loadNacexHistorico() {
+  const [pend] = await Promise.all([fetch("/api/inventario/pendientes").then(r => r.json()), allOrders.length ? null : loadOrders()]);
+  backorders = pend;
+  renderNacexHistorico();
+}
+document.getElementById("nacex-hist-buscar").addEventListener("input", renderNacexHistorico);
+document.getElementById("nacex-hist-estado").addEventListener("change", renderNacexHistorico);
+document.getElementById("nacex-hist-informe").addEventListener("click", async () => {
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1);
+  const def = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+  const mes = prompt("¿De qué mes? (AAAA-MM)", def);
+  if (!mes) return;
+  const p = await fetch("/api/nacex/informe-mensual", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mes: mes.trim(), probar: true }) }).then(r => r.json()).catch(() => ({}));
+  if (!p.ok) { alert(p.error || "No se ha podido preparar el informe."); return; }
+  if (!confirm("Se manda a contabilidad@colchonesbezen.com y estradaj@colchonesbezen.com:\\n\\n" + p.asunto + "\\n\\n¿Lo mando?")) return;
+  const r = await fetch("/api/nacex/informe-mensual", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mes: mes.trim() }) }).then(x => x.json()).catch(() => ({}));
+  if (!r.ok) { alert(r.error || "No se ha podido mandar."); return; }
+  mostrarAvisoBreve("Informe de NACEX mandado a contabilidad y Estrada (" + r.envios + " envíos).");
+});
+document.getElementById("nacex-hist-excel").addEventListener("click", () => {
+  const filas = nacexHistoricoFiltrado().map(b => {
+    const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+    const n = b.nacex || {};
+    return { "Email a NACEX": nacexHistFecha(n.documentado, true), "Pedido": refLabel(b), "Referencia": b.referencia || "", "Cliente": o.name || "",
+      "Qué": b.cantidad + "x " + (b.piezaTexto || b.stockModel) + (b.talla ? " " + b.talla : ""), "Dirección mandada": n.direccion || "",
+      "Estado": b.estado === "servido" ? "Enviado" : "Pedido a NACEX", "Con retorno": n.retorno ? "SÍ" : "", "Qué se recoge": n.retornoQue || "", "Bultos": n.bultos || 1, "Nº recogida": n.recogida || "", "Nº expedición": n.expedicion || "", "Seguimiento": nacexSeguimientoUrl(n.expedicion),
+      "Enviado": nacexHistFecha(n.enviado || (b.estado === "servido" ? b.fechaServido : ""), false) };
+  });
+  const ws = XLSX.utils.json_to_sheet(filas);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "NACEX");
+  XLSX.writeFile(wb, "Historico_NACEX_" + new Date().toISOString().slice(0, 10) + ".xlsx");
+});
+async function loadNacex() {
+  const [pend] = await Promise.all([fetch("/api/inventario/pendientes").then(r => r.json()), allOrders.length ? null : loadOrders()]);
+  backorders = pend;
+  renderNacexAviso();
+}
+let nacexRespuestas = {};
+let nacexLeyendo = false;
+
+// Modal "Documentar envío en NACEX": la dirección del pedido ya puesta,
+// editable por si el cliente pide otra (Jennifer, 2026-10-28).
+async function abrirModalNacex(id) {
+  const b = backorders.find(x => x.id === id);
+  if (!b) return;
+  const r = await fetch("/api/nacex/documentar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, probar: true }) }).then(x => x.json()).catch(() => null);
+  if (!r || !r.ok) { alert("No se ha podido cargar la dirección del pedido."); return; }
+  let ov = document.getElementById("nacex-modal-overlay");
+  if (!ov) {
+    ov = document.createElement("div");
+    ov.id = "nacex-modal-overlay";
+    ov.className = "modal-overlay";
+    ov.innerHTML = '<div class="modal-box" style="max-width:560px">'
+      + '<h3 style="margin-top:0">📧 Documentar envío en NACEX</h3>'
+      + '<div style="font-size:12.5px;color:var(--muted)">Para: 2822.operativa@nacex.es · CCO: contabilidad@colchonesbezen.com · Asunto: DOCUMENTAR ENVÍO</div>'
+      + '<pre style="white-space:pre-wrap;font-family:inherit;margin:10px 0 4px">Buenos días,\\n\\n¿podéis documentar el siguiente envío?\\n\\nCódigo de cliente: 00020 Cambio nombre remitente: BEZEN\\n\\nDIRECCIÓN DE ENVÍO:</pre>'
+      + '<div style="font-size:12px;color:var(--muted);margin-bottom:4px">Es la del pedido. Cámbiala solo si el cliente ha pedido otra:</div>'
+      + '<textarea id="nacex-direccion" rows="9" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:inherit"></textarea>'
+      + '<label style="display:flex;align-items:center;gap:8px;margin:8px 0;font-weight:600">Nº de bultos: <input type="number" id="nacex-bultos" min="1" max="20" step="1" value="1" style="width:70px"></label>'
+      + '<label style="display:flex;align-items:center;gap:8px;margin:8px 0;font-weight:600"><input type="checkbox" id="nacex-retorno"> Tiene algo para recoger en casa del cliente (envío con retorno)</label>'
+      + '<div id="nacex-retorno-linea" style="display:none"><div style="color:#c00000;font-weight:bold;margin:4px 0">OJO ENVÍO CON RETORNO</div>'
+      + '<label style="display:block;font-size:12.5px;color:#c00000;font-weight:600;margin:6px 0 4px">¿Qué se recoge en casa del cliente?</label>'
+      + '<input id="nacex-retorno-que" type="text" placeholder="Ej.: tapa del canapé dañada" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:8px"></div>'
+      + '<pre style="white-space:pre-wrap;font-family:inherit;margin:4px 0 12px">El envío ya está preparado para ser recogido.\\n\\nUn saludo.</pre>'
+      + '<div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="secondary" id="nacex-cancelar">Cancelar</button><button type="button" id="nacex-enviar">Enviar a NACEX</button></div>'
+      + '</div>';
+    document.body.appendChild(ov);
+    ov.querySelector("#nacex-cancelar").addEventListener("click", () => ov.classList.remove("open"));
+    ov.querySelector("#nacex-retorno").addEventListener("change", ev => { ov.querySelector("#nacex-retorno-linea").style.display = ev.target.checked ? "" : "none"; });
+    ov.querySelector("#nacex-enviar").addEventListener("click", async () => {
+      const btn = ov.querySelector("#nacex-enviar");
+      if (ov.querySelector("#nacex-retorno").checked && !ov.querySelector("#nacex-retorno-que").value.trim()) { alert("Indica qué se recoge en casa del cliente."); ov.querySelector("#nacex-retorno-que").focus(); return; }
+      btn.disabled = true;
+      const res = await fetch("/api/nacex/documentar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: ov.dataset.id, direccion: ov.querySelector("#nacex-direccion").value, retorno: ov.querySelector("#nacex-retorno").checked, retornoQue: ov.querySelector("#nacex-retorno-que").value.trim(), bultos: Math.max(1, Math.floor(Number(ov.querySelector("#nacex-bultos").value)) || 1) }) });
+      const d = await res.json().catch(() => ({}));
+      btn.disabled = false;
+      if (!res.ok || d.ok === false) { alert(d.error || "No se ha podido mandar el email a NACEX."); return; }
+      ov.classList.remove("open");
+      if (d.avisoRetorno) alert(d.avisoRetorno);
+      mostrarAvisoBreve("Email mandado a NACEX: " + refLabel(b) + ". Cuando contesten, saldrán aquí el nº de recogida y de expedición.");
+      loadPendientes();
+    });
+  }
+  ov.dataset.id = id;
+  ov.querySelector("#nacex-direccion").value = r.direccion || "";
+  ov.querySelector("#nacex-retorno").checked = !!(b.nacex && b.nacex.retorno);
+  ov.querySelector("#nacex-bultos").value = (b.nacex && b.nacex.bultos) || 1;
+  ov.querySelector("#nacex-retorno-que").value = (b.nacex && b.nacex.retornoQue) || "";
+  ov.querySelector("#nacex-retorno-linea").style.display = b.nacex && b.nacex.retorno ? "" : "none";
+  ov.classList.add("open");
 }
 function renderPendientes() {
   renderNacexAviso();
@@ -5738,9 +10196,12 @@ function renderPendientes() {
   const mostrarCancelados = document.getElementById("pendientes-mostrar-cancelados").checked;
   renderRevision();
   const pendientes = backorders.filter(b => {
-    if (b.estado !== "pendiente" && !(mostrarCancelados && b.estado === "cancelado")) return false;
+    // Recibido y retenido sin fecha (Jennifer, 2026-10-22): sigue en la
+    // lista de su proveedor, como recibido, hasta que el cliente diga.
+    const retenidoRecibido = esRetenidoRecibidoSeur(b);
+    if (b.estado !== "pendiente" && !retenidoRecibido && !(mostrarCancelados && b.estado === "cancelado")) return false;
     if (b.revision && b.estado === "pendiente") return false; // en su propio recuadro, no se puede pedir todavía
-    if (ocultarRecibidos && b.recibidoFabrica) return false;
+    if (ocultarRecibidos && b.recibidoFabrica && !retenidoRecibido) return false;
     if (busquedaReferencia && !(b.referencia || "").toLowerCase().includes(busquedaReferencia)) return false;
     if (busquedaSku && !skuDePendiente(b).toLowerCase().includes(busquedaSku)) return false;
     // El buscador de "Nº de pedido" asumía siempre el formato BEZEN+número
@@ -5845,7 +10306,7 @@ function renderPendientes() {
     // Se cubren los 3 estados posibles: ya enviada (carga cerrada),
     // programada pero sin enviar todavía (carga abierta), o ni siquiera
     // programada en ninguna carga (sin cargaId).
-    const pedidoDelColchon = mostrarSelectorEnvio ? allOrders.find(o => o.orderNumber === b.orderNumber) : null;
+    const pedidoDelColchon = mostrarSelectorEnvio ? (allOrders.find(o => String(o.id) === String(b.orderId)) || allOrders.find(o => o.orderNumber === b.orderNumber)) : null;
     const cargaDelColchon = pedidoDelColchon?.cargaId ? allCargas.find(c => c.id === pedidoDelColchon.cargaId) : null;
     // Pedidos del sistema antiguo (Jennifer, 2026-09-30, BEZEN12137): la
     // tapicería salió sin pasar por una carga de aquí — cuenta como enviada
@@ -5878,7 +10339,7 @@ function renderPendientes() {
     // Un pedido cancelado (Jennifer, 2026-08-26) se queda visible en rojo
     // para no perder el rastro, pero no se puede seleccionar para pedir a
     // fábrica.
-    const pedidoCancelado = !!allOrders.find(o => o.orderNumber === b.orderNumber)?.cancelado;
+    const pedidoCancelado = !!(allOrders.find(o => String(o.id) === String(b.orderId)) || allOrders.find(o => o.orderNumber === b.orderNumber))?.cancelado;
     // Canapé de 160 comprado en GEMELOS (Jennifer, 2026-09-28): hasta que
     // ella confirme GEMELOS o PARTIDO no se puede pedir a fábrica.
     const faltaFormato = b.necesitaFormato160 && !b.formato160;
@@ -5892,7 +10353,7 @@ function renderPendientes() {
     // Sin fecha a propósito (Jennifer, 2026-09-23): pendientes marcados
     // "pedido a fábrica" a mano por fuera del PDF normal, para distinguir
     // de los que sí llevan fecha real (ver markOrdered/sinFecha).
-    const pedidoTag = cambioMedidaHtml(b) + cambioNoSalioHtml(b) + (b.pedidoGenerado
+    const pedidoTag = cambioMedidaHtml(b) + cambioColorHtml(b) + cambioNoSalioHtml(b) +(b.pedidoGenerado
       ? \`<span class="pedido-generado-tag">✓ Pedido a fábrica\${b.fechaPedidoFabrica ? " " + new Date(b.fechaPedidoFabrica).toLocaleDateString("es-ES") : ""}</span>\`
       : "");
     const refPolivalCell = showRefPolivalCol
@@ -5925,7 +10386,11 @@ function renderPendientes() {
     // un colchón de pack en FPK sale independiente por SEUR (Jennifer,
     // 2026-09-30, BEZEN12117: la tapicería ya salió y los colchones "cuando
     // vengan saldrán por SEUR") — antes no tenía forma de prepararse para SEUR.
-    const esColchonSeur = !b.paraStock && ((((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") || esTopperSeur(b)) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || b.gestoComercial || (b.piezaManual && b.agenciaReposicion === "SEUR"));
+    // Almohada de un pedido que sale por SEUR (Jennifer, 2026-11-05,
+    // BEZEN12344): al recibirla de Polival tiene que entrar en la carga de
+    // SEUR como un colchón; con el "recibido" normal no salía en el fichero.
+    const almohadaSeur = b.tipo === "almohada" && b.tipoEnvio !== "FUR" && !b.reposicion && (allOrders.find(o => String(o.id) === String(b.orderId)) || {}).agencia === "SEUR";
+    const esColchonSeur = !b.paraStock && ((((b.tipo === "colchon" && !b.transformadoDesde && b.tipoEnvio !== "FUR") || esTopperSeur(b) || almohadaSeur) && !(b.reposicion && b.agenciaReposicion === "FURNITURE")) || (b.gestoComercial && !b.gcFurniture) || (b.piezaManual && b.agenciaReposicion === "SEUR"));
     // Sustituir por otro modelo que sí hay en stock (Jennifer, 2026-09-18):
     // vale tanto para colchón suelto como de pack, mientras siga
     // "pendiente" — una vez preparado o sustituido ya no aplica. El propio
@@ -5945,7 +10410,13 @@ function renderPendientes() {
       ? '<span class="pedido-generado-tag">✅ Entregado al cliente ' + new Date(pedidoFila.entregadoCliente.fecha).toLocaleDateString("es-ES") + "</span>"
       : \`<button type="button" class="resolver-btn" data-id="\${b.id}">\${b.recibidoFabrica ? "✓ Recibido" + (b.fechaRecibido ? " — " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") : "Marcar recibido"}</button>\`
         + (b.recibidoFabrica ? ' <button type="button" class="entregado-cliente-btn" data-entregado-cliente="' + escapeAttr(String(b.orderId)) + '" title="El cliente ya se lo ha llevado: el pedido queda servido">✅ Entregado al cliente</button>' : ""));
-    const resolverCell = recoge && !esCancelado ? recogeCell
+    const resolverCell = esRetenidoRecibidoSeur(b)
+      ? '<span class="pedido-generado-tag">✓ Recibido' + (b.fechaRecibido ? " " + new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") + '</span>'
+        + ' <span class="badge" style="background:#ede9fe;color:#5b21b6">⏸ RETENIDO SIN FECHA — esperando al cliente</span>'
+        + (b.reservaEnviada ? ' <span class="badge" style="background:#dcfce7;color:#166534">📦 Reservado en almacén</span>' : reservaAlmacenHtml(b))
+        + '<div style="margin-top:4px"><input type="date" class="seur-ret-fecha" data-id="' + escapeAttr(b.id) + '" min="' + hoyMadrid() + '" value="' + primerDiaSeur() + '" />'
+        + ' <button type="button" class="seur-ret-btn" data-id="' + escapeAttr(b.id) + '">El cliente ya lo quiere: a la carga</button></div>'
+      : recoge && !esCancelado ? recogeCell
       : b.paraStock && !esCancelado
       ? (b.recibidoFabrica
           ? '<span class="pedido-generado-tag">✓ Recibido ' + (b.fechaRecibido ? new Date(b.fechaRecibido).toLocaleDateString("es-ES") : "") + '</span>'
@@ -5961,7 +10432,7 @@ function renderPendientes() {
     return \`
     <tr class="\${[b.pedidoGenerado ? "fila-pedido-generado" : "", enCuarentena ? "fila-cuarentena" : "", pedidoCancelado || esCancelado ? "fila-cancelada" : "", esCancelado ? "fila-pendiente-cancelada" : "", grupoClass].filter(Boolean).join(" ")}">
       \${esCancelado ? "<td></td>" : checkCell}
-      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.agenciaReposicion === "NACEX" ? '<span class="nacex-tag">📦 SALE POR NACEX</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL</span>' : ""}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}\${recoge ? '<span class="recoge-cliente-tag">🏬 RECOGE EL CLIENTE</span>' : ""}\${enCuarentena ? '<br><span class="cuarentena-tag" title="' + escapeAttr(b.cuarentena.motivo || "") + '">⏸ CUARENTENA' + (b.cuarentena.desde ? " " + new Date(b.cuarentena.desde).toLocaleDateString("es-ES") : "") + '</span><br><small>' + escapeAttr(b.cuarentena.motivo || "") + (b.cuarentena.usuario ? " (" + escapeAttr(b.cuarentena.usuario) + ")" : "") + '</small>' : ""}</td>
+      <td>\${refLabel(b)}\${b.refSuffix || ""}\${b.reposicion ? (b.cambio ? '<span class="reposicion-tag" title="Antes: ' + escapeAttr(b.cambio.de || "") + '">REPOSICIÓN POR CAMBIO</span>' : '<span class="reposicion-tag">REPOSICIÓN</span>') : ""}\${b.agenciaReposicion === "NACEX" ? '<span class="nacex-tag">📦 SALE POR NACEX</span>' : ""}\${b.gestoComercial ? '<span class="gesto-comercial-tag">GESTO COMERCIAL' + (b.gcFurniture ? ' · VA CON FURNITURE' : '') + '</span>' : ""}\${(b.piezasStockTexto || []).length ? '<span class="gesto-comercial-tag" style="background:#fef3c7;color:#92400e">' + escapeAttr(senalPiezasStock(b)) + '</span>' : (b.stockTapiceriaId ? '<span class="gesto-comercial-tag" style="background:#dcfce7;color:#166534">📦 DEL STOCK DE TAPICERÍA</span>' : "")}\${valdemoroTag(allOrders.find(o => String(o.id) === String(b.orderId)))}\${preferenteTag(b)}\${pedidoStockTag(b)}\${recoge ? '<span class="recoge-cliente-tag">🏬 RECOGE EL CLIENTE</span>' : ""}\${enCuarentena ? '<br><span class="cuarentena-tag" title="' + escapeAttr(b.cuarentena.motivo || "") + '">⏸ CUARENTENA' + (b.cuarentena.desde ? " " + new Date(b.cuarentena.desde).toLocaleDateString("es-ES") : "") + '</span><br><small>' + escapeAttr(b.cuarentena.motivo || "") + (b.cuarentena.usuario ? " (" + escapeAttr(b.cuarentena.usuario) + ")" : "") + '</small>' : ""}</td>
       <td>\${escapeAttr(b.platform || "Shopify")}</td>
       <td>\${b.stockModel}\${pedidoTag}\${esCancelado ? "" : abiertoTagHtml(b)}\${esCancelado ? "" : formatoHtml}\${cancelarBtnHtml}</td>
       <td>\${b.color || "—"}</td>
@@ -6023,7 +10494,11 @@ function renderPendientes() {
     inp.addEventListener("change", () => guardarReferenciaPolival(inp.dataset.id, inp.value));
   });
   tbody.querySelectorAll(".resolver-btn").forEach(btn => {
-    btn.addEventListener("click", () => resolverPendiente(btn.dataset.id));
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      try { await resolverPendiente(btn.dataset.id); } finally { btn.disabled = false; }
+    });
   });
   tbody.querySelectorAll(".recibir-stock-btn").forEach(btn => {
     btn.addEventListener("click", () => recibirPedidoStock(btn.dataset.id, btn));
@@ -6042,7 +10517,10 @@ function renderPendientes() {
       const bo = backorders.find(x => x.id === btn.dataset.id);
       const r = await marcarRecibidoSeur(bo || { id: btn.dataset.id });
       if (!r.ok) { alert(r.error || "No se pudo preparar para SEUR."); btn.disabled = false; return; }
-      if (r.programada) {
+      if (r.retenido) {
+        if (!r.emailOk) alert("Recibido y retenido sin fecha (SEUR > Retenidos sin fecha), pero NO se ha podido mandar el email de reserva al almacén. Avísales tú, por favor.");
+        else mostrarAvisoBreve("Recibido y retenido sin fecha: está en SEUR > Retenidos sin fecha. Email de reserva enviado al almacén.");
+      } else if (r.programada) {
         if (!r.emailOk) alert("Recibido y programado para la carga del " + r.programada.slice(8, 10) + "/" + r.programada.slice(5, 7) + ", pero NO se ha podido mandar el email de reserva al almacén. Avísales tú, por favor.");
         else mostrarAvisoBreve("Recibido: sale en la carga de SEUR del " + r.programada.slice(8, 10) + "/" + r.programada.slice(5, 7) + ". Email de reserva enviado al almacén.");
       } else if (r.carga) mostrarAvisoBreve("Recibido. Sale en la " + formatSeurCargaTitulo(r.carga) + " (se puede mover de día en SEUR).");
@@ -6146,8 +10624,7 @@ async function guardarReferenciaPolival(id, referencia) {
 // último trozo del nombre del catálogo (el mismo patrón que ya usa
 // findByTitleFallback para leer el nombre real del modelo).
 function modeloConTalla(b) {
-  const partes = (b.stockModel || "").split("|").map(s => s.trim()).filter(Boolean);
-  const modelo = (partes[partes.length - 1] || b.stockModel || "").toUpperCase();
+  const modelo = nombreCortoModelo(b.stockModel).toUpperCase();
   return modelo + " " + b.talla;
 }
 // Jennifer, 2026-09-21, caso real (pedido 1106707668-A): formato de una
@@ -6203,10 +10680,10 @@ function filasPedidoFabrica(seleccionados) {
         // 2026-09-29). Solo en el PDF/Excel: el texto guardado no cambia.
         const mercancia = ((esPreferenteSequra(b) ? "PREFERENTE · " : "") + (texto
           ? (cantidad > 1 ? texto + " · " + cantidad + " UNIDADES" : texto)
-          : formatMercanciaSinReceta(b))).split(" · ").join("\\n");
+          : formatMercanciaSinReceta(b)) + (esGemeloEsquinasRectas(b) ? " · ESQUINAS RECTAS" : "")).split(" · ").join("\\n");
         filas.push([mercancia, b.referencia || "—"]);
         grupoDeFila.push(g);
-        resaltadas.push(mercancia.split("\\n").map(l => /^PREFERENTE$|TAPA PARTIDA|TAPA REFORZADA|SIN TAPA|\\d+ UNIDADES$/i.test(l)));
+        resaltadas.push(mercancia.split("\\n").map(l => /^PREFERENTE$|TAPA PARTIDA|TAPA REFORZADA|SIN TAPA|ESQUINAS RECTAS|ESTÁ EN STOCK|\\d+ UNIDADES$/i.test(l)));
       });
     });
     return { head: ["Mercancía para pedir a fábrica", "Referencia"], filas, grupoDeFila, resaltadas };
@@ -6460,20 +10937,55 @@ document.getElementById("marcar-ya-pedido-btn").addEventListener("click", async 
   loadPendientes();
 });
 
-async function resolverPendiente(id) {
+// Recepción parcial (Jennifer, 2026-11-03, BEZEN12235: pedido de 2 uds y
+// en el albarán solo viene 1). Al marcar recibida una línea de varias
+// unidades pregunta cuántas han llegado. Devuelve null si cancela, "todas"
+// si han llegado todas, o el número si es parcial.
+function preguntarUnidadesRecibidas(b) {
+  if (!b || b.recibidoFabrica || b.paraStock || !(Number(b.cantidad) > 1)) return "todas";
+  const total = Number(b.cantidad);
+  const r = prompt(refLabel(b) + (b.refSuffix || "") + " — " + b.stockModel + " " + (b.talla || "") + "\\n\\nSon " + total + " unidades. ¿Cuántas has recibido?", String(total));
+  if (r === null) return null;
+  const n = parseInt(String(r).trim(), 10);
+  if (!(n >= 1 && n <= total)) { alert("Pon un número entre 1 y " + total + "."); return null; }
+  return n === total ? "todas" : n;
+}
+
+async function recibirParcialPendiente(b, n) {
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/recibir-parcial", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ unidades: n }),
+  });
+  const entry = await res.json().catch(() => null);
+  if (!res.ok || !entry || entry.ok === false) { alert((entry && entry.error) || "No se pudo marcar la recepción parcial."); return null; }
+  avisarReservaAutomatica(entry);
+  mostrarAvisoBreve(refLabel(b) + (b.refSuffix || "") + ": recibidas " + n + " de " + b.cantidad + ". Las otras " + (b.cantidad - n) + " siguen pendientes.");
+  return entry;
+}
+
+async function resolverPendiente(id, opts = {}) {
   const before = backorders.find(x => x.id === id);
   const orderId = before ? before.orderId : null;
-  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST" });
+  const unidades = opts.sinPreguntar ? "todas" : preguntarUnidadesRecibidas(before);
+  if (unidades === null) return null;
+  if (unidades !== "todas") {
+    const parcial = await recibirParcialPendiente(before, unidades);
+    await loadPendientes();
+    return parcial;
+  }
+  const recibido = opts.recibido !== undefined ? opts.recibido : !(before && before.recibidoFabrica);
+  if (!recibido && !opts.sinPreguntar && !confirm(refLabel(before || {}) + ((before && before.refSuffix) || "") + " está marcado como RECIBIDO. ¿Quieres desmarcarlo?")) return null;
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(id) + "/resolver", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ recibido }) });
   const entry = await res.json();
   avisarReservaAutomatica(entry);
   // NACEX no está en las cargas (Jennifer, 2026-10-14: "cuando venga, tú me
   // tienes que avisar").
   if (entry && entry.recibidoFabrica && entry.agenciaReposicion === "NACEX" && !(before && before.recibidoFabrica)) {
-    alert("⚠ OJO: " + refLabel(entry) + " (" + entry.stockModel + ") SALE POR NACEX. No entra en ninguna carga: prepáralo para NACEX. Cuando salga, márcalo en el recuadro NACEX de Proveedores.");
+    alert("⚠ OJO: " + refLabel(entry) + " (" + entry.stockModel + ") SALE POR NACEX. No entra en ninguna carga: prepáralo para NACEX. Documéntalo y márcalo en Logística › Envíos NACEX (o en el recuadro NACEX de Proveedores).");
   }
   await loadPendientes();
   if (orderId != null && entry && entry.recibidoFabrica) await checkAutoAddCarga(orderId);
   if (entry && entry.recibidoFabrica) await checkAutoAddEnvioAparte(id);
+  return entry;
 }
 
 // Envío aparte recibido (Jennifer, 2026-10-08, cabecero 1341FUR de
@@ -6490,10 +11002,45 @@ async function checkAutoAddEnvioAparte(backorderId) {
     mostrarAvisoBreve(refLabel(b) + (b.refSuffix || "") + ": recibido. El envío aparte entra en la carga cuando llegue todo lo que va con él.");
     return;
   }
+  // Si el resto del pedido ya está en una carga abierta, va con él bajo el
+  // mismo número en vez de como envío aparte.
+  if (o && await juntarEnviosAparteConPedido([o])) return;
   if (o && (o.notas || "").trim() && !confirm(refLabel(b) + (b.refSuffix || "") + ' tiene una nota: "' + o.notas.trim() + '". ¿Añadir el envío aparte a la próxima carga igualmente?')) return;
   await anadirReposicionesACarga(grupo.map(x => x.id));
   const carga = allCargas.find(c => c.id === b.cargaId);
   mostrarAvisoBreve(refLabel(b) + (b.refSuffix || "") + ": envío aparte recibido — añadido a la carga" + (carga ? " del " + fechaCortaEs(carga.fecha) : "") + ".");
+}
+
+// Envío aparte ya recibido entero y el resto del pedido en una carga de
+// Furniture abierta (Jennifer, 2026-10-26, BEZEN12242: "mete todo en la misma
+// carga bajo el mismo número de pedido, no tiene sentido que vaya por
+// separado"): se vuelve a juntar con el pedido y sale con él. Devuelve true
+// si ha juntado algo.
+async function juntarEnviosAparteConPedido(pedidos) {
+  const juntar = [];
+  for (const o of pedidos) {
+    const carga = o && o.cargaId && allCargas.find(c => c.id === o.cargaId);
+    if (!carga || (carga.tipo || "furniture") !== "furniture" || carga.estado !== "abierta") continue;
+    const vistos = new Set();
+    for (const b of backorders.filter(x => x.envioAparte && String(x.orderId) === String(o.id) && (x.estado === "pendiente" || x.estado === "cubierto"))) {
+      if (vistos.has(b.id)) continue;
+      const grupo = grupoEnvioAparte(b);
+      grupo.forEach(x => vistos.add(x.id));
+      if (grupo.some(x => !x.recibidoFabrica) || (b.cargaId && b.cargaId !== o.cargaId)) continue;
+      juntar.push({ o, grupo });
+    }
+  }
+  if (!juntar.length) return false;
+  for (const { grupo } of juntar) {
+    for (const x of grupo) {
+      await fetch("/api/inventario/pendientes/" + encodeURIComponent(x.id) + "/envio-aparte", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ aparte: false }),
+      });
+    }
+  }
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  mostrarAvisoBreve(juntar.map(({ o, grupo }) => refLabel(o) + (grupo[0].refSuffix || "")).join(", ") + ": envío aparte recibido — va junto con su pedido en la misma carga, bajo el mismo número.");
+  return true;
 }
 
 // Subida automática a la carga (Jennifer, 2026-08-26): en cuanto TODOS los
@@ -6533,7 +11080,10 @@ async function checkAutoAddCarga(orderId) {
   // almohadas...) suba solo a la carga de Furniture en cuanto esté listo.
   // También el colchón SUELTO marcado FPK (Jennifer, 2026-10-08, BEZEN12219:
   // todo recibido salvo el París de Luso en FPK y no subía a la carga).
-  const esFpkPendiente = i => (i.tipo === "colchon" && i.tipoEnvio === "FPK") || esTopperSeur(i);
+  // Salvo que el cliente lo quiera TODO JUNTO (Jennifer, 2026-10-26,
+  // BEZEN12300: el colchón seguía en FPK y el pedido subió a la carga sin él).
+  const todoJunto = pedidoQuiereTodoJunto(order);
+  const esFpkPendiente = i => !(todoJunto && i.tipo === "colchon") && ((i.tipo === "colchon" && i.tipoEnvio === "FPK") || esTopperSeur(i));
   const itemsFurniture = items.filter(i => !esFpkPendiente(i));
   const todosRecibidos = itemsFurniture.length > 0 && itemsFurniture.every(i => i.recibidoFabrica);
   const colchonFpkPendiente = items.some(i => esFpkPendiente(i) && i.estado === "pendiente");
@@ -6585,6 +11135,7 @@ async function checkAutoAddCarga(orderId) {
     : true;
   if (confirmar) {
     await anadirPedidosACarga(grupo.map(o => o.id), cargaRetencion && cargaRetencion.id);
+    await juntarEnviosAparteConPedido(grupo);
   } else if (!order.paraTenerEnCuenta) {
     // Si Jennifer dice que NO lo añada (ej. el cliente pidió recibirlo más
     // adelante), que no se pierda de vista entre el resto de pendientes —
@@ -6782,7 +11333,7 @@ function moverFurnitureHtml(attrs) {
 // así que no deben aparecer dentro de la fila del pedido original ni
 // bloquear su auto-añadido a carga en checkAutoAddCarga.
 function backordersPorPedido(orderId) {
-  return backorders.filter(b => b.orderId === orderId && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial && !b.envioAparte);
+  return backorders.filter(b => b.orderId === orderId && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !(b.gestoComercial && !b.gcFurniture) && !b.envioAparte);
 }
 
 // Id de pedido leído de un data-id (Jennifer, 2026-10-05: 10002300804-A no
@@ -6825,6 +11376,15 @@ function reservaAlmacenHtml(b) {
   if (!o || o.agencia !== "FURNITURE") return "";
   const resto = backordersPorPedido(o.id).filter(x => x.id !== b.id && !(x.tipo === "colchon" && x.tipoEnvio === "FPK") && !esTopperSeur(x));
   if (!resto.some(x => !x.recibidoFabrica)) return ""; // ya está todo: sale en la carga
+  return ' <button type="button" class="secondary reservar-almacen-btn" data-reservar-almacen="' + escapeAttr(b.id) + '" title="Manda al almacén el email con las etiquetas de reserva para que lo aparten para este cliente">📦 Reservar en almacén</button>';
+}
+// Lo mismo en las líneas de envío aparte (Jennifer, 2026-10-26, BEZEN122422:
+// el Zen Mandala estaba reservado desde el 08/10 y no se veía). Aquí el
+// "resto" son los otros artículos de ese envío aparte, no los del pedido.
+function reservaEnvioAparteHtml(b, items) {
+  if (!b || b.estado === "cancelado" || b.estado === "servido") return "";
+  if (b.reservaEnviada) return reservaAlmacenHtml(b);
+  if (!b.recibidoFabrica || !items.some(x => x.id !== b.id && !x.recibidoFabrica)) return "";
   return ' <button type="button" class="secondary reservar-almacen-btn" data-reservar-almacen="' + escapeAttr(b.id) + '" title="Manda al almacén el email con las etiquetas de reserva para que lo aparten para este cliente">📦 Reservar en almacén</button>';
 }
 document.addEventListener("click", async (e) => {
@@ -6909,6 +11469,16 @@ function esPreferenteSequra(b) {
   const o = allOrders.find(x => String(x.id) === String(b.orderId));
   if (!o || o.paymentMethod !== "SEQURA") return false;
   return b.tipo === "tapiceria" || backorders.some(x => String(x.orderId) === String(b.orderId) && x.proveedor === "POLIVAL" && x.tipo === "tapiceria");
+}
+// Canapé tapizado en GEMELOS de un pedido de Shopify (Jennifer, 2026-10-27):
+// a Polival se le dice siempre ESQUINAS RECTAS. Los de plataformas no, ni
+// los de madera (Zenit/Astra); todos los demás canapés sí.
+function esGemeloEsquinasRectas(b) {
+  if (!b || b.proveedor !== "POLIVAL" || b.tipo !== "tapiceria") return false;
+  if ((b.platform || "Shopify") !== "Shopify") return false;
+  if (!/canap/i.test(b.stockModel || "") || /madera/i.test(b.stockModel || "")) return false;
+  const ancho = Number(String(b.talla || "").split("X")[0]);
+  return b.formato160 === "GEMELOS" || ancho >= 180;
 }
 // Pedidos para stock a Luso/New (Jennifer, 2026-10-02).
 function pedidoStockTag(b) {
@@ -7024,7 +11594,7 @@ function furnitureRowCells(o) {
   // Artículos ya dados por enviados: se siguen viendo, marcados (Jennifer,
   // 2026-10-14: "no me gusta que pongas todo en stock... prefiero que se
   // queden los productos individuales y que yo vea que se ha marcado").
-  const enviados = grupo.flatMap(p => backorders.filter(b => b.orderId === p.id && b.estado === "servido" && !b.reposicion && !b.gestoComercial && !b.envioAparte));
+  const enviados = grupo.flatMap(p => backorders.filter(b => b.orderId === p.id && b.estado === "servido" && !b.reposicion && !(b.gestoComercial && !b.gcFurniture) && !b.envioAparte));
   const refDeOtroPedido = b => b.orderId !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(allOrders.find(p => p.id === b.orderId) || {}) + '</span> ' : "";
   const productoGrupo = grupo.length > 1
     ? grupo.map(p => (p.id !== o.id ? '<span class="grupo-envio-item-ref">' + refLabel(p) + '</span> ' : "") + p.product + cambiosPedidoHtml(p)).join("<br>")
@@ -7057,7 +11627,7 @@ function furnitureRowCells(o) {
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name}</td>
     <td>\${productoGrupo}</td>
-    <td class="services">\${serviciosGrupo}</td>
+    <td class="services">\${serviciosGrupo}\${montajeCell(o)}</td>
     <td class="furniture-items-cell">\${itemsHtml + enviadosHtml || "<em>Sin artículos</em>"}</td>
     <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
   \`;
@@ -7087,6 +11657,10 @@ document.addEventListener("click", async (e) => {
   const r = await res.json().catch(() => ({}));
   if (!res.ok || !r.ok) { alert(r.error || "No se ha podido cambiar."); return; }
   backorders = await (await fetch("/api/inventario/pendientes")).json();
+  // Si lo que faltaba era justo lo que sale aparte, el resto ya está todo
+  // recibido y sube a la carga (Jennifer, 2026-10-20, BEZEN12239: cabecero
+  // aparte y el resto del pedido no subía a la carga de Furniture).
+  if (aparte && allOrders.some(x => x.id === b.orderId)) await checkAutoAddCarga(b.orderId);
   renderFurniture();
 }, true);
 
@@ -7117,10 +11691,11 @@ function reposicionRowCells(b, grupo) {
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name || ""}</td>
     <td>\${items.map(x => x.cantidad + "x " + x.stockModel + (x.talla ? " (" + x.talla + ")" : "") + (x.color ? " " + escapeAttr(x.color) : "")).join("<br>")}</td>
-    <td class="services">\${o.services || ""}</td>
+    <td class="services">\${serviciosCell(o)}</td>
     <td class="furniture-items-cell">
       \${items.map(x => '<label class="furniture-item-check"><input type="checkbox" class="item-recibido-check" data-id="' + escapeAttr(x.id) + '"' + (x.recibidoFabrica ? " checked" : "") + '> '
         + (x.referencia ? x.referencia + " — " : "") + x.cantidad + "x " + x.stockModel + (x.talla ? " (" + x.talla + ")" : "") + "</label>"
+        + reservaEnvioAparteHtml(x, items)
         + '<button type="button" class="envio-aparte-btn" data-envio-aparte="' + escapeAttr(x.id) + '" data-aparte="0" title="Volver a juntarlo con el resto de su pedido">Juntar con el pedido</button>').join("")}
     </td>
     <td><input type="text" class="notas-input" data-id="\${o.id}" value="\${escapeAttr(o.notas)}" placeholder="Notas..."></td>
@@ -7131,13 +11706,13 @@ function reposicionRowCells(b, grupo) {
     <td>\${o.platform || "Shopify"}</td>
     <td>\${o.name || ""}</td>
     <td>\${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}</td>
-    <td class="services">\${o.services || ""}</td>
+    <td class="services">\${serviciosCell(o)}</td>
     <td class="furniture-items-cell">
       <label class="furniture-item-check">
         <input type="checkbox" class="item-recibido-check" data-id="\${b.id}"\${b.recibidoFabrica ? " checked" : ""}>
         \${b.referencia ? b.referencia + " — " : ""}1x \${b.stockModel}\${b.talla ? " (" + b.talla + ")" : ""}
       </label>
-      \${b.piezaTexto ? '<div class="reposicion-tag">REPOSICIÓN' + (b.cambio ? " POR CAMBIO (antes: " + escapeAttr(b.cambio.de || "") + ")" : "") + ': ' + escapeAttr(b.piezaTexto) + '</div>' : ""}
+      \${b.servicioMontaje ? '<div class="reposicion-tag">SERVICIO DE MONTAJE · sin mercancía · subida y montaje' + (b.detalleMontaje ? ': ' + escapeAttr(b.detalleMontaje) : '') + '</div>' : b.revisionMontaje ? '<div class="reposicion-tag">REVISIÓN DE MONTAJE · sin mercancía · subida a piso</div>' : b.piezaTexto ? '<div class="reposicion-tag">REPOSICIÓN' + (b.cambio ? " POR CAMBIO (antes: " + escapeAttr(b.cambio.de || "") + ")" : "") + ': ' + escapeAttr(b.piezaTexto) + '</div>' : ""}
       \${b.tipo === "colchon" && b.agenciaReposicion === "FURNITURE" ? (b.recogida
         ? '<div class="reposicion-tag" style="background:#fee2e2;color:#991b1b">RECOGIDA: ' + (b.recogidaDestino === "desechar" ? "desechar" : "vuelve a instalaciones") + '</div>'
         : '<div class="reposicion-tag">SIN recogida</div>') : ""}
@@ -7242,6 +11817,13 @@ function renderFurniture() {
   const reposicionesEnCarga = cargaAbierta ? backorders.filter(b => esLineaPropia(b) && b.cargaId === cargaAbierta.id) : [];
   const reposicionesPendientes = backorders.filter(b => esLineaPropia(b) && !b.cargaId).filter(b => {
     if (busquedaProducto.trim() && !articuloCoincide(textoArticulo(b), busquedaProducto)) return false;
+    // El filtro de referencia también vale para envíos aparte y reposiciones
+    // (Jennifer, 2026-10-26, NMR019FUR: salían todas mezcladas). En un envío
+    // aparte basta con que la tenga uno de sus artículos (va en una línea).
+    if (busquedaReferencia) {
+      const lineas = b.envioAparte ? grupoEnvioAparte(b) : [b];
+      if (!lineas.some(x => (x.referencia || "").toLowerCase().includes(busquedaReferencia))) return false;
+    }
     if (!busquedaPedido) return true;
     // refLabel(b) ya incluye el prefijo "REP" (Jennifer, 2026-09-21) —
     // buscar solo bezen+número/orderRef no lo encontraba si se escribía
@@ -7337,7 +11919,11 @@ function renderFurniture() {
     });
   });
   const paraTenerEnCuenta = allOrders.filter(o => o.paraTenerEnCuenta && !esMiembroSecundario(o) && !salioPorFurniture(o));
-  document.getElementById("tener-en-cuenta-count").textContent = paraTenerEnCuenta.length + " pedidos marcados";
+  // Reposiciones y envíos aparte también (Jennifer, 2026-10-21,
+  // REP10002269275-A): mientras no hayan salido en una carga cerrada.
+  const tenerPropios = agruparLineasPropias(backorders.filter(b => b.paraTenerEnCuenta && esLineaPropia(b)
+    && !(b.cargaId && (allCargas.find(c => c.id === b.cargaId) || {}).estado === "cerrada")));
+  document.getElementById("tener-en-cuenta-count").textContent = (paraTenerEnCuenta.length + tenerPropios.length) + " pedidos marcados";
   document.querySelector("#tener-en-cuenta-table tbody").innerHTML = paraTenerEnCuenta.map(o => \`
     <tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>
       \${furnitureRowCells(o)}
@@ -7346,7 +11932,40 @@ function renderFurniture() {
         <button type="button" class="quitar-tener-en-cuenta-btn" data-id="\${o.id}">Quitar</button>
       </td>
     </tr>
+  \`).join("") + tenerPropios.map(g => \`
+    <tr>
+      \${reposicionRowCells(g[0], g)}
+      <td>
+        \${!g[0].cargaId && g.every(x => x.recibidoFabrica) && cargaAbierta ? \`<button type="button" class="anadir-carga-tener-repo-btn" data-repo-ids="\${escapeAttr(JSON.stringify(g.map(x => x.id)))}">Añadir a la carga</button>\` : ""}
+        <button type="button" class="quitar-tener-repo-btn" data-repo-ids="\${escapeAttr(JSON.stringify(g.map(x => x.id)))}">Quitar</button>
+      </td>
+    </tr>
   \`).join("");
+  const marcarTenerRepo = async (ids, valor) => {
+    for (const id of ids) {
+      await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, paraTenerEnCuenta: valor }) });
+      const b = backorders.find(x => x.id === id);
+      if (b) b.paraTenerEnCuenta = valor;
+    }
+  };
+  document.querySelectorAll(".quitar-tener-repo-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      await marcarTenerRepo(JSON.parse(btn.dataset.repoIds), false);
+      renderFurniture();
+    });
+  });
+  document.querySelectorAll(".anadir-carga-tener-repo-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const ids = JSON.parse(btn.dataset.repoIds);
+      for (const id of ids) {
+        const r = await fetch("/api/inventario/reposicion/carga-add", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, cargaId: cargaAbierta.id }) });
+        const b = backorders.find(x => x.id === id);
+        if (r.ok && b) b.cargaId = cargaAbierta.id;
+      }
+      await marcarTenerRepo(ids, false);
+      renderFurniture();
+    });
+  });
   document.querySelectorAll(".quitar-tener-en-cuenta-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       await fetch("/api/pedidos/shopify/meta", {
@@ -7412,7 +12031,19 @@ function renderFurniture() {
 
   document.querySelectorAll(".item-recibido-check").forEach(chk => {
     chk.addEventListener("change", async () => {
-      const resp = await fetch("/api/inventario/pendientes/" + encodeURIComponent(chk.dataset.id) + "/resolver", { method: "POST" });
+      if (chk.checked) {
+        const antes = backorders.find(x => x.id === chk.dataset.id);
+        const unidades = preguntarUnidadesRecibidas(antes);
+        if (unidades === null) { chk.checked = false; return; }
+        if (unidades !== "todas") {
+          chk.checked = false;
+          await recibirParcialPendiente(antes, unidades);
+          await loadPendientes();
+          renderFurniture();
+          return;
+        }
+      }
+      const resp = await fetch("/api/inventario/pendientes/" + encodeURIComponent(chk.dataset.id) + "/resolver", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ recibido: chk.checked }) });
       const entry = await resp.json().catch(() => null);
       avisarReservaAutomatica(entry);
       const b = backorders.find(x => x.id === chk.dataset.id);
@@ -7460,7 +12091,7 @@ function salioPorFurniture(o) {
 }
 
 function quedaPorFurniture(o) {
-  return parseFechaGenerica(o.orderDate) >= new Date("2026-10-01T00:00:00").getTime() && !(o.furnitureTracking || []).length && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "pendiente" && !b.reposicion && !b.gestoComercial && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
+  return parseFechaGenerica(o.orderDate) >= new Date("2026-10-01T00:00:00").getTime() && !(o.furnitureTracking || []).length && backorders.some(b => String(b.orderId) === String(o.id) && b.estado === "pendiente" && !b.reposicion && !(b.gestoComercial && !b.gcFurniture) && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
 }
 
 // Buscador de logística (Jennifer, 2026-10-14): "en ocasiones quiero buscar
@@ -7742,16 +12373,23 @@ document.getElementById("retener-modal-ok").addEventListener("click", async () =
 function actualizarFurnitureSeleccionUI() {
   const n = furnitureSeleccion.size + reposicionSeleccion.size;
   document.getElementById("anadir-carga-btn").disabled = n === 0;
-  // "Tener en cuenta" no aplica a reposiciones (Jennifer no lo ha pedido) —
-  // solo cuenta pedidos normales.
-  document.getElementById("anadir-tener-en-cuenta-btn").disabled = furnitureSeleccion.size === 0;
+  // "Tener en cuenta" también para reposiciones (Jennifer, 2026-10-21).
+  document.getElementById("anadir-tener-en-cuenta-btn").disabled = n === 0;
   document.getElementById("retener-btn").disabled = furnitureSeleccion.size === 0;
   document.getElementById("furniture-seleccion-count").textContent = n > 0 ? n + " seleccionados" : "";
 }
 
 document.getElementById("anadir-tener-en-cuenta-btn").addEventListener("click", async () => {
   const orderIds = [...furnitureSeleccion];
-  if (!orderIds.length) return;
+  const repoIds = [...reposicionSeleccion];
+  if (!orderIds.length && !repoIds.length) return;
+  // Reposiciones / envíos aparte (Jennifer, 2026-10-21): marca en el pendiente.
+  for (const id of repoIds) {
+    await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, paraTenerEnCuenta: true }) });
+    const b = backorders.find(x => x.id === id);
+    if (b) b.paraTenerEnCuenta = true;
+  }
+  reposicionSeleccion.clear();
   await Promise.all(orderIds.map(id => fetch("/api/pedidos/shopify/meta", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -7820,10 +12458,10 @@ document.getElementById("anadir-carga-btn").addEventListener("click", async () =
 
 // Listado para el almacén (Jennifer, 2026-09-29): Excel imprimible con solo
 // pedido, referencia de fábrica, producto, unidades y montaje.
-async function descargarListadoAlmacen(cargaId) {
-  const res = await fetch("/api/cargas/almacen?cargaId=" + encodeURIComponent(cargaId));
+async function descargarListadoAlmacen(cargaId, sel) {
+  const res = await fetch("/api/cargas/almacen?cargaId=" + encodeURIComponent(cargaId) + (sel && sel.length ? "&sel=" + encodeURIComponent(sel.join(",")) : ""));
   if (!res.ok) { alert("No se pudo sacar el listado: " + await res.text()); return; }
-  const { carga, filas } = await res.json();
+  const { carga, filas, seleccion } = await res.json();
   const ExcelJS = await cargarExcelJs();
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Almacén", {
@@ -7835,7 +12473,7 @@ async function descargarListadoAlmacen(cargaId) {
   ws.columns = anchos.map(width => ({ width }));
   ws.getCell("A1").value = "Carga Furniture — " + formatCargaTitulo(carga);
   ws.getCell("A1").font = { bold: true, size: 18 };
-  ws.getCell("A2").value = filas.length + " artículos · " + new Set(filas.map(f => f.pedido)).size + " pedidos";
+  ws.getCell("A2").value = filas.length + " artículos · " + new Set(filas.map(f => f.pedido)).size + " pedidos" + (seleccion ? " (solo los marcados)" : "");
   ws.getCell("A2").font = { size: 12 };
   ws.addRow([]);
   const borde = { style: "thin", color: { argb: "FF999999" } };
@@ -7875,7 +12513,7 @@ async function descargarListadoAlmacen(cargaId) {
   const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "Almacen_" + carga.fecha + ".xlsx";
+  a.download = "Almacen_" + carga.fecha + (seleccion ? "_seleccion" : "") + ".xlsx";
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -7962,7 +12600,10 @@ document.addEventListener("click", async (e) => {
   const cargaId = btn.dataset.id || (cargaAbierta && cargaAbierta.id);
   if (!cargaId) return;
   btn.disabled = true;
-  try { await descargarListadoAlmacen(cargaId); }
+  // Solo lo marcado en la carga abierta (Jennifer, 2026-10-22); sin marcar,
+  // la carga entera.
+  const sel = btn.dataset.id ? [] : [...document.querySelectorAll(".sel-envio-fur:checked")].flatMap(c => c.dataset.keys.split(","));
+  try { await descargarListadoAlmacen(cargaId, sel); }
   catch (err) { alert("No se pudo generar el Excel: " + err.message); }
   finally { btn.disabled = false; }
 });
@@ -7972,6 +12613,7 @@ document.addEventListener("click", async (e) => {
 function etiquetaDescargaFurniture() {
   const n = document.querySelectorAll(".sel-envio-fur:checked").length;
   document.getElementById("descargar-carga-btn").textContent = n ? "Descargar Excel Furniture (" + n + " marcado" + (n > 1 ? "s" : "") + ")" : "Descargar Excel Furniture";
+  document.getElementById("listado-almacen-btn").textContent = n ? "Listado almacén (" + n + " marcado" + (n > 1 ? "s" : "") + ")" : "Listado almacén";
 }
 document.getElementById("sel-todos-furniture").addEventListener("change", e => {
   document.querySelectorAll("#carga-abierta-table tbody tr").forEach(tr => { if (tr.style.display !== "none") { const c = tr.querySelector(".sel-envio-fur"); if (c) c.checked = e.target.checked; } });
@@ -8340,6 +12982,83 @@ document.getElementById("tracking-seur-upload-input").addEventListener("change",
 // desplaza todo ese bloque una posición a la derecha (AY/AZ). Buscar por
 // nombre evita tener que tocar nada al añadir una tienda nueva con este
 // mismo formato.
+// GROUPON (Jennifer, 2026-10-16): fichero "Orders-<id>-<fecha>.xlsx" del
+// Merchant Center de Groupon, una fila por artículo. Columnas por nombre:
+// groupon_number (nº de pedido), order_date, ship_date (fecha límite de
+// envío), bom_sku (nuestro SKU), merchant_sku_item (EAN), item_name,
+// quantity_requested, sell_price (por unidad), shipment_address_*,
+// customer_phone, shipment_tracking_number (si lo trae, ya enviado).
+function fechaGroupon(v) {
+  const s = String(v || "").trim();
+  const m = s.match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})(?:[ T]([0-9]{2}):([0-9]{2}))?/);
+  return m ? m[3] + "/" + m[2] + "/" + m[1] + (m[4] ? " " + m[4] + ":" + m[5] + ":00" : "") : excelSerialToFecha(s);
+}
+function parseGrouponFile(arrayBuffer) {
+  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+  if (!rows.length) return [];
+  const header = rows[0].map(h => String(h).trim().toLowerCase());
+  if (header.indexOf("groupon_number") < 0 && header[0] !== "fulfillment_line_item_id") return [];
+  const c = (row, n) => { const i = header.indexOf(n); return i >= 0 ? String(row[i] == null ? "" : row[i]).trim() : ""; };
+  const entries = [];
+  for (const row of rows.slice(1)) {
+    // Nº de pedido = columna A, fulfillment_line_item_id (Jennifer: "el
+    // número de pedido de Groupon para nosotros siempre es la columna A").
+    const num = String(row[0] == null ? "" : row[0]).trim();
+    if (!num) continue;
+    const qty = Math.round(Number(c(row, "quantity_requested"))) || 1;
+    const precio = Number(c(row, "sell_price").split(",").join("."));
+    const pais = paisToCountryCode(c(row, "shipment_address_country")) || "ES";
+    let cp = c(row, "shipment_address_postal_code");
+    if (pais === "ES" && /^[0-9]{4}$/.test(cp)) cp = "0" + cp;
+    let calle = [c(row, "shipment_address_street"), c(row, "shipment_address_street_2")].filter(Boolean).join(" ").split("  ").join(" ").trim();
+    while (calle.endsWith(",")) calle = calle.slice(0, -1).trim();
+    entries.push({
+      orderDate: fechaGroupon(c(row, "order_date")),
+      orderNumber: num,
+      qty,
+      product: c(row, "item_name"),
+      estado: c(row, "shipment_tracking_number") ? "Enviado" : "",
+      price: precio ? (precio * qty).toFixed(2) : "",
+      sku: c(row, "bom_sku"),
+      skuOferta: c(row, "merchant_sku_item"),
+      email: "",
+      name: c(row, "shipment_address_name"),
+      address: calle,
+      postalCode: cp,
+      city: c(row, "shipment_address_city"),
+      province: c(row, "shipment_address_stat"),
+      phone: c(row, "customer_phone"),
+      countryCode: pais,
+      limiteEnvio: fechaGroupon(c(row, "ship_date")),
+      // Datos tal cual del fichero para el email de "excluidos de penalización".
+      grouponDatos: {
+        orderId: num, grouponNumber: c(row, "groupon_number"), orderDate: c(row, "order_date"), productName: c(row, "item_name"),
+        dealOpportunityId: c(row, "deal_opportunity_id"), dealOptionId: c(row, "salesforce_deal_option_id"),
+        grouponSku: c(row, "groupon_sku"), ean: c(row, "merchant_sku_item"), bomSku: c(row, "bom_sku"), shipMethod: c(row, "shipment_method_requested"),
+      },
+    });
+    // "COLCHÓN ECO NATURE ... Y CANAPÉ BLANCO" (Jennifer, 2026-10-16): Groupon
+    // trae el SKU de una base, pero es el CANAPÉ SPACE de Polival + un colchón
+    // que se pide a POLIVAL como "PLANET 20 CM SIN VISCO", los dos en la
+    // medida del producto. El canapé va como línea normal; el colchón se crea
+    // al tramitar (grouponDatos.colchonPolival), porque no tiene ficha.
+    const ult = entries[entries.length - 1];
+    const nombreUp = ult.product.toUpperCase();
+    const mt = nombreUp.match(/([0-9]{2,3}) ?X ?([0-9]{2,3})/);
+    // Groupon lo escribe de varias formas: "ECO NATURE", "ECO-NATURE", "+CANAPE".
+    if (/ECO.?NATURE/.test(nombreUp) && nombreUp.includes("CANAP") && mt) {
+      const talla = mt[1] + "X" + mt[2];
+      const mc = nombreUp.match(/CANAP[EÉ] +([A-ZÁÉÍÓÚÑ]+)/);
+      const color = mc && !/^(Y|DE|CON|EN)$/.test(mc[1]) ? mc[1].charAt(0) + mc[1].slice(1).toLowerCase() : "";
+      entries.pop();
+      entries.push({ ...ult, sku: "CANPOL" + talla, skuOferta: "", product: "CANAPÉ SPACE |" + (color ? " Color " + color + " |" : "") + " " + talla + " + COLCHÓN PLANET 20 CM SIN VISCO (" + ult.product + ")",
+        grouponDatos: { ...ult.grouponDatos, colchonPolival: { stockModel: "Colchón PLANET 20cm sin visco", talla, cantidad: ult.qty || 1, mercancia: "COLCHÓN PLANET 20 CM SIN VISCO · MEDIDA: " + talla } } });
+    }
+  }
+  return entries;
+}
 function parseMiraklFile(arrayBuffer) {
   const wb = XLSX.read(arrayBuffer, { type: "array" });
   const sheet = wb.Sheets[wb.SheetNames[0]];
@@ -8392,7 +13111,10 @@ function parseMiraklFile(arrayBuffer) {
     entries.push({
       orderDate: excelSerialToFecha(row[idx.fechaCreacion]),
       orderNumber: String(row[idx.orderNumber]).trim(),
-      qty: Math.round(Number(row[idx.cantidad])) || 1,
+      // "Cantidad" tiene el mismo formato de celda raro que el importe
+      // (texto vacío, número real solo en bruto) — Jennifer, 2026-10-19,
+      // caso MP9992628500291036-A: 2 colchones y entró como 1.
+      qty: Math.round(Number((rowsRaw[i] && rowsRaw[i][idx.cantidad]) ?? row[idx.cantidad])) || 1,
       product: String(row[idx.detalles] || "").trim(),
       estado: String(row[idx.estado] || "").trim(),
       price: String((rowsRaw[i] && rowsRaw[i][idx.importe]) ?? "").trim(),
@@ -8450,7 +13172,7 @@ function initMarketplacePlatform(platformId) {
     const statusEl = document.getElementById(platformId + "-upload-status");
     statusEl.textContent = "Leyendo archivo...";
     const arrayBuffer = await file.arrayBuffer();
-    const entries = parseMiraklFile(arrayBuffer);
+    const entries = platformId === "groupon" ? parseGrouponFile(arrayBuffer) : parseMiraklFile(arrayBuffer);
     if (!entries.length) {
       statusEl.textContent = "No se reconoció ningún pedido en el archivo.";
       return;
@@ -8473,7 +13195,10 @@ function initMarketplacePlatform(platformId) {
       data = await res.json();
     }
     statusEl.textContent = data.actualizados + " pedidos actualizados · " + data.procesados + " tramitados ahora (nuevos, con descuento de stock)" + (data.sinMatch ? " · " + data.sinMatch + " con SKU sin reconocer" : "")
-      + (data.ignorados && data.ignorados.length ? " · 🚫 " + data.ignorados.length + " saltados por «no tramitar»: " + data.ignorados.join(", ") : "");
+      + (data.ignorados && data.ignorados.length ? " · 🚫 " + data.ignorados.length + " saltados por «no tramitar»: " + data.ignorados.join(", ") : "")
+      + (data.emailsPenalizacion && data.emailsPenalizacion.enviados.length ? " · ✉️ Email de excluidos de penalización enviado: " + data.emailsPenalizacion.enviados.join(", ") : "")
+      + (data.emailsPenalizacion && data.emailsPenalizacion.errores.length ? " · ⚠ No se ha podido enviar el email de penalización de: " + data.emailsPenalizacion.errores.join("; ") : "");
+    if (data.emailsPenalizacion && data.emailsPenalizacion.errores.length) alert("⚠ No se ha podido enviar el email de EXCLUIDOS DE PENALIZACIÓN a Groupon de: " + data.emailsPenalizacion.errores.join("; ") + ". Se volverá a intentar al subir el siguiente fichero.");
     await loadMarketplacePedidos(platformId);
     loadOrders(); // refresca el aviso rojo de fecha límite del menú
   });
@@ -8516,7 +13241,7 @@ function renderMarketplace(platformId) {
   }
   document.querySelector("#" + platformId + "-table tbody").innerHTML = filtered.map(o => \`
     <tr\${(o.cancelado || estadoSeguimientoEspecial(o.estado) === "CANCELADO") ? ' class="fila-cancelada"' : ""}>
-      <td class="bell-cell"><div class="iconos-pedido">\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}\${cambiarMedidaButton(o)}</div></td>
+      <td class="bell-cell"><div class="iconos-pedido">\${reviewBell(o)}\${cancelButton(o)}\${sustituirPedidoButton(o)}\${reposicionButton(o)}\${gestoComercialButton(o)}\${noSalioButton(o)}\${cancelarLineaButton(o)}\${cambiarMedidaButton(o)}\${cambiarColorButton(o)}\${revisionMontajeButton(o)}\${tareaPedidoButton(o)}\${casoPedidoButton(o)}</div></td>
       <td>\${o.orderRef}\${casoTag(o)}</td>
       <td>\${o.orderDate || ""}</td>
       <td>\${plazoEnvioCell(o)}</td>
@@ -8527,7 +13252,7 @@ function renderMarketplace(platformId) {
       <td>\${o.province || ""}</td>
       <td>\${o.countryCode || ""}</td>
       <td>\${o.phone || ""}</td>
-      <td>\${o.product || ""}\${cambiosPedidoHtml(o)}\${lineasCanceladasHtml(o)}</td>
+      <td>\${o.product || ""}\${cambiosPedidoHtml(o)}\${lineasCanceladasHtml(o)}\${montajeCell(o)}</td>
       <td>\${o.qty || 1}</td>
       <td\${o.skuMatched ? "" : ' style="color:#991b1b;font-weight:600"'}>\${o.sku || ""}\${o.skuMatched ? "" : " ⚠"}</td>
       <td>\${o.price || ""}</td>
@@ -8575,6 +13300,7 @@ initMarketplacePlatform("worten");
 initMarketplacePlatform("conforama");
 initMarketplacePlatform("conforama-es");
 initMarketplacePlatform("leroy-merlin");
+initMarketplacePlatform("groupon");
 
 // ---- Logística > Historial de cargas ----
 // "Casos a revisar" (Jennifer, 2026-09-16): incidencias con Furniture — se
@@ -8663,6 +13389,20 @@ async function loadCasosRevisarSeur(sinCorreo) {
   }
 }
 
+document.addEventListener("click", async (ev) => {
+  const btn = ev.target.closest(".envio-seur-devolucion");
+  if (!btn) return;
+  const e = enviosSeur[Number(btn.dataset.i)];
+  if (!e || !confirm("¿Apuntar " + (e.refSeur || e.ref) + " (" + (e.nombre || "") + ") en Devoluciones como PENDIENTE DE DEVOLUCIÓN?")) return;
+  btn.disabled = true;
+  const res = await fetch("/api/seur/devoluciones/guardar", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderId: e.orderId, prevista: true, refEnvio: e.refSeur || e.ref, usuario: currentUser }) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { btn.disabled = false; alert(r.error || "No se ha podido apuntar."); return; }
+  enviosSeur.filter(x => String(x.orderId) === String(e.orderId)).forEach(x => { x.enDevoluciones = true; });
+  renderEnviosSeur();
+  mostrarAvisoBreve((e.refSeur || e.ref) + (r.yaEstaba ? ": ya estaba en Devoluciones." : ": apuntado en Devoluciones como pendiente de devolución."));
+});
 function renderEnviosSeur() {
   const q = document.getElementById("envios-seur-search").value.trim().toLowerCase();
   const estado = document.getElementById("envios-seur-estado").value;
@@ -8685,7 +13425,7 @@ function renderEnviosSeur() {
     (!soloPunto || (e.enPunto && !e.archivado)) &&
     (!ocultarEntregados || !esEntregado(e)) &&
     (!ocultarArchivados || !e.archivado) &&
-    (!q ||[e.ref, e.refSeur, e.orderId, e.nombre, e.observaciones, e.nota, e.numeroExpedicion].concat((e.otrasEtiquetas || []).map(x => x.expedicion + " " + x.referencia)).join(" ").toLowerCase().includes(q)) &&
+    (!q ||[e.ref, e.refSeur, e.orderId, e.plataforma, e.nombre, e.observaciones, e.nota, e.numeroExpedicion].concat((e.otrasEtiquetas || []).map(x => x.expedicion + " " + x.referencia)).join(" ").toLowerCase().includes(q)) &&
     (!estado || (e.estadoSeur || "__sin__") === estado) &&
     (!reclamado || (reclamado === "si" ? e.reclamado : reclamado === "no" ? !e.reclamado : reclamado === "respuesta" ? e.correoNoLeidos > 0 : !!(e.correo && e.correo.mensajes && e.correo.mensajes.length))) &&
     (!pais || e.pais === pais));
@@ -8725,23 +13465,29 @@ function renderEnviosSeur() {
     const nMsg = e.correo && e.correo.mensajes ? e.correo.mensajes.length : 0;
     const correoBtn = '<br><button type="button" class="secondary envio-seur-correo" data-i="' + i + '" style="margin-top:4px;padding:2px 8px;font-size:11px' + (e.correoNoLeidos ? ';background:#dc2626;color:#fff;border-color:#dc2626' : '') + '">' +
       (e.correoNoLeidos ? "💬 SEUR ha respondido (" + e.correoNoLeidos + ")" : nMsg ? "💬 Ver conversación (" + nMsg + ")" : "✉ Escribir a SEUR") + '</button>';
+    // Va a volver devuelto (Jennifer, 2026-10-19): lo mete en Devoluciones
+    // como "pendiente de devolución" antes de que SEUR lo marque.
+    const devolucionBtn = e.enDevoluciones
+      ? '<br><span class="badge" style="margin-top:4px;display:inline-block;background:#ede9fe;color:#5b21b6">↩ En Devoluciones</span>'
+      : '<br><button type="button" class="secondary envio-seur-devolucion" data-i="' + i + '" style="margin-top:4px;padding:2px 8px;font-size:11px" title="Sabes que este envío va a volver: lo apunta en Devoluciones como pendiente de devolución">↩ Va a volver devuelto</button>';
     return '<tr' + (esAusencia(e) ? ' style="background:rgba(251,146,60,.18)"' : e.reclamado ? ' style="background:rgba(253,230,138,.25)"' : '') + '>' +
       '<td style="white-space:nowrap">' + (e.sinCarga ? "" : '<span style="font-size:11px;color:var(--muted)">' + escapeAttr(e.diaCarga || diaSemana(e.fechaCarga)) + '</span><br>') + '<strong>' + escapeAttr(fechaCorta(e.fechaCarga)) + '</strong>' + (e.sinCarga ? '<br><span style="color:var(--muted);font-size:11px" title="Envío anterior a las cargas del sistema: sale aquí porque tiene conversación con SEUR">anterior a las cargas</span>' : '') + '</td>' +
       '<td>' + (e.refSeur && e.refSeur !== e.ref
         ? '<strong>' + escapeAttr(e.refSeur) + '</strong><br><span style="color:var(--muted);font-size:11px">antes ' + escapeAttr(e.ref) + '</span>'
         : '<strong>' + escapeAttr(e.ref) + '</strong>') +
         '<br><button type="button" class="secondary envio-seur-ref" data-i="' + i + '" style="margin-top:4px;padding:2px 8px;font-size:11px" title="Si la etiqueta se subió a SEUR con otra referencia (ej. terminada en 2)">✎ Cambiar referencia</button></td>' +
+      '<td style="white-space:nowrap">' + escapeAttr(e.plataforma || "") + '</td>' +
       '<td>' + escapeAttr(e.nombre || "") + '</td>' +
       '<td>' + escapeAttr(e.pais || "") + '</td>' +
       '<td>' + escapeAttr(e.observaciones || "") + '</td>' +
       '<td>' + estadoTxt + seguimiento + '</td>' +
-      '<td>' + recl + correoBtn + '</td>' +
+      '<td>' + recl + correoBtn + devolucionBtn + '<br>' + tareaPedidoButton({ id: e.orderId }, e.refSeur || e.ref, "Revisar incidencia SEUR") + ' ' + casoPedidoButton({ id: e.orderId }, "Incidencia SEUR " + (e.refSeur || e.ref) + (e.numeroExpedicion ? " (exp. " + e.numeroExpedicion + ")" : "") + ":") + '</td>' +
       '<td><textarea class="envio-seur-nota" data-i="' + i + '" rows="3" style="width:100%;min-width:320px;resize:vertical" placeholder="Notas...">' + escapeAttr(e.nota || "") + '</textarea></td>' +
       '<td>' + (e.archivado
         ? '<span class="badge" style="background:#e5e7eb;color:#374151">Archivado ' + (e.fechaArchivado ? new Date(e.fechaArchivado).toLocaleDateString("es-ES") : "") + '</span><br><button type="button" class="secondary envio-seur-archivar" data-i="' + i + '" data-valor="0" style="margin-top:4px;padding:2px 8px;font-size:11px">Desarchivar</button>'
         : '<button type="button" class="secondary envio-seur-archivar" data-i="' + i + '" data-valor="1" title="No hay nada más que revisar en este envío">Archivar</button>') + '</td>' +
       '</tr>';
-  }).join("") : '<tr><td colspan="9" style="color:var(--muted)">No hay líneas con estos filtros.</td></tr>';
+  }).join("") : '<tr><td colspan="10" style="color:var(--muted)">No hay líneas con estos filtros.</td></tr>';
   tbody.querySelectorAll(".envio-seur-nota").forEach(ta => {
     ta.addEventListener("focus", () => { editing = true; });
     ta.addEventListener("blur", async () => {
@@ -8808,13 +13554,1313 @@ function pintarCorreoSeur() {
         '<div style="font-size:11px;color:var(--muted);margin-bottom:4px"><strong>' + (m.deSeur ? "SEUR" : "Nosotros") + '</strong> · ' + escapeAttr(m.de || "") + ' · ' + new Date(m.fecha).toLocaleString("es-ES") + '</div>' +
         '<div style="white-space:pre-wrap;font-size:13px">' + escapeAttr(m.texto || "") + '</div></div>').join("")
     : '<div style="color:var(--muted)">Todavía no has escrito a SEUR por este envío.</div>';
+  const enviados = (e.correo && e.correo.adjuntos) || [];
+  document.getElementById("seur-correo-adjuntos-enviados").innerHTML = enviados.length
+    ? "📎 Adjuntos enviados a SEUR: " + enviados.map(a => '<a href="/api/seur/factura?id=' + encodeURIComponent(a.id) + '" target="_blank" rel="noopener">' + escapeAttr(a.nombre || "foto") + "</a>").join(" · ")
+    : "";
   const caja = document.getElementById("seur-correo-mensajes");
   caja.scrollTop = caja.scrollHeight;
   document.getElementById("seur-correo-enviar").textContent = mensajes.length ? "Responder a SEUR" : "Enviar a SEUR";
 }
+// Casos abiertos de reclamación con SEUR (Jennifer, 2026-10-22,
+// 10002318473-B): SEUR contesta "Hemos registrado su reclamación ... El
+// número de caso asignado es 39301766". Se sacan solos de las
+// conversaciones de Envíos SEUR; se cierran a mano ("Cerrar caso") y se
+// marca si SEUR manda después el correo de reclamación resuelta.
+const RE_RECLAMACION_SEUR = /hemos registrado su reclamaci[oó]n|su reclamaci[oó]n ha sido (abierta|registrada)|se tramita[^.]{0,60}n[ºo°]\\.?\\s*de caso/i;
+const RE_ENLACE_DOC_SEUR = /https:\\/\\/seur\\.my\\.site\\.com\\/adjuntardocumentacion\\/[^\\s<>"')\\]]+/i;
+const RE_NUMERO_CASO_SEUR = [/n[uú]mero de caso( asignado)?( es)?\\s*:?\\s*(\\d{6,})/i, /n[ºo°]\\.?\\s*de caso\\s*:?\\s*(\\d{6,})/i];
+function trackingSeurCliente(o, ref) {
+  const norm = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const t = ((o && o.seurTracking) || []).filter(x => !x.anulado && norm(x.referencia) === norm(ref));
+  return t.filter(x => !/se ha anulado/i.test(x.estado || "")).slice(-1)[0] || t.slice(-1)[0] || null;
+}
+function casosReclamacionSeur() {
+  const casos = [];
+  for (const o of allOrders) {
+    for (const [ref, info] of Object.entries(o.enviosSeurInfo || {})) {
+      const mensajes = (info.correo && info.correo.mensajes) || [];
+      const porNumero = new Map();
+      for (const m of mensajes) {
+        if (!m.deSeur) continue;
+        const texto = (m.asunto || "") + "\\n" + (m.texto || "");
+        let numero = "";
+        for (const re of RE_NUMERO_CASO_SEUR) { const mm = re.exec(texto); if (mm) { numero = mm[mm.length - 1]; break; } }
+        // Un "Adjuntar documentación" con nº de caso también abre el caso
+        // (Jennifer, 2026-10-29, caso 39339983: no venía el "registrado").
+        if (!RE_RECLAMACION_SEUR.test(texto) && !(numero && RE_ENLACE_DOC_SEUR.test(texto))) continue;
+        const clave = numero || "sin-numero-" + m.id;
+        if (porNumero.has(clave) || (!numero && porNumero.size)) continue;
+        const env = /env[ií]o\\s+(\\d{5,})\\s+con referencia/i.exec(texto);
+        // Lo último que escribimos nosotros antes de que SEUR registrara la reclamación.
+        const nuestro = mensajes.filter(x => !x.deSeur && (x.fecha || "") <= (m.fecha || "")).slice(-1)[0];
+        // Enlace de SEUR para aportar la documentación del caso (Jennifer,
+        // 2026-10-28: hay que subirla como mucho 4 días después del email).
+        const enlace = RE_ENLACE_DOC_SEUR.exec(texto);
+        porNumero.set(clave, { numero: numero || "(sin nº)", clave, fecha: m.fecha, envio: env ? env[1] : "", enlace: enlace ? enlace[0] : "", mensajeId: m.id,
+          motivo: nuestro ? String(nuestro.texto || "").replace(/^[\\s\\S]*?Destinatario:[^\\n]*\\n/, "").trim() : "" });
+      }
+      for (const c of porNumero.values()) {
+        const resuelto = mensajes.find(x => x.deSeur && (x.fecha || "") > (c.fecha || "") && c.numero !== "(sin nº)"
+          && ((x.asunto || "") + (x.texto || "")).includes(c.numero)
+          && /resuelt|cerrad|finalizad/i.test((x.asunto || "") + " " + (x.texto || "")) && !/haya sido resuelta/i.test(x.texto || ""));
+        const t = trackingSeurCliente(o, info.refSeur || ref);
+        // Respuestas de SEUR posteriores a la apertura del caso (Jennifer,
+        // 2026-10-28: "si responden lo tengo que poder ver en la reclamación").
+        const respuestas = mensajes.filter(x => x.deSeur && x.id !== c.mensajeId && (x.fecha || "") > (c.fecha || ""));
+        // Todos los enlaces que SEUR manda en los correos del caso (Jennifer,
+        // 2026-10-28: "para trabajar directamente desde el sistema").
+        const enlaces = [...new Set(mensajes.filter(x => x.deSeur && (x.fecha || "") >= (c.fecha || ""))
+          .flatMap(x => String(x.texto || "").match(/https?:\\/\\/[^\\s<>"')\\]]*seur[^\\s<>"')\\]]*/gi) || [])
+          .map(u => u.replace(/[.,;:]+$/, "")))];
+        // Último enlace de documentación del caso (Jennifer, 2026-10-29): SEUR
+        // puede volver a pedirla ("no ha podido ser validado"); el plazo de 4
+        // días cuenta desde ese email y un "subida" anterior ya no vale.
+        const conEnlace = mensajes.filter(x => x.deSeur && (x.fecha || "") >= (c.fecha || "") && RE_ENLACE_DOC_SEUR.test(x.texto || "")
+          && (c.numero === "(sin nº)" || String(x.texto || "").includes(c.numero))).slice(-1)[0];
+        if (conEnlace) { c.enlace = RE_ENLACE_DOC_SEUR.exec(conEnlace.texto)[0]; c.fechaEnlace = conEnlace.fecha; }
+        const subida = (info.documentacionCaso || {})[c.clave] || null;
+        casos.push({ ...c, o, ref, info, cerradoMano: (info.casosCerrados || {})[c.clave] || null, resuelto: resuelto ? resuelto.fecha : null,
+          portes: portesDeCasoSeur(info, mensajes, c),
+          docSubida: subida && (!c.fechaEnlace || (subida.fecha || "") >= c.fechaEnlace) ? subida : null, docPospuesta: (info.documentacionPospuesta || {})[c.clave] || null, respuestas, enlaces,
+          expedicion: t ? String(t.numeroExpedicion || "") : "", estadoSeur: t ? t.estado || "" : "" });
+      }
+    }
+  }
+  return casos.sort((a, b) => (b.fecha || "").localeCompare(a.fecha || ""));
+}
+// Indemnización de un caso de reclamación (Jennifer, 2026-10-22): por
+// portes, o por extravío y portes (con la factura del importe reclamado).
+let indemCasoAbierto = null;
+function textoIndemnizacion(ind) {
+  if (!ind) return "";
+  const eur = (n) => Number(n || 0).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+  return ind.tipo === "extravio-portes"
+    ? '<span class="badge" style="background:#fee2e2;color:#991b1b">💶 Extravío y portes' + (ind.importe ? " · " + eur(ind.importe) : "") + "</span>"
+      + (ind.facturaId ? '<br><a href="/api/seur/factura?id=' + encodeURIComponent(ind.facturaId) + '" target="_blank" rel="noopener">📄 ' + escapeAttr(ind.facturaNombre || "Factura") + "</a>" : '<br><small style="color:#b45309">Falta la factura</small>')
+    : '<span class="badge" style="background:#e0f2fe;color:#075985">💶 Portes</span>';
+}
+// Plazo para aportar la documentación a SEUR (Jennifer, 2026-10-28): 4 días
+// desde el email del caso. Con el enlace del email para subirla.
+const PLAZO_DOCUMENTACION_SEUR_DIAS = 4;
+function limiteDocumentacionSeur(c) {
+  return new Date(new Date(c.fechaEnlace || c.fecha).getTime() + PLAZO_DOCUMENTACION_SEUR_DIAS * 86400000);
+}
+function plazoDocumentacionSeur(c) {
+  if (!c.fecha) return "";
+  if (c.docSubida) {
+    return '<br><span class="badge" style="background:#dcfce7;color:#166534" title="Marcado por ' + escapeAttr(c.docSubida.usuario || "") + '">✅ Documentación subida ' + escapeAttr(new Date(c.docSubida.fecha).toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" }))
+      + (c.docSubida.usuario ? " · " + escapeAttr(c.docSubida.usuario) : "") + "</span>"
+      + ' <button type="button" class="secondary recl-seur-doc" data-clave="' + escapeAttr(c.clave) + '" data-ref="' + escapeAttr(c.ref) + '" data-subida="0" style="padding:1px 6px;font-size:11px">Deshacer</button>';
+  }
+  if (c.cerradoMano || c.resuelto) return "";
+  const limite = limiteDocumentacionSeur(c);
+  const horas = (limite - Date.now()) / 3600000;
+  const color = horas < 0 ? "#fee2e2;color:#991b1b" : horas < 48 ? "#ffedd5;color:#c2410c" : "#e0f2fe;color:#075985";
+  const pospuesta = c.docPospuesta && c.docPospuesta.hasta > new Date().toISOString()
+    ? '<br><span class="badge" style="background:#f3e8ff;color:#6b21a8">⏰ Aviso aplazado hasta ' + escapeAttr(new Date(c.docPospuesta.hasta).toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" })) + "</span>" : "";
+  return '<br><span class="badge" style="background:' + color + '">📎 Documentación hasta ' + limite.toLocaleDateString("es-ES") + (horas < 0 ? " (fuera de plazo)" : "") + "</span>" + pospuesta
+    + (c.enlace ? '<br><a href="' + escapeAttr(c.enlace) + '" target="_blank" rel="noopener">Aportar documentación en SEUR</a>' : "")
+    + '<br><button type="button" class="secondary recl-seur-doc" data-clave="' + escapeAttr(c.clave) + '" data-ref="' + escapeAttr(c.ref) + '" data-subida="1" style="margin-top:4px">✅ Documentación subida</button>';
+}
+// Portes que SEUR abona (Jennifer, 2026-10-28): confirmación de SEUR en los
+// correos del caso, aviso automático a contabilidad y cobro marcado a mano.
+const RE_PORTES_SEUR_CLIENTE = /se tramita la devoluci[oó]n de (los )?portes|abono de (los )?portes|abonaremos (los )?portes|devoluci[oó]n de (los )?portes/i;
+function portesDeCasoSeur(info, mensajes, c) {
+  const confirmaciones = mensajes.filter(m => m.deSeur && RE_PORTES_SEUR_CLIENTE.test(String(m.texto || "").split(/\\n-{5,}|\\nDe: /)[0])
+    && (String(m.texto || "").includes(c.numero) || !/caso\\s*:?\\s*\\d{6,}/i.test(String(m.texto || ""))));
+  if (!confirmaciones.length) return null;
+  const avisos = info.portesContabilidad || {};
+  const avisada = confirmaciones.map(m => avisos[m.id]).find(Boolean) || null;
+  return { fecha: confirmaciones[0].fecha, avisada, cobrado: (info.portesCobrados || {})[c.clave] || null };
+}
+function portesCasoHtml(c) {
+  const p = c.portes;
+  if (!p) return "";
+  const f = iso => new Date(iso).toLocaleDateString("es-ES");
+  return '<br><span class="badge" style="background:#ecfccb;color:#3f6212">💶 SEUR confirma devolución de portes · ' + f(p.fecha) + "</span>"
+    + (p.avisada ? '<br><span class="badge" style="background:#e0f2fe;color:#075985">📧 Contabilidad avisada · ' + f(p.avisada.avisado) + "</span>"
+      : '<br><span class="badge" style="background:#fef3c7;color:#92400e" title="Se manda solo en la próxima lectura de correos de SEUR">⏳ Aviso a contabilidad pendiente</span>')
+    + (p.cobrado ? '<br><span class="badge" style="background:#dcfce7;color:#166534">✅ Portes cobrados · ' + f(p.cobrado.fecha) + (p.cobrado.importe ? " · " + p.cobrado.importe.toLocaleString("es-ES", { minimumFractionDigits: 2 }) + " €" : "") + "</span>"
+        + ' <button type="button" class="secondary recl-seur-portes" data-clave="' + escapeAttr(c.clave) + '" data-ref="' + escapeAttr(c.ref) + '" data-cobrado="0" style="padding:1px 6px;font-size:11px">Deshacer</button>'
+      : '<br><button type="button" class="secondary recl-seur-portes" data-clave="' + escapeAttr(c.clave) + '" data-ref="' + escapeAttr(c.ref) + '" data-cobrado="1" style="margin-top:4px;font-size:12px">✅ Marcar portes cobrados</button>');
+}
+function enlacesCasoSeur(c) {
+  const otros = (c.enlaces || []).filter(u => u !== c.enlace);
+  if (!otros.length) return "";
+  const etiqueta = u => /adjuntardocumentacion/i.test(u) ? "📎 Aportar documentación" : /mis-envios|tracking/i.test(u) ? "📦 Seguimiento del envío" : "🔗 " + u.replace(/^https?:\\/\\//, "").slice(0, 40);
+  return '<div style="margin-top:4px;font-size:12px"><b>Enlaces de SEUR:</b>' + otros.map(u => '<br><a href="' + escapeAttr(u) + '" target="_blank" rel="noopener" title="' + escapeAttr(u) + '">' + escapeAttr(etiqueta(u)) + "</a>").join("") + "</div>";
+}
+function respuestasCasoSeur(c, i) {
+  if (!c.respuestas || !c.respuestas.length) return "";
+  const u = c.respuestas[c.respuestas.length - 1];
+  const texto = String(u.texto || "").split(/\\n-{5,}|\\nDe: |"Los datos personales/)[0].replace(/\\s+/g, " ").trim();
+  return '<div style="margin-top:6px;padding:6px;border-left:3px solid #2563eb;background:#eff6ff;font-size:12px;max-width:320px">'
+    + "<b>💬 " + c.respuestas.length + (c.respuestas.length === 1 ? " respuesta" : " respuestas") + " de SEUR</b> · última " + escapeAttr(new Date(u.fecha).toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" }))
+    + "<br>" + escapeAttr(texto.slice(0, 300)) + (texto.length > 300 ? "…" : "")
+    + '<br><a href="#" class="recl-seur-ver-link" data-i="' + i + '">Ver conversación completa</a></div>';
+}
+// Fotos y documentos del caso (Jennifer, 2026-10-28: "las fotos que subo
+// no se quedan guardadas"): las enviadas a SEUR por email desde la app, las
+// añadidas a mano al caso (p. ej. las subidas en el enlace de SEUR) y las
+// facturas generadas. Todas se pueden ver y descargar desde el caso.
+function archivosDeCasoSeur(c) {
+  const enviados = ((c.info.correo && c.info.correo.adjuntos) || []).map(a => ({ ...a, origen: "Enviada a SEUR por email" }));
+  const delCaso = ((c.info.adjuntosCaso || {})[c.clave] || []).map(a => ({ ...a, origen: a.origen || "Añadida al caso" }));
+  return enviados.concat(delCaso);
+}
+function archivosCasoSeur(c, i) {
+  const archivos = archivosDeCasoSeur(c);
+  const url = a => "/api/seur/factura?id=" + encodeURIComponent(a.id);
+  return '<div style="margin-top:6px;white-space:normal"><b>📷 Fotos y documentos (' + archivos.length + ")</b><br>"
+    + archivos.map(a => {
+      const esImagen = /\\.(jpe?g|png|gif|webp|heic)$/i.test(a.nombre || "");
+      return '<span style="display:inline-block;margin:3px 4px 0 0;text-align:center;vertical-align:top;width:76px" title="' + escapeAttr((a.nombre || "") + " · " + a.origen + (a.fecha ? " · " + new Date(a.fecha).toLocaleString("es-ES") : "")) + '">'
+        + '<a href="' + url(a) + '" target="_blank" rel="noopener">' + (esImagen ? '<img src="' + url(a) + '" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:4px;border:1px solid #ddd">' : '<span style="display:inline-block;width:72px;height:72px;line-height:72px;border:1px solid #ddd;border-radius:4px;font-size:26px">📄</span>') + "</a>"
+        + '<br><a href="' + url(a) + '" download="' + escapeAttr(a.nombre || "archivo") + '" style="font-size:11px">⬇ Descargar</a></span>';
+    }).join("")
+    + '<br><label class="secondary" style="display:inline-block;margin-top:4px;cursor:pointer;font-size:12px;padding:3px 8px;border:1px solid #ccc;border-radius:6px">➕ Añadir fotos/documentos'
+    + '<input type="file" class="recl-seur-archivos" data-i="' + i + '" multiple accept="image/*,.pdf" style="display:none"></label></div>';
+}
+async function subirArchivoSeur(blob, nombre) {
+  const base64 = await new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(",")[1] || "");
+    fr.onerror = () => reject(new Error("No se pudo leer " + nombre));
+    fr.readAsDataURL(blob);
+  });
+  const res = await fetch("/api/seur/factura", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nombre, tipo: blob.type || "application/octet-stream", base64 }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) throw new Error(d.error || "No se pudo subir " + nombre);
+  return d.id;
+}
+async function guardarArchivosCasoSeur(c, agregar) {
+  const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderId: c.o.id, ref: c.ref, adjuntosCaso: { clave: c.clave, agregar } }) });
+  if (!res.ok) throw new Error("No se han podido guardar en el caso (" + res.status + ").");
+  const d = await res.json().catch(() => ({}));
+  if (d.info) { c.o.enviosSeurInfo[c.ref] = d.info; c.info = d.info; }
+}
+async function marcarDocumentacionSeur(o, ref, clave, subida) {
+  const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderId: o.id, ref, documentacionCaso: { clave, subida, usuario: currentUser || "" } }) });
+  if (!res.ok) { alert("No se ha podido guardar (" + res.status + ")."); return false; }
+  const d = await res.json().catch(() => ({}));
+  if (d.info) o.enviosSeurInfo[ref] = d.info;
+  return true;
+}
+// Aviso obligatorio (Jennifer, 2026-10-28): cuando SEUR abre un caso y pide
+// la documentación, sale un aviso que no se cierra hasta marcarla subida.
+function revisarAvisosDocumentacionSeur() {
+  const ahora = new Date().toISOString();
+  const pendientes = casosReclamacionSeur().filter(c => c.enlace && !c.docSubida && !c.cerradoMano && !c.resuelto
+    && !(c.docPospuesta && c.docPospuesta.hasta > ahora));
+  const ov = document.getElementById("doc-seur-modal-overlay");
+  if (!pendientes.length) { ov.classList.remove("open"); return; }
+  const lista = document.getElementById("doc-seur-modal-lista");
+  lista.innerHTML = pendientes.map((c, i) => {
+    const limite = limiteDocumentacionSeur(c);
+    const horas = (limite - Date.now()) / 3600000;
+    return '<div style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px;margin:8px 0">'
+      + "<b>Caso " + escapeAttr(c.numero) + "</b> · " + escapeAttr(c.ref) + " · " + escapeAttr(c.o.name || "") + (c.expedicion ? " · Exp. " + escapeAttr(c.expedicion) : "")
+      + '<br><span style="color:' + (horas < 48 ? "#b91c1c" : "inherit") + '"><b>Plazo: hasta el ' + limite.toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" }) + "</b>"
+      + (horas < 0 ? " — FUERA DE PLAZO" : " — quedan " + (horas < 24 ? Math.max(0, Math.floor(horas)) + " h" : Math.floor(horas / 24) + " día(s)")) + "</span>"
+      + '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">'
+      + '<a href="' + escapeAttr(c.enlace) + '" target="_blank" rel="noopener"><button type="button">📎 Abrir enlace de SEUR</button></a>'
+      + '<button type="button" class="secondary doc-seur-factura" data-i="' + i + '">📄 Factura</button>'
+      + '<button type="button" class="secondary doc-seur-manana" data-i="' + i + '">⏰ Recordar mañana</button>'
+      + '<button type="button" class="doc-seur-ok" data-i="' + i + '" style="background:#16a34a">✅ Documentación subida</button>'
+      + "</div></div>";
+  }).join("");
+  lista.querySelectorAll(".doc-seur-factura").forEach(b => b.addEventListener("click", () => generarFacturaReclamacion(pendientes[Number(b.dataset.i)])));
+  // Recordar mañana (Jennifer, 2026-10-28): vuelve a salir mañana a las 9:00.
+  lista.querySelectorAll(".doc-seur-manana").forEach(b => b.addEventListener("click", async () => {
+    const c = pendientes[Number(b.dataset.i)];
+    const manana = new Date();
+    manana.setDate(manana.getDate() + 1);
+    manana.setHours(9, 0, 0, 0);
+    b.disabled = true;
+    const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ orderId: c.o.id, ref: c.ref, documentacionCaso: { clave: c.clave, posponerHasta: manana.toISOString(), usuario: currentUser || "" } }) });
+    if (!res.ok) { b.disabled = false; alert("No se ha podido guardar (" + res.status + ")."); return; }
+    const d = await res.json().catch(() => ({}));
+    if (d.info) c.o.enviosSeurInfo[c.ref] = d.info;
+    revisarAvisosDocumentacionSeur();
+    if (document.getElementById("view-reclamaciones-seur").style.display !== "none") renderReclamacionesSeur();
+  }));
+  lista.querySelectorAll(".doc-seur-ok").forEach(b => b.addEventListener("click", async () => {
+    const c = pendientes[Number(b.dataset.i)];
+    if (!confirm("¿Confirmas que ya has subido la documentación del caso " + c.numero + " en SEUR?")) return;
+    b.disabled = true;
+    if (await marcarDocumentacionSeur(c.o, c.ref, c.clave, true)) {
+      revisarAvisosDocumentacionSeur();
+      if (document.getElementById("view-reclamaciones-seur").style.display !== "none") renderReclamacionesSeur();
+    } else b.disabled = false;
+  }));
+  ov.classList.add("open");
+}
+// Nº de factura registrado para el caso (Jennifer, 2026-10-28: "que lo
+// vea yo en la pantalla").
+function textoFacturaReclamacion(c) {
+  const f = (c.info.facturasReclamacion || {})[c.clave];
+  if (!f) return "";
+  return '<br><span class="badge" style="background:' + (f.oficial ? "#dcfce7;color:#166534" : "#fef3c7;color:#92400e") + '" title="Registrada el ' + escapeAttr(new Date(f.fecha).toLocaleString("es-ES")) + '">🧾 Factura nº ' + escapeAttr(f.numero)
+    + (f.oficial ? "" : " (provisional, falta el nº oficial)") + "</span>";
+}
+function abrirIndemnizacion(c) {
+  indemCasoAbierto = c;
+  const ind = (c.info.indemnizaciones || {})[c.clave] || null;
+  document.getElementById("indem-seur-titulo").textContent = "Indemnización · caso " + c.numero;
+  const fra = (c.info.facturasReclamacion || {})[c.clave];
+  document.getElementById("indem-seur-texto").textContent = c.ref + " · " + (c.o.name || "") + (c.expedicion ? " · Expedición " + c.expedicion : "") + (fra ? " · Factura nº " + fra.numero : "");
+  document.querySelector('input[name="indem-seur-tipo"][value="' + (ind && ind.tipo === "extravio-portes" ? "extravio-portes" : "portes") + '"]').checked = true;
+  document.getElementById("indem-seur-importe").value = ind && ind.importe ? String(ind.importe).replace(".", ",") : "";
+  document.getElementById("indem-seur-factura").value = "";
+  document.getElementById("indem-seur-factura-actual").innerHTML = ind && ind.facturaId ? "Factura guardada: " + escapeAttr(ind.facturaNombre || "factura") + " (sube otra para cambiarla)" : "";
+  document.getElementById("indem-seur-quitar").style.display = ind ? "" : "none";
+  mostrarExtravioIndem();
+  document.getElementById("indem-seur-overlay").classList.add("open");
+}
+function mostrarExtravioIndem() {
+  const extravio = document.querySelector('input[name="indem-seur-tipo"]:checked').value === "extravio-portes";
+  document.getElementById("indem-seur-extravio").style.display = extravio ? "" : "none";
+}
+document.querySelectorAll('input[name="indem-seur-tipo"]').forEach(r => r.addEventListener("change", mostrarExtravioIndem));
+document.getElementById("indem-seur-cancel").addEventListener("click", () => document.getElementById("indem-seur-overlay").classList.remove("open"));
+async function guardarIndemnizacion(indemnizacion) {
+  const c = indemCasoAbierto;
+  const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: c.o.id, ref: c.ref, indemnizacion: { clave: c.clave, ...indemnizacion } }) });
+  if (!res.ok) { alert("No se ha podido guardar la indemnización."); return false; }
+  document.getElementById("indem-seur-overlay").classList.remove("open");
+  await loadReclamacionesSeur();
+  return true;
+}
+document.getElementById("indem-seur-quitar").addEventListener("click", async () => {
+  if (!confirm("¿Quitar la indemnización de este caso?")) return;
+  await guardarIndemnizacion({ borrar: true });
+});
+document.getElementById("indem-seur-ok").addEventListener("click", async () => {
+  const c = indemCasoAbierto;
+  if (!c) return;
+  const tipo = document.querySelector('input[name="indem-seur-tipo"]:checked').value;
+  const previa = (c.info.indemnizaciones || {})[c.clave] || {};
+  let importe = 0, facturaId = null, facturaNombre = null;
+  if (tipo === "extravio-portes") {
+    importe = Number(document.getElementById("indem-seur-importe").value.replace(/\\./g, "").replace(",", "."));
+    if (!(importe > 0)) { alert("Escribe el importe reclamado."); return; }
+    facturaId = previa.facturaId || null;
+    facturaNombre = previa.facturaNombre || null;
+    const file = document.getElementById("indem-seur-factura").files[0];
+    if (file) {
+      if (file.size > 1300000) { alert("La factura pesa demasiado (máx. 1,3 MB). Prueba con un PDF más ligero o una foto."); return; }
+      const base64 = await new Promise((ok, ko) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(",")[1] || ""); r.onerror = ko; r.readAsDataURL(file); });
+      const res = await fetch("/api/seur/factura", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nombre: file.name, tipo: file.type || "application/octet-stream", base64 }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) { alert(d.error || "No se ha podido subir la factura."); return; }
+      facturaId = d.id;
+      facturaNombre = file.name;
+    }
+    if (!facturaId && !confirm("No has subido la factura. ¿Guardar igualmente y subirla luego?")) return;
+  }
+  await guardarIndemnizacion({ tipo, importe, facturaId, facturaNombre, usuario: currentUser || "" });
+});
+// Factura de un caso de reclamación con el precio real (Jennifer,
+// 2026-10-28): mismo formato que las facturas BEZEN (BEZEN11448), con lo
+// que pagó el cliente desglosado en base + 21 % IVA. Se descarga en PDF
+// para subirla en la indemnización.
+const FACTURA_LOGO_BEZEN = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAA0JCgsKCA0LCwsPDg0QFCEVFBISFCgdHhghMCoyMS8qLi00O0tANDhHOS0uQllCR05QVFVUMz9dY1xSYktTVFH/2wBDAQ4PDxQRFCcVFSdRNi42UVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVH/wAARCABWAQwDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD06qb6laJeizaQickDbtPU89elXK5a7/5G9f8Aron/AKCKmTsNHU0UVRm1fT4G2vdIT6Llv5U2xF6is+PWtNkbAulB/wBoFR+Zq+rBlDKQQehFCaYC0UUUwCiiqtzqFnanE9wiN/dzk/kOaQFqis0a7phOPtOPqjD+lXoZ4bhN8MqSL6q2aLpgSUUUUwCiiqWoarY6aY/ttwIfMztyCc4xnp9RQJtLVl2isb/hKdD/AOf9P++W/wAKP+Ep0P8A5/0/75b/AAosT7SHc2aKxv8AhKdD/wCf9P8Avlv8KP8AhKdD/wCf9P8Avlv8KLB7SHc2aKpafqtjqRcWdwJfLxuwCMZ6dfpV2gpNPVBRTXdUUs7BVHJJOAKzJfEejRNtbUYCf9lt38qAckt2atFUrPVtOvW2217DK/8AdDjd+XWrtAJp7BRRRQMKKbI6RoXdwqjkknAFZkniPRY22nUYSf8AZO4fmKCXJLdmrRVOz1Swvji1vIZmxnargkfh1q5QNNPYKKKKBhXJ6hIkPirzZDhEZCT7bRXWVxmvqW1yZVGWO0Aevyis6mxUSae7vtduDBbqUh/u5wAPVj/Sr9v4Zt1UefM8jf7PyitPTbJLGzSFQC3V2/vN3q3Qo9WK/Yw5vDVoynypZY27ZO4fl/8AXrLI1DQLgc7oWPTqj/4H/PNdhUN1bx3Vu8Eq5Rhj6e9Nw7BcZY3kV9bLPEeDwQeqn0NWa5XQpJLHWJLGQ8OSp+o5B/EfzrY166NrpjlDh5D5an0z1/TNClpcLamZq2sTT3Bs9PLddpdPvMfQe3vS2fhksoe8mIJ52R9fxNT+GbFYrX7W6/vJOF9l/wDr/wCFbtJRvqx3tsYzeG7ArgGZT6hv/rVl3ek3ulN9qtZWdV5LJwyj3HcV1tFNwQrmVourDUIzHIAs6DJA6MPUVq1yWpwnR9YjuYBiNjvUDp/tL/n1rq0YOqspyCMg0RfRgx1ZmsaHaayYTdGQeTu27Gx1xn+QrSzS1ZLSaszmv+EI0j+9cf8Afz/61H/CEaR/euP+/n/1q6WindmfsYdjmv8AhCNI/vXP/fz/AOtXK+IbPSbK5Fjpomnud2HO/cFP90ADk/y+vTofFPiYws2m6axa5Y7HkTkof7q/7X8vr0n8K+Ghpyre3ihrxhwvURA/19T/AJL9TnnCM3yQXzJvCOiS6RaSSXDfv7jaWQdEAzgZ7nnn/JOlrGqQaTYPdT844RB1duwFX64HxI0uueLodKjYiKIhOO2Rudvy4/CktTaT9lC0SvFBrXjC4MkknlWit1OfLX6D+I/5yK3IfAumpGBLPcSP3IYKPwGK6S2t4rW3jt4ECRRjaqjsKmouEaEd5as4rUPAiBDJp10wcchJuQT7MOn5GotF8R3umX39ma3v2g7fMk+9H6ZPdfeu6rmvGulJeaU14iD7RbDdkdSncfh1/D3oTJnS5PfgdLWfrOqwaRYtczZY52og6u3pVDwbftfaEiyNmS3byifUDBH6EflXPa4X1/xjHpquRDCfL47YGXP17fgKLFTq+4nHdkUFprXi+czzy+VaBuCQdi+yr3Pv+tbkXgbTFjAlmuZG7ncAPyxXSQQR28CQwoEjQBVUdAKlouEaEd5as4rUPA2webpl24kXkJKec+zDp+X40vh/xJdW96NK1oMsgOxZX+8p7BvUHsf/ANddpXK+OdKS507+0I1/f2+NxH8SZ/pnP50XvuTOn7P34HVUVjeFNRbUtDikkbdLGTFIfUjv+IINbNI3jLmV0FcregHxcm7p5kf8hXVVzHiWJ4L+C9j4zjn0ZTkf59qiexaOnoqCzuY7y1SeM/K4zj0PcVPVCCiimSyJDG0kjBUUZJPYUwOYv+PFkZXqZI8/p/SrPi0nyrYdtzfyFVdKDal4ga7IOxSX57dlH+fStXxJbGfTC6jLQtv/AA6H/H8Ky3TK6mRb3muJbxrDFIYgoCYhzxjjtUn27xB/zyl/78f/AFq0vDl4txp4gJ/eQ/KR/s9j/T8K16ajdbg2ct9u8Qf88pf+/H/1qT7d4h/55S/9+P8A61dVRT5fMVzjbwavfKouLaZgpyMRYx+ldTp6uunWyyAq4iUMD1BwKzLvWpV1MWVpEkh3BCWz97v+X+NbdEUrgzz3xdaavL4hZ0iuZIzt+zmIEheB0x0Oc13diJ1sbcXRzcCNRIf9rHP61YorS5jCnyybvuJXI+KvExhZtN01i1yx2SSJyUP91f8Aa/l9eh4q8TGEtpumuWuCdkkiclP9lf8Aa/l9ek3hTwyNPVb29UG7YfIh5EQ/+KotbVmc5ub5IfNi+FfDS6eovb1Q14w+VTyIh/j7/wCT1FFFI2hBQVkBrzGVNRfxderpxIuzLJt5AOM+/tXp1cD4nSbRfFMGrxKTHIQ3pkgYZfxH8z6U0Y4haJjvs3jf/npJ/wB/I6X7N43/AOekn/fyOu0s7qG9tY7m3cPFIMqRU9Fxqin9pnCfZvG//PST/v5HTJLLxpLG0cjOyMCrAyR4IPWu+rnPFuvnSbZIbVwLuTkZAOxR1JHv0/P0p3JnSjFXcmM8GaVfaXDdpew+VvZSnzhs8HPQ/SsrwwA3jnUieSDOR/38FdVoTX0mkxS6i+64kG8jaF2g9Bge1cr4X/5HjU/+2/8A6NFAmlHkSO7oooqTrCqWtKG0W+U9DA4/8dNXap6v/wAge9/64P8A+gmhEy2Zznw7JOnXYzx5wOP+Aiuvrj/h1/x4Xn/XUf8AoIrsKb3M6H8NBVe9tI721eCXo3Q9wexqxRUmxx8U19oF0Y3TdEx6fwv7g9jW5b69p8ygtKYm/uyDH69K0JYY54zHLGroeoYZFZcvhywkYlTLF7K2R+uaizWxV09yabXNOiXPniQ+iAn/AOtWHeX93rUwtraIiLOdg7+7H0rUj8N2KEF3mk9iwA/QVqW9tBbR+XBEsa+w60Wk9wukQaXp6afaiIHc7cu3qf8ACrhAIIIyD2paKtKxJyd/YXOj3f2uzz5OeCOdvsfatKz8R2sqgXIMD9zjKmtnGetZtzoWnzsW8oxMe8Zx+nSp5Wth37kjaxpyrk3cZ+mSaydQ8QNMPs+no+X434+Y/wC6KtL4Zswcmadh6ZH+FaNpp9pZf6iFVbux5P50e8x6GfoWkG0H2m4H79hgL12D/GtqiiqSsSFcz411i5020hgtTse53Ayg8qBjOPc569v5dNVW80+zvtn2u2jn2Z271zjPX+QqkRUTlFpHnXhzUNJ0uU3V5DcTXI+5tVSqD1GT1rpf+E70z/n2u/8Avlf/AIqtf/hH9H/6Btt/37FH/CP6N/0Dbb/v2Kd0YQp1IKyaMn/hO9M/59rv/vlf/iqP+E70z/n2u/8Avlf/AIqtb/hH9G/6Btt/37FH/CP6N/0Dbb/v2KWhXLW7oZomvWutGYW0cyeTt3eYAM5z0wT6Va1TTrfVLF7W4XKtyGHVT2I96dZ6fZWO/wCyW0cG/G7YuM46fzq1SNUm42kedFNc8IXDFB5tmxyTgmNvc/3T/nmteDx7Zsg8+znRu+wqw/MkV1pGetUZdF0qZi0mnWzHqT5Q5p37mXspx+B6HL3njiWf9xplk3mvwrSfM34KOp/Gn6F4Yubi8/tTWyXkJ3rE5yWPYt7D0/8A1V1ltY2loD9mtoYc9fLQLn8qsUXGqTbvN3ErhfC//I8an/23/wDRgru6qQadZW909zDaxRzvnc6rgnJyf1oKnDmafYt0UUUjUKp6v/yB73/rg/8A6CauUySNJY2jkUMjAqwPcGgTV0cl8Ov+Qfd/9dR/6DXYVWs7G0sUZLS3jhVjkhBjJqzTepFOPJFRYUUUUjQKKKKACiiigAooooAKr3FwY3WKOMyTOCQucAD1J7D9farFU0ITVJVbrJEpQ+oBOR+BI/76oExwa+/5424/7at/8TS7r3/nlB/38P8A8TWDc2WqtrTvGZfspuY5eJOy7QRjPQhicf7FXTHqX/CQfavKP2T/AFOPN/hxndtxj73fOcdqZHN5Gjuvv+eNv/38b/4mjfe/88YP+/jf/E1TtdOVNRv5HjcRy4VCZCQQR82OeOaqf2bcroX2eJWWd7kFtzlvk83vz029gelId2a++9/542//AH8b/wCJo3Xv/PGD/v43/wATWLNZ3/8AY9nCY5GkjuGMqg7vl+fGPmBK5IwCcgY9Kk1O3vHSxa3hlYxx42ZwoPy9fmyp465OORznli5n2Nbde/8APKD/AL+H/wCJo3Xv/PK3/wC/h/8AiazbmC7/AOEginjikaLKgkt8oXByQQRjk8gg546dtK/877BOLdS0xjYIA2CTj1pFJhuvf+eUH/fw/wDxNG69/wCeUH/fw/8AxNU9AS6isWguonUxuQjMfvqec4z8vfjtV68V3sp1jBLtGwXBwc44oBO6uN33v/PGD/v43/xNG+9/55Qf9/G/+JrJitdTWzvlldnleyRIivy/OA+R9485I5/wpYoLxdDlt4YGWeRwnzfu8KcAtnc2OM8jv2pi5mau69/55Qf9/D/8TRuvv+eVv/38P/xNZgXUY7HTvMgleS2nIlWNwSyBXUHJxnOV6/lVi8szdahYXHlSAKSZPnIwNpIBAOPvUBctb77/AJ42/wD39b/4mlhuC8phmj8qYDdjOQw9VPf36EceozmC21H+1vM3H7N9t37e+zycZznpu7Y61oTkNf2qL99Nzt7Lgj9SR+R9KQ0y5RRRQUFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABUU8EVwoWVcgHIIJBU+oI5B+lFFAMi+xqP+W9x/39NL9jH/Pef/v4aKKYg+xj/nvP/wB/DR9jH/Pef/v4aKKQB9jH/Pef/v4aPsY/57z/APfw0UUAH2Mf895/+/ho+xj/AJ7z/wDfw0UUAH2Mf895/wDv4aPsY/57z/8Afw0UUAH2Mf8APef/AL+Gj7GP+e8//fw0UUAH2Mf895/+/ho+xj/nvcf9/DRRQAfY1P8Ay3uP+/hp8FvFbqfLUgscsxJZm+pPJoooAmooooGFFFFABRRRQAUUUUAf/9k=";
+const FACTURA_FONDO_BEZEN = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAA0JCgsKCA0LCwsPDg0QFCEVFBISFCgdHhghMCoyMS8qLi00O0tANDhHOS0uQllCR05QVFVUMz9dY1xSYktTVFH/2wBDAQ4PDxQRFCcVFSdRNi42UVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVH/wAARCAJhAsgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD06iiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAoqC8uY7Kynu5iRFBG0jkDJwoyf5VQt9bSa8jtntJ4WaTySX2/LLsMmw4J/gG7I45AznigDWooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAKupEjS7srbC6byXxAekvB+X8en41mebeLf6Yk9pDL5s5c3EURAUeS/JB5VvuryTkEitLVFmfSrxbaZYZzC4jlY4CNtOGJ9jWJpqwy6rGbHVhcCKY7o2uGZhB5R+Ugn5j5jBs9cEDOMCgDpqKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigCjrf2f+wtQ+17zbfZpPN8v72zad2PfGaxrVbdNbSKV7iaZb7cbkhArzfZcbMDkDy8HPqK29XZ00e9aK3W4kEDlYWXcJDtOFI756Y96xtOYjUY/sumxwWH2soifZDEy/uCxm5xjJzH0/GgDpaKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigCK4aVbeVoEWSUKSiM2AzY4BPbmsLTr6dteAvbeC0uriIIYmlYsypuI2fLtblznB6Vu3ERntpYRI8RkQr5kZwy5GMj3FYelWun2WpCGLWRPcjKvE5iaR8A/eIXccYPftQB0NFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUx5EjGXdV+poAfRVOTUIl+4C/6Cq738zcKFX9TQBqZpjSxr951H1NY7TSv96Rj+NR0Aa7Xluv/LQH6c1GdQhHQMfwrMoAJ6An8KANE6kmOI2z9ab/AGl/0y/8eqmIpDwI3P8AwE0vkTf88X/75oAt/wBpf9Mv/HqP7S/6Zf8Aj1VPIm/54v8A980eRN/zxf8A75oAuDUlxzG34GnjUYj1Vx+FZ5ilXrE4/wCAmmkEcEEfUUAaq3tuf48fUVKs0TfdkU/Q1iUYoA380VhrLIn3XYfjU6X069SrD3FAGrRVKPUUPDoV+nNWI5o5PuSKT6ZoAlooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAGSMyRO6xtIygkIuMsfQZ4/OuZ+yQWWrNdJaX0slu8kzJG8TbsmZs7d27/lu+B1OR6V0zuI42chiFBJCgk/gB1rmdMihl1oeXIxFvdSzEmzkSTc6s2x3PGAJMj6LQB1NFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFISAMkgCqc9+icRjefXtQBcJAGSQBVaW+ij4X5z7dKzpZ5Jj87HHp2qOgCzLezScAhB6Cq5JJySSamitJpP4dq+rVcj0+NeXJc/kKAMwAk4AJNTx2c7/wFR/tcVqpGiDCKB9KfQBnppx/jkx/uipksYF6gt9TVqigCJYIl6RqPwqQAAYAApaKACiiigAooooAKQgHtS0UARtDE3WNT+FRNYwN/CV+hqzRQBQfTv7kh/4EKrvZTp0UMPY1r0UAYLKVOGUg+4xSVusquMMAR71WksIm+7lD7UAUoruePHzbh6NzVyK/jfhwUP6VVlspU5A3j261W6cHg0AbysrDKkEeopaw45XiOUYirsOoA4Eox7jpQBfopqsrqCpBHqKdQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFADJFLRsquUJBAZcZX3GeKzrWxSwvWlbU53a7l3GOTy8SOIwOyg/dTPHpVy9EZsbgTRNLEY23xoCS645AA5JNc7o8ekz6napaabJHJaxrMtyFQbtyyJ8xX1w34/SgDqqKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiimO6opZiAB60APzVa4u44cgfM/oKqXN6z/LFlV9e5qpQBLNcSTH5jx6DpUQBJwBk+1WILSSbnG1fU1ow20UP3Rk+p60AUYbGR8GT5F/Wr0NtFD91cn1PJqbFFABiiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAqOWCOUfOgPv3qSigDMmsHXJiO4eh61UYFSQwIPoa3qimhjmXDrn3oAyIpZImyjY9u1aNvepJhXwjfoaq3Fk8eSmXX9aq0Ab9FZNvePDgH5k9O4rSilSVdyNkUASUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAJWLaX1qNTLxWHlC7ne2+0DbmSSPfkEdcfK+D/jWrcu0drM6HDKhIOwvg4/ujk/QcmsHT/Lk143CRqpkZjzpc0TdD1kY7QemTjn8aAOkooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooqrdXQhBVcGT+VAEk9wkC5Y5bsorKnnedsueOwHQU13Z2LMSWNSW9u87ccL3b0oAjRGkbaoJJrQtrJY8PJ8zenYVYhgSFcIPqfWpaACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKq3Fmk2WX5X9exq1RQBhyxPE21xg/zojkeJ9yHBrZkjSVSrjIrLubR4TuHzJ6+lAF62uknGD8r+nrVmsEEggg4IrRtLwPiOQ4bsfWgC7RRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAEVxPFa28txO4SKJS7sf4VAyT+VYVjaXR1p5N6kwXUhmmEzEujKWSIpjA2h4z/wEetbOoratpt0t7gWhicTZJA2YO7p7ZrI0mXSf7SkW3+2RXLSEMs7ygO/lqcYY4J2bTg84HtQB0FFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUVUvLoRDYmDJ/KgAu7oRZRMFz+lZhJJJJyTSEkkknJPWrdnaeYRJIMJ2HrQAlraGb52yE/U1pqoRQqgADpSgY4paACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigApCARg9KWigDNurMrmSIfL3X0qlW/Wfd2ecyRDnutAC2d5kiOU/Rqv1gVoWV1nEUh5/hJ70AX6KKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigChrskcOg6jLNCJoktpGeInAcBTlc+/SqNhb28FzDDc2lzHdecZ1ld2lWSTyyhO/wD3OMNjp0rU1FLiTTbpLTZ9paJhFvGV34OM+2aybL7UNQtPJ/tAISwuftZGMbCRj/a3bfu8Y3UgN+iiimAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUVHPKsMZdvwHrQBHd3AgTjBc9BWSSWYknJPWnSO0khduSaltLczvk/cHX3oAfZ2vmkSSD5Ow9a0wMdKAAoAAAFLQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAZ97a8mWMf7w/rVCt+sy9tfLJkQfIeo9KAJ7G58xfLf746e9XKwVYqwYHBHIrXtZxPFn+IdRQBPRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQBXvmiWwuGnmaGIRMXlVsFFxywPbArAsY9Pkv9N23t69xC5b995u138pwVIc/K2CWx1x7GuhureK7tJrWdd0UyNG65xlSMEflWYk+mT6pGFikEn2p2SXaQjzLG0bDPchVYeny+1AGzRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAhIAJPArIupzPLn+EdBVnULjH7lTyfvf4VQAJIAGSaAHwRGaUIPxPpWxGixoEXgCo7WAQR4PLHkmp6ACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKRlDAgjINLRQBj3cBgkwPuHpTIZWhkDr+I9a1p4hNEUb8D6VjyI0bsjDBBoA2o3DoHU5Bp9ZlhPsfym+63T2NadABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABXMaW1rPrkhUwI0V1NtgN0zMr/MC4TGAWBJ+jHvmunrnNNn8jUQkb3Is7i8njjDeWVMoMjOOm4DKuQc9vQ0AdHRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABUVxKIYmc9ulS1lX83mTbAflX+dAFZmLMWbknk1d0+DJ85u3C/41UgiM0qoO/WtpVCKFHAHAoAdRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAVS1CDevmqPmXr7irtIRkUAYPvWvZz+dCM/eXg1n3cPkzED7p5FJazeTOD/CeDQBs0UgOaWgAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAKWsvcx6LfvZ7vtS28hh2Llt+07cDuc4qnZ2dwup/aptKsIWYkvNFMzPkjqAUHJ4yc1rSSJFE8kjBUQFmY9AB3rNtNR0651WQ2+qRzPLGqLAr5ClSxJA9SGGf8AdFAGrRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAEN1L5MDN36D61jVb1CXfNsHRP51Bbx+bOqdu9AF/T4dkXmEfM38quUgAAwOlLQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAFe8i86AgfeHIrIrfrIvYvKnJH3W5FAF2wm8yDafvLxVqsa0l8q4Un7p4NbNABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAMkZkidljaRlBIRcZb2GePzrBsrVzqybYbv7JDczTRktCYxI28Mcht5GXfjHBPPTjekLiJ/KCmTB2hjgE9s1yulXJXWog0SRtNdTxtFHeyMVYbyWMZwApKk5/2lPegDraKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigApkziOJnPYU+qOpSYRYx/EcmgDPJJJJ6nmtDTY9sZlI5bgfSs9VLsFHUnFbcahECjoBigB9FFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAVWvZnhiDIRnOORmrNQXcBnjCKQMHPNAFH7fceq/lR9vuPVfyp/9myf89F/Kj+zZP8Anov5UAM+33Hqv5Ufb7j1X8qf/Zsn/PRfyo/s2T/nov5UAM+33Hqv5Ufb7j1X8qf/AGbJ/wA9F/Kj+zZP+ei/lQAz7fceq/lR9vuPVfyp/wDZsn/PRfyo/s2T/nov5UAM+33Hqv5Ufb7j1X8qf/Zsn/PRfyo/s2T/AJ6L+VADPt9x6r+VH2+49V/Kn/2dJ/z0X8qqzR+VIU3BiOuKAJvt9x6r+VXbOSWWMvJjB6YGKzYIjNKqD8fpW0qhVCgYA4oAWiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKrX0XmW5I+8vIqzSHpQBg1sWkvm26k9Rway54/KndMcA8fSrGnSYkMZ6MMj60AadFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAhICkk4A71zNn/bB8RJJJIGtpJHDAeXgRgzBeR83QQEc92rev/K/s+58+Fp4fKbfEq7i64OVA7kjjFczoMMK6vA9rZm0g2tiKe1YyA4PSTaNv4s2enFAHX0UUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABWPdv5lyx7DgVqyvsiZ/QZrDznn1oAtafHvuNx6KM/jWqKp6cmLfd/eOauUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQBDczCGEt36D61jE5JJ61YvJvOmOPurwKLOHzphn7q8mgC5YQeXFuI+Zv0FW6QUtABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFBoooAztSjwUkA/2TVSJ/LlV/7pzWreJ5lq47gZH4Vj0AbwORS1BZyeZbIe44P4VPQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFc7a6pq0niE2UtsVg8w5PksAsY84Z3dCTthP/AyPpvyRrLG8b52sCpwSDg+46VgWGj3lrqcL5by455XaVrp38yNg+1Nh4BGU5/2fc0AdFRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAVNRbbb4/vHFZfXir2pt86J6DNVrZd9zGvvmgDXiXZGqegxT6KKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAqpfz+VFtU4Zv5VaYhVJPAHNYs8pmlZz07ewoAYBkgAZNbFrD5MIXv1P1qlp8O5/NI+Ven1rToAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAEPPFYci7JWT0OK3aydQXbdE/3gDQBPpj/K6fjV+srT323QH94EVq0AFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAEVyjSWsqIMsyEAbymTj+8OR9RyKwbBEi1SFlK+S00kMbHUp5GZlDAjYw2k/Kc88Yro65nRooItVdBZxWrrPMqoliw+Xc2D5vTkc/jigDpqKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigDIvm3Xb+2BT9OXNyT/AHVqCdt08hznLGrelr/rG+goA0KKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiio5pBFGzntQBU1GbgQr35aqMaNJIqL1akdi7s7dSc1oadDhfOYcnp9KALcUaxxhF6Cn0UUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABWfqi8xt9RWhVTUlzbg+hFAGfA22eNvRq26wM4Oa3lOVB9RQAtFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABXL2dreLrkF42pCSCW5lTZ9ocglTcfIF6ZAMf08o/j09YGnwKursJbC4R0nldGEoMKli+HC7sgspOeOrNQB0FFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABSE4GaWmyHEbH0FAGGTlifU1paYP9HY+rVmVraeMWin1JP60AWaKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACsvUJt8nlg/KvX61du5vJhJH3jwKx859zQBLbwmaYJ26k+1bIAAAHQVXsofKhyR8zcmrNABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFV74A2j/AIH9asVFc/8AHtL/ALpoAxa24CWgjJ7qKxK2LPm0j+lAE9FFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAEVxMtvbyTybtkal22gk4AzwBya5PRra3ufEC39tPNJA0jSqTasMt++4L9MDz2H/AVFdZc+cLaX7MEM+w+WJCdpbHGcds1h6dpuoDVo7+/hhEu0qzwTlV5H9wKN3P8AeY4oA6GiiigAooooAKKKKACiiigAooooAKKKKACiiigApkv+pf8A3TT6ZL/qX/3TQBhitaw/480/H+dZIrWsP+PNPx/nQBZooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigApM4pap6hN5cXlj7z/AKCgCndzedMSPujgU6xh82bcfuryfrVcAsQAMk8Ctm3iEMSp37n3oAlooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigApkwzC4P8AdNPpkv8Aqn+hoAwxWxZf8ekf0/rWOK17EYtI/wAT+tAFiiiigAooooAKKKKACiiigAooooAKKKKACiiigArkb7X9TiaYHTn3200jRkLIA6gTAAjuTtjHcZlU4yBXWO6xxtJIwRFBLMxwAPU1ymnrO/iRJV1OKa3lkaVQs7MzgeeANnQACRBnOP3XqaAOtooooAKKKKACiiigAooooAKKKKACiiigAooooAKbL/qn/wB006kb7p+lAGCK19P/AOPNPx/nWRWppxzbYz0Y0AW6KKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAa7BFLMcAc1izSmaVpD36Vc1GfOIVPu1U4ozLIqDqaALWnw5bzj0HArSpkaCNFRegp9ABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABUVySLeQj+6alqC8JW1kI9MUAY9bFl/wAekf0rHratQBbRgf3RQBLRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQBV1OCC50u7t7qTy7eWF0lfIG1SCCcnpxWVpT6YupyNa68Lqe5fe8XmREyEIF/hUHgKOnp9a3q521GujxCVmEn2PzCxb5Nmz98AB3zhoPxVvxNAOjooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAMOUbZXHoxq9pZ/duPeql4u27kHvmptMbEzr6jNAGnRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFRTyiGJnPbpUtZV/N5kuwfdX9TQBWZizFmOSeTWjp8G2PzWHzN0+lU7WEzTBf4Rya2AABgdKAFooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKq6gcWpHqQKtVR1NvkRfU5oAzq3YxhFHoKxI13SKvXJArdoAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACsPT5b46rJHdi7yJpNpDReVsy2zgHd93H4j0rcrnrXw8bfxAb77Uhj8wzBNnzlj53U55H79h06KtAHQ0UUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAGXqS4nVv7wqOybbdJ6HirWppmJX9Dis9W2sG9DmgDeopFOQCOh5paACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiikJxyeBQBXvJvJhOPvHgVk1NdTedMW/hHAqSwh8yXefup+poAu2cHkwjP3m5NWKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigArL1Jszqv91a1Kxbl/MuHb3xQA6yXddp6Dmtis3TF/eO/oMVpUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABXGaXBpkniC3vbXUI5ppLmbKpHliQbg8nPC4kxk9dievHYSozxOiyNGWBAdcZX3GcjP1rF06Xdqbo1zfxsJpR9na3AiPLYO8Rjgjn73fkk0AbtFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQBDdJ5ltIvtkVjVv1hzJ5czp6GgDUsn32q+o4NWKztMkwzxnvyK0aACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACqWoT7E8pT8zdfpVqRxGhc9AM1jSyGWRnbqaAGqpZgqjJPAragiEMSoO3WqenQf8tmHstaFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUARzP5cTP6DNYnNaWpSYhEfdjWcAWYKOp4oA1NPTbag92JNWqaihI1X0GKdQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAGiiigArmbS5RtYtrX+0S8a3U8iKI23FiZhsY5xtBWXHH/LMe2elrndNKyas4lgWF0upWWNbJwCRvUP5nTJUk5/2iKAOjooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACs3Uo8SLIP4uD9a0qr3kXmW7DuORQBmQSeXOj9gefpW0Kwa1rGXzLcZPzLwaALNFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUVFcTCGFnOPagClqE+W8kdBy1VEAZwCQo7mmltzEk5J5NGRQBrJc2yKFWQAD2p32y3/wCeo/KsfI9qMj2oA2Ptlv8A89R+VH2y3/56j8qx8j2oyPagDY+2W/8Az1H5UfbLf/nqPyrHyPajI9qANj7Zb/8APUflR9st/wDnqPyrHyPajI9qANj7Zb/89R+VH2y3/wCeo/KsfI9qMj2oA2Ptlv8A89R+VOjnjlJCPuI61i5HtV3S/wDWSfQUAaVFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUVFcSiKFn9BxQBm3snmXLY6L8tLYx77kE9F5qtnPNamnR7YN5HLH9KALdFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAyRBLE8bbgrgqdrFTz6Ecj6is20srSDVHjj+2+bDGsm6S5ldCH3rjDMQSNp7cZFW9RnltdNuriCIzTRRO6RgE72AJA49TWfBc6vHqEMVykbxNMYGaOIqGHlGTzBycDOEwe4znnFAG1RRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAGNdReVcMvY8in2Mvlz7Sflbj8atahFvhDjqn8qzPpQBv0VDazedCrd+hqagAooooAKKKKACiiigAooooAKKKKACiiigAooooAKQgHqM0tFACbV/uj8qNi/3R+VLRQAmxf7o/KjYv90flS0UAJsX+6Pyo2L/AHR+VLRQAmxf7o/KjYv90flS0UAJsX+6Pyo2L/dH5UtFACbF/uj8qNi/3R+VLRQAmxf7o/KgKB0AFLRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABWbqUuXEQ/h5NX5ZBHGzt0FYrsXdmPUnJoAWJDJKqDqxrbVQqgDgDiqGmw9Zj9BWhQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAEVzn7LKFm8hthxLgHZx97njjrzWFZl7i801h4gW6dSZpIVdNsi7HX5dqgkBj3/unuK1tWign0i9huXZIJIHWRkGSFKkEj3xWQlxpcuq2TQC68y4vDOpMLIhb7OydWAGNi9Bzn8aAOjooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigBCMjBrGuIjDMU7dR9K2qq30Pmxbl++vSgCnZTeVMFJwrcGtasCtWyn82Lax+deD70AWqKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiobmYQwlv4ugHvQBT1Gbc4hHQcn61UjQySKg6k4pCckk9TWhp0OF85hyeFoAtxoI0VB0AxT6KKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAr3sssFjcTQQmeaONmSIHG9gMhfxPFZaT3sNzpVtJaQvE8hxNDCVSNBE/Y/cOdoHqCRxV3XA50HUBFMIZDbSbZC20Idpwc9setV7eQW+qrZRaosqj79vN80i/LkBX9ehIbJwc0Aa9FFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFGKKKAMm9g8qXI+43T2qGGVoZQ47dfetiaITRMjd/wBKxpEMblGGCKANqNxIgdTkGn1lWNx5T+W/3D+hrVoAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAQkAZPFY91OZ5SR90cCrF/cZ/cqf94/0qkASQAMk0ASW8JnmCdupPtWyAFAA4AqC1g8iLH8R5NWKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAKWrtbLo1816rPaiCQzKvUptO4D8M1z+nIkeuRCdr2Rjc8+cY/kuPs+Odo5/dDqOMn16dFqckkOlXcsUH2iRIXZYcZ8whThcd89K5zSxKuuW5+wptSUwq66e8KiPymfzAW6HexTr3PrQB11FFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABVS9t/NTeo+df1q3RQBgVo2NzuAic/MOh9aZfW2CZkBx/EP61RBwcigDfoqraXQmUK3Eg/WrVABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAVVvLnyU2r98/pT7m4EEeerHoKyXYu5djlicmgBuc8mtCwtsYmcc/wiobO2Mzb2HyD9a1RQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAVdSN0NMujZAG7ELmHOMb8Hb146461WsLy+lvJ0ubGWOJpP3LFo/lTYvXDE53bu3cVY1MStpV2IIEnmMLiOKQZV22nCn2J4rFsotPXUdPOmaeiyIWFxI1l5RRdh5ztGG3bRgdmbjuADpaKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigBCM1l3lr5R3p9w/pWrSMoZSGGQaAMJWKsGU4I5BrVtblZ1wcBx1HrVK7tTA25eYz+lVwSpBU4I6GgDeoqpa3YmAR+JP51boAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAqG4nWBMnknoPWm3NysC9i56CsqR3kcs5yTQAskjSuXc5JqS1tzPJzkIOppLa3ad8DhR1NayIsaBEGAKAFVQihVGFHQU6iigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooATpVW5u1hubOIOB9omMeNuc4jdvXj7vXn075El7JbxWNxJd7fsyRs0u5cjYB82R3GM1jW40aDWLeK00+3t5xIYy4tQCGMRfYGH3W2kH0xkdTQB0FFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAIwDAggEVmXdoYiXjBKenpWpQeRQBgA9xxWha3ucRynB7NSXVl1khH1X/CqHtQBv5zRWTbXbw4VvmT9RWnFIkq7kORQA+iiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKa7qilmIAFADqp3V4IspH8z/oKgub1pMpF8q+vc1ToAVmLMWYkk9c1Na2zTtk5CdzUtrZGTDycJ6dzWkqhVAAAAoAakaxoEUYAp9FFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUARXBhFtKbjZ5AQ+Zvxt245zntisWC90FbzTrXT2tZnaVwiwyA+USjsz4HrgjP+171s3LMlrM6vHGyoSHl+4px1b29aw7AX0etj+1JJXyqrAVkHl+biQuNq4/g243A9DQB0VFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABVa5tEm+YfK/r61ZooAwpI3iba4waWOR4m3ISDWzJGkqlXGRWdPZPHlo8uvp3FAFi3vkfCyYVvXsauVgVNDcyQ8Kcr6GgDZoqtDexS4BOxvQ1ZoAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAoqCa6ih+82W9B1rPnvJZcgHYvoKALtxeRxcL87+gNZ00zzNlz9B2FR1Zt7OSXk/InqepoArqrOwVQST2rRtrIR4eTDP6dhViGGOFcIuPU9zUtABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQBR1lbd9Ev1u3aO2a3kErryVTacke+KxLG0ki1e1nv3vUa4uDNEspiIaXySmG2jIPlg8dPlPPTPQ3sMc9jcQzQtNHJGytEpwXBGCByOvTqKyrJ9En1CFUunN7C5KQT3MhdG2kH5GbrtY9uhoA3aKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooArz2sc2SRtb+8Kz5rSWHJxuX1FbFFAGBU0NzLDjaxK+h6VozWkUuTja3qKoy2M0fK4dfbrQBai1CNuJAUP5irSurrlSCPUVhEYOCMGlVmQ5ViD7UAb1FZUd9Mn3sOPerCahGfvqU/WgC7RUSTxP8AdkUn61LQAUUUUAFFFFABRRRQAUUUUAFFFFABRUbzRx/edR+NV3v4h93LH8qALlISAMkgD3rMkv5W+4An6mqzu7nLsWPvQBpS30SZC5c+3Sqct3NLkZ2r6Cq9TxWk0vO3avqaAIKlht5Zvurhf7x6VoQ2MUfLfO3v0qyBigCtBZRxYLfO3qelWqKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAp6s8sej3rwRGWZYJCkYzl22nA455PpzWZ4fvQpewa1mjCSEQuLKSFXXYGJORgHO4cnnA9a1dSinuNLu4LWXyriSF0ikyRsYggHI9DWHod3cQ6lJYZtZYnk3hYLmSY267MYJKYALIx5I5Y0WA6aiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAjkijlGHUGqsunKTmNyvseavUUAY8lpNH/BuH+zzUJBBwQQa3sU1kVxhlBHvQBhU5XdPuuw+hrUezt2/g2/Q4qJtOX+CQj6jNAFVby4X/AJaZ+oqQahKOqof0oOnyjo6GmGyuAPuA/Q0ATDUWH3ogfo2KcNSHeIj6Nmqhtp16xN+HNJ5E3/PJ/wAqALv9pJ/zyb86Q6kO0RP1NUvKlBx5b5+lL5E3/PJ/yoAtHUjjiIA+7U06hKeiIP1qAW056RN+VPWzuD/Bj6mgAa8uCPv4+gqJ5ZH+9IxH1qwunzHqUH41KunD+OUn2AoAz6BycDk1rJYwL1Ut9TUyRogwihfoKAMmO1nk6IQPfirUWnDrJIfotX8UUARRW8UX3EAPr3qWiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAhuUWW1mjeLzkZCDHx84x059awtFjCaxP9lt7yFItttMkzRsiBVLqAQxb/lr79a6CRQ8boxIVgQSCQfzHIrMjtdP06+gaM3HnXcxUfv5HDOIycsC2D8qY/AUBc1qKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigCG6UvaTIIUnLIw8pzhX4+6fY9K5nR7RU19TcWEFi8catEsNoqBnIkDrv53YXaflI610OprM+l3a28ywTmFxHKxwEbacMT7Hmub0ZHk1qKSO6iK+YZFH2uWRmh8orsXeo3DzDvzn+lAHX0UUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAFa/tUvtPubOVmWO4iaJivUBgQcfnWZItz/aWl/wBoXUL7Z2EIgiK738p+WyxwNu/gd8Voas7ppF68duLmRYHKwsu4SHacKR3z0x71z2nCzTW7Q2MelSrJIdrW0C+YsXk5MhIPy5k+XHowFAHW0UUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFACU1I0RmZUVS3JIGM0+ikAUUUUwCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAP//Z";
+const FACTURA_TEXTO_LEGAL = "En cumplimiento de lo dispuesto en el Reglamento Europeo de Protección de Datos, Reglamento UE 2016/679 (en adelante, “RGPD”) y la LO 3/2018, de 5 de diciembre, de Protección de Datos Personales y garantía de los derechos digitales (en adelante, “LOPDGDD”), GLOBAL HAPPY DEAL S.L informa que es el responsable del tratamiento de los datos personales que figuran en la presente factura. La finalidad del tratamiento consiste en el cumplimiento de una relación comercial y la base de legitimación para dicho tratamiento, de conformidad con el art. 6.1.b del RGPD, es la ejecución de un contrato. GLOBAL HAPPY DEAL S.L no cederá sus datos personales a terceros salvo obligación legal. El tratamiento de los datos con las finalidades descritas se mantendrá durante el tiempo necesario para cumplir con la finalidad de su recogida (mientras dure la relación comercial), así como para el cumplimiento de las obligaciones legales que se deriven del tratamiento de los datos. Puede ejercer los derechos de acceso, rectificación, supresión, limitación del tratamiento, portabilidad, oposición y a no ser objeto de decisiones individualizadas mediante comunicación a info@colchonesbezen.com.";
+function lineasFacturaReclamacion(c) {
+  const items = (c.o.items || []).filter(it => Number(it.qty) > 0);
+  const t = trackingSeurCliente(c.o, c.info.refSeur || c.ref);
+  const skusEnvio = String((t && t.infoAdicional) || "").toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+  const delEnvio = items.filter(it => skusEnvio.includes(String(it.sku || "").toUpperCase()));
+  const lineas = delEnvio.length ? delEnvio : items;
+  // Shopify guarda lo pagado por línea; en las plataformas solo está el
+  // total del pedido, que se reparte por unidades.
+  const unidades = items.reduce((s, it) => s + Number(it.qty), 0) || 1;
+  return lineas.map(it => {
+    const total = Number(it.pagado) > 0 ? Number(it.pagado) : Number(c.o.price || 0) * Number(it.qty) / unidades;
+    return { sku: it.sku || "", qty: Number(it.qty), total };
+  });
+}
+function fechaFacturaPedido(o) {
+  const d = String(o.orderDate || "");
+  let m = /^(\\d{4})-(\\d{2})-(\\d{2})/.exec(d);
+  if (m) return m[3] + "-" + m[2] + "-" + m[1];
+  m = /^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/.exec(d);
+  if (m) return m[1].padStart(2, "0") + "-" + m[2].padStart(2, "0") + "-" + m[3];
+  return new Date().toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" }).replace(/\\//g, "-");
+}
+// Devuelve el total de la factura, o null si no se ha podido generar.
+async function generarFacturaReclamacion(c) {
+  const lineas = lineasFacturaReclamacion(c);
+  if (!lineas.length || !lineas.some(l => l.total > 0)) { alert("No encuentro el precio pagado de este pedido."); return null; }
+  // El número lo da el sistema oficial de facturación (Jennifer,
+  // 2026-10-28: "vamos por el 3232"): la factura se registra allí y aquí
+  // solo se escribe su número, para no repetir ni saltar ninguno.
+  const previa = (c.info.facturasReclamacion || {})[c.clave];
+  const numero = prompt("Nº de factura que le ha dado vuestro sistema oficial de facturación a esta factura:", previa && previa.oficial ? previa.numero : "");
+  if (numero == null) return null;
+  if (!numero.trim()) { alert("Escribe el número de factura del sistema oficial."); return null; }
+  const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: c.o.id, ref: c.ref, facturaReclamacion: { clave: c.clave, numero: numero.trim() } }) });
+  const d = await res.json().catch(() => ({}));
+  const fra = d.info && d.info.facturasReclamacion && d.info.facturasReclamacion[c.clave];
+  if (!res.ok || !fra) { alert("No se ha podido numerar la factura (" + res.status + (d.error ? ": " + d.error : "") + ")."); return null; }
+  c.info.facturasReclamacion = d.info.facturasReclamacion;
+  const eur = n => n.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const r2 = n => Math.round(n * 100) / 100;
+  const total = r2(lineas.reduce((s, l) => s + l.total, 0));
+  const base = r2(total / 1.21);
+  const iva = r2(total - base);
+  const cantidad = lineas.reduce((s, l) => s + l.qty, 0);
+  const o = c.o;
+  const cliente = [o.name, o.streetAddress || o.furnitureAddress || o.address, [o.postalCode, o.city].filter(Boolean).join(" "), o.phone].filter(Boolean).join(" ").toUpperCase();
+  // PDF directo con jsPDF (Jennifer, 2026-10-28: "necesito que el
+  // documento se descargue en PDF"), mismas posiciones que BEZEN11448.
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  doc.addImage(FACTURA_FONDO_BEZEN, "JPEG", 0, 100, 150, 150 * 609 / 712);
+  doc.addImage(FACTURA_LOGO_BEZEN, "JPEG", 9, 10, 66, 66 * 86 / 268);
+  doc.setTextColor(40, 40, 40);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(17);
+  const titulo = "FACTURA - INVOICE";
+  doc.text(titulo, 201 - doc.getTextWidth(titulo) - 1.2 * (titulo.length - 1), 20, { charSpace: 1.2 });
+  doc.setFontSize(10);
+  ["AV. ARBOLEDAS, 25", "POL. IND. LA POSTURA", "28343 VALDEMORO - MADRID"].forEach((t, i) => doc.text(t, 9, 37 + i * 4.6));
+  doc.text("NIF.: B86721313", 9, 53);
+  doc.setFillColor(205, 199, 182);
+  doc.roundedRect(98, 46, 103, 26, 5, 5, "F");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9.5);
+  doc.text(doc.splitTextToSize(cliente, 91), 104, 54);
+  // doc.text cambia el color de relleno: se vuelve a poner el beige.
+  doc.setFillColor(205, 199, 182);
+  doc.roundedRect(28, 62, 52, 17, 4, 4, "F");
+  doc.setFontSize(11);
+  doc.text("Nº Fra.:", 33, 69);
+  doc.text("Fecha:", 33, 75);
+  doc.setFont("helvetica", "normal");
+  doc.text(String(fra.numero), 50, 69);
+  doc.text(fechaFacturaPedido(o), 50, 75);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12.5);
+  doc.text("Referencia", 13, 100);
+  doc.text("Descripción", 60, 100);
+  doc.text("Ctd.", 135, 100, { align: "right" });
+  doc.text("Precio", 165, 100, { align: "right" });
+  doc.text("Importe", 199, 100, { align: "right" });
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10.5);
+  lineas.forEach((l, i) => {
+    const y = 108 + i * 7;
+    doc.text(refLabel(o), 13, y);
+    doc.text(doc.splitTextToSize(String(l.sku), 60)[0], 60, y);
+    doc.text(String(l.qty), 135, y, { align: "right" });
+    doc.text(eur(r2(l.total / 1.21 / l.qty)), 165, y, { align: "right" });
+    doc.text(eur(r2(l.total / 1.21)), 199, y, { align: "right" });
+  });
+  doc.setFontSize(11);
+  doc.text("Cantidad Total", 13, 238);
+  doc.text(String(cantidad), 48, 238);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12.5);
+  doc.text("Base", 135, 238, { align: "right" });
+  doc.text("I.V.A.   21%", 167, 238, { align: "right" });
+  doc.text("Total", 199, 238, { align: "right" });
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(11);
+  doc.text(eur(base), 135, 247, { align: "right" });
+  doc.text(eur(iva), 167, 247, { align: "right" });
+  doc.text(eur(total), 199, 247, { align: "right" });
+  doc.setFontSize(6.3);
+  doc.text(doc.splitTextToSize(FACTURA_TEXTO_LEGAL, 192), 9, 272);
+  const nombrePdf = ("Factura " + fra.numero + " " + refLabel(o)).replace(/[^A-Za-z0-9 ._-]/g, "_") + ".pdf";
+  doc.save(nombrePdf);
+  // Copia guardada en el caso, con sus fotos y documentos.
+  try {
+    const blob = doc.output("blob");
+    await guardarArchivosCasoSeur(c, [{ id: await subirArchivoSeur(blob, nombrePdf), nombre: nombrePdf, fecha: new Date().toISOString(), usuario: currentUser || "", origen: "Factura generada" }]);
+  } catch (err) { alert("La factura se ha descargado, pero no se ha podido guardar en el caso: " + (err.message || err)); }
+  return total;
+}
+document.getElementById("indem-seur-generar-factura").addEventListener("click", async () => {
+  if (!indemCasoAbierto) return;
+  const total = await generarFacturaReclamacion(indemCasoAbierto);
+  if (total != null) document.getElementById("indem-seur-importe").value = total.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+});
+
+// ---- Logística › SEUR › Revisión de facturas (Jennifer, 2026-11-06) ----
+// Histórico completo de envíos de SEUR, una línea por expedición, para
+// cotejar las facturas de SEUR.
+let rfSeurLineas = [];
+// Barra de scroll lateral también ARRIBA de la tabla (Jennifer, 2026-11-06),
+// sincronizada con la de abajo.
+function scrollLateralArriba(wrap) {
+  if (!wrap) return;
+  let top = wrap.previousElementSibling;
+  if (!top || !top.classList.contains("scroll-arriba")) {
+    top = document.createElement("div");
+    top.className = "scroll-arriba";
+    top.style.cssText = "overflow-x:auto;overflow-y:hidden;height:16px;margin:0 2rem 2px";
+    top.innerHTML = "<div style='height:1px'></div>";
+    wrap.parentNode.insertBefore(top, wrap);
+    top.addEventListener("scroll", () => { if (Math.abs(wrap.scrollLeft - top.scrollLeft) > 1) wrap.scrollLeft = top.scrollLeft; });
+    wrap.addEventListener("scroll", () => { if (Math.abs(top.scrollLeft - wrap.scrollLeft) > 1) top.scrollLeft = wrap.scrollLeft; });
+  }
+  const cs = getComputedStyle(wrap);
+  top.style.marginLeft = cs.marginLeft;
+  top.style.marginRight = cs.marginRight;
+  top.style.display = wrap.style.display === "none" ? "none" : "";
+  requestAnimationFrame(() => {
+    top.firstChild.style.width = wrap.scrollWidth + "px";
+    top.style.visibility = wrap.scrollWidth > wrap.clientWidth + 2 ? "visible" : "hidden";
+  });
+}
+async function loadRevisionFacturasSeur() {
+  document.getElementById("rf-seur-count").textContent = "Cargando todos los envíos de SEUR...";
+  document.querySelector("#rf-seur-table tbody").innerHTML = "";
+  const res = await fetch("/api/seur/revision-facturas");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { document.getElementById("rf-seur-count").textContent = "No se ha podido cargar el histórico de SEUR."; return; }
+  rfSeurLineas = data.lineas || [];
+  loadFacturasSeur();
+  const rellenar = (id, valores, primera, etiqueta) => {
+    const sel = document.getElementById(id);
+    const actual = sel.value;
+    sel.innerHTML = '<option value="">' + primera + '</option>' + valores.map(v => '<option value="' + escapeAttr(v) + '">' + escapeAttr(etiqueta ? etiqueta(v) : v) + '</option>').join("");
+    if (valores.includes(actual)) sel.value = actual;
+  };
+  const MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+  rellenar("rf-seur-mes", [...new Set(rfSeurLineas.map(l => (l.fecha || "").slice(0, 7)).filter(Boolean))].sort().reverse(), "Todos los meses",
+    v => MESES[Number(v.slice(5, 7)) - 1] + " " + v.slice(0, 4));
+  rellenar("rf-seur-pais", [...new Set(rfSeurLineas.map(l => l.pais).filter(Boolean))].sort(), "Todos los países");
+  renderRevisionFacturasSeur();
+}
+function rfSeurFiltradas() {
+  const q = document.getElementById("rf-seur-buscar").value.trim().toLowerCase();
+  const desde = document.getElementById("rf-seur-desde").value;
+  const hasta = document.getElementById("rf-seur-hasta").value;
+  const mes = document.getElementById("rf-seur-mes").value;
+  const origen = document.getElementById("rf-seur-origen").value;
+  const servicio = document.getElementById("rf-seur-servicio").value;
+  const pais = document.getElementById("rf-seur-pais").value;
+  const sinExp = document.getElementById("rf-seur-sin-exp").checked;
+  const facturado = document.getElementById("rf-seur-facturado").value;
+  const cobros = typeof fsCobros === "function" ? fsCobros() : [];
+  return rfSeurLineas.filter(l => {
+    if (facturado) {
+      const n = l.origen === "anulada" ? 0 : facturasDeEnvioSeur(l, cobros).length;
+      if (facturado === "doble" && n < 2) return false;
+      if (facturado === "facturado" && n < 1) return false;
+      if (facturado === "sin-facturar" && (n > 0 || l.origen === "anulada")) return false;
+    }
+    if (desde && (l.fecha || "") < desde) return false;
+    if (hasta && (l.fecha || "") > hasta) return false;
+    if (mes && (l.fecha || "").slice(0, 7) !== mes) return false;
+    if (origen && l.origen !== origen) return false;
+    if (servicio && l.servicio !== servicio) return false;
+    if (pais && l.pais !== pais) return false;
+    if (sinExp && l.expedicion) return false;
+    if (q && ![l.ref, l.pedido, l.nombre, l.expedicion, l.cp, l.ciudad, l.contenido, l.plataforma].join(" ").toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+function rfSeurFecha(iso) { return iso ? iso.split("-").reverse().join("/") : ""; }
+function renderRevisionFacturasSeur() {
+  const filas = rfSeurFiltradas();
+  const validas = filas.filter(l => l.origen !== "anulada");
+  const bultos = validas.reduce((s, l) => s + (Number(l.bultos) || 0), 0);
+  const kilos = validas.reduce((s, l) => s + (Number(l.kilos) || 0), 0);
+  const nac = validas.filter(l => l.servicio === "Nacional").length;
+  const coste = validas.reduce((s, l) => s + (Number(l.costeTarifa) || 0), 0);
+  const sinTarifa = validas.filter(l => l.costeTarifa == null || (l.costeFaltan || []).length).length;
+  document.getElementById("rf-seur-count").textContent = filas.length + " líneas · " + validas.length + " envíos (" + nac + " nacionales, " + (validas.length - nac) + " internacionales) · " +
+    bultos + " bultos · " + (Math.round(kilos * 10) / 10).toLocaleString("es-ES") + " kg · SEUR debe cobrar " + fmtPrecio(Math.round(coste * 100) / 100) + (sinTarifa ? " (" + sinTarifa + " sin tarifa completa)" : "") + (filas.length !== validas.length ? " · " + (filas.length - validas.length) + " anuladas (no suman)" : "") + (function () { const cb = fsCobros(); const d = validas.filter(l => facturasDeEnvioSeur(l, cb).length > 1).length; return d ? " · ⚠ " + d + " FACTURADOS 2 VECES O MÁS" : ""; })();
+  const origenTxt = { carga: "", "fuera-carga": "Fuera de carga", anulada: "Anulada" };
+  const cobros = fsCobros();
+  document.querySelector("#rf-seur-table tbody").innerHTML = filas.map(l => {
+    const fact = facturasDeEnvioSeur(l, cobros);
+    const celdaFact = !fact.length ? '<span style="color:var(--muted)">—</span>' : fact.map(c => escapeAttr(c.factura + " (" + fmtPrecio(c.importe) + ")")).join("<br>") + (fact.length > 1 ? '<div style="color:#fff;background:#b91c1c;border-radius:6px;padding:1px 6px;font-weight:700;font-size:11px;margin-top:2px;display:inline-block">FACTURADO ' + fact.length + " VECES</div>" : "");
+    const est = l.kilosEstimados;
+    return '<tr' + (l.origen === "anulada" ? ' style="opacity:.55;text-decoration:line-through"' : "") + '>' +
+      "<td>" + escapeAttr(rfSeurFecha(l.fecha)) + "</td>" +
+      "<td>" + (l.cargaFecha ? escapeAttr(rfSeurFecha(l.cargaFecha)) : '<span style="color:#b45309">' + escapeAttr(origenTxt[l.origen] || "") + "</span>") + "</td>" +
+      "<td><strong>" + escapeAttr(l.ref || "") + "</strong></td>" +
+      "<td>" + escapeAttr(l.pedido || "") + "</td>" +
+      "<td>" + escapeAttr(l.plataforma || "") + "</td>" +
+      "<td>" + escapeAttr(l.nombre || "") + "</td>" +
+      "<td>" + escapeAttr(l.cp || "") + "</td>" +
+      "<td>" + escapeAttr(l.ciudad || "") + "</td>" +
+      "<td>" + escapeAttr(l.pais || "") + "</td>" +
+      "<td>" + escapeAttr(l.servicio || "") + "</td>" +
+      '<td style="text-align:center">' + (l.bultos == null ? "—" : (est ? "≈" : "") + l.bultos) + "</td>" +
+      '<td style="text-align:right">' + (l.kilos == null ? (l.sinPeso ? '<span title="SKU sin peso en Pesos SEUR" style="color:#b91c1c">?</span>' : "—") : (est ? "≈" : "") + String(l.kilos).replace(".", ",") + (l.sinPeso ? ' <span title="Algún SKU sin peso en Pesos SEUR" style="color:#b91c1c">+?</span>' : "")) + "</td>" +
+      "<td>" + escapeAttr(l.contenido || "") + "</td>" +
+      '<td style="text-align:right;white-space:nowrap;font-weight:600">' + (l.costeTarifa == null ? '<span style="color:#b91c1c;font-weight:400" title="' + escapeAttr("Sin envío en Tarifas para " + l.pais + ": " + (l.costeFaltan || []).join(", ")) + '">sin tarifa</span>' : fmtPrecio(l.costeTarifa) + ((l.costeFaltan || []).length ? ' <span style="color:#b91c1c" title="' + escapeAttr("Falta en Tarifas: " + l.costeFaltan.join(", ")) + '">+?</span>' : "")) + "</td>" +
+      "<td>" + (l.expedicion ? escapeAttr(l.expedicion) : '<span style="color:#b91c1c">sin etiqueta</span>') + "</td>" +
+      "<td>" + escapeAttr(l.estado || "") + "</td>" +
+      "<td>" + celdaFact + "</td></tr>";
+  }).join("") || '<tr><td colspan="17" style="text-align:center;color:var(--muted)">No hay envíos con estos filtros.</td></tr>';
+  scrollLateralArriba(document.getElementById("rf-seur-table").closest(".table-wrap"));
+}
+["rf-seur-buscar"].forEach(id => document.getElementById(id).addEventListener("input", renderRevisionFacturasSeur));
+["rf-seur-desde", "rf-seur-hasta", "rf-seur-mes", "rf-seur-origen", "rf-seur-servicio", "rf-seur-pais", "rf-seur-sin-exp", "rf-seur-facturado"].forEach(id => document.getElementById(id).addEventListener("change", renderRevisionFacturasSeur));
+document.getElementById("rf-seur-excel").addEventListener("click", () => {
+  const filas = rfSeurFiltradas().map(l => ({
+    "Fecha": rfSeurFecha(l.fecha), "Carga": l.cargaFecha ? rfSeurFecha(l.cargaFecha) : (l.origen === "anulada" ? "Anulada" : "Fuera de carga"),
+    "Referencia SEUR": l.ref || "", "Pedido": l.pedido || "", "Plataforma": l.plataforma || "", "Cliente": l.nombre || "", "CP": l.cp || "", "Población": l.ciudad || "",
+    "País": l.pais || "", "Servicio": l.servicio || "", "Bultos": l.bultos == null ? "" : l.bultos, "Kilos": l.kilos == null ? "" : l.kilos,
+    "Kilos estimados": l.kilosEstimados ? "SÍ" : "", "Contenido": l.contenido || "", "Debe cobrar SEUR (€)": l.costeTarifa == null ? "" : l.costeTarifa, "Falta tarifa de": (l.costeFaltan || []).join(", "), "Nº expedición": l.expedicion || "", "Fecha SEUR": l.fechaSeur || "", "Estado en SEUR": l.estado || "",
+    "Facturado en": facturasDeEnvioSeur(l, fsCobros()).map(c => c.factura + " (" + c.importe + " €)").join(" + "),
+  }));
+  const ws = XLSX.utils.json_to_sheet(filas);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Envíos SEUR");
+  XLSX.writeFile(wb, "Revision_facturas_SEUR_" + new Date().toISOString().slice(0, 10) + ".xlsx");
+});
+
+// ---- Facturas de SEUR: subir, guardar y cotejar (Jennifer, 2026-11-06) ----
+// Todas las facturas subidas quedan guardadas. Cada línea se cruza por la
+// REFERENCIA (columna AC) con el histórico de envíos y, si no casa, por el
+// nº de expedición. Se compara el importe facturado sin IVA (columna AN)
+// con el envío de Tarifas. En la tabla general, cada envío dice en qué
+// factura(s) se ha cobrado; dos veces = reclamar.
+let fsIndice = [];
+let fsActual = null;
+let fsTodas = [];
+const fsNorm = x => String(x == null ? "" : x).toUpperCase().replace(/[^A-Z0-9]/g, "");
+const fsNum = v => { if (typeof v === "number") return v; const s = String(v || "").trim(); const n = Number(s.includes(",") ? s.replace(/\\./g, "").replace(",", ".") : s); return isNaN(n) ? 0 : n; };
+const fsEsDevolucion = l => /devoluc/i.test(l.servicio || "") || /^devo/i.test(l.producto || "");
+function fsFechaCelda(v) {
+  // Fecha local (la de UTC daba un día menos: 16/10 salía 15/10).
+  if (v instanceof Date) { const d = new Date(v.getTime() + 12 * 3600000); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+  const s = String(v || "").trim();
+  let m = /^(\\d{4})-(\\d{2})-(\\d{2})/.exec(s); if (m) return m[1] + "-" + m[2] + "-" + m[3];
+  m = /^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{2,4})/.exec(s); if (m) return (m[3].length === 2 ? "20" + m[3] : m[3]) + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0");
+  if (/^\\d+(\\.\\d+)?$/.test(s)) return new Date(Date.UTC(1899, 11, 30) + Number(s) * 86400000).toISOString().slice(0, 10);
+  return s;
+}
+// Todas las líneas de todas las facturas guardadas (sin devoluciones).
+function fsCobros() {
+  const out = [];
+  for (const f of fsTodas) for (const l of f.lineas || []) if (!fsEsDevolucion(l)) out.push({ factura: f.id, linea: l.linea, importe: l.importe, ref: fsNorm(l.referencia), exp: String(l.expedicion || "") });
+  return out;
+}
+// Facturas en las que sale un envío del histórico (por referencia o expedición).
+function facturasDeEnvioSeur(e, cobros) {
+  const ref = fsNorm(e.ref);
+  return cobros.filter(c => (ref && c.ref === ref) || (e.expedicion && c.exp === String(e.expedicion)));
+}
+async function loadFacturasSeur(seleccionar) {
+  const [ind, todas] = await Promise.all([
+    fetch("/api/seur/facturas").then(r => r.ok ? r.json() : []).catch(() => []),
+    fetch("/api/seur/facturas?todas=1").then(r => r.ok ? r.json() : []).catch(() => []),
+  ]);
+  fsIndice = ind || [];
+  fsTodas = (todas || []).filter(Boolean);
+  const sel = document.getElementById("fs-select");
+  const actual = seleccionar !== undefined ? seleccionar : sel.value;
+  sel.innerHTML = '<option value="">— Elige una factura subida (' + fsIndice.length + ') —</option>' + fsIndice.map(f =>
+    '<option value="' + escapeAttr(f.id) + '">' + escapeAttr(f.id + " · " + rfSeurFecha(f.fechaFactura) + " · " + f.lineas + " líneas · " + fmtPrecio(f.importe) + (f.nombre ? " · " + f.nombre : "")) + '</option>').join("");
+  if (actual && fsIndice.some(f => f.id === actual)) { sel.value = actual; abrirFacturaSeur(actual); }
+  renderResumenMesFacturasSeur();
+  if (rfSeurLineas.length) renderRevisionFacturasSeur();
+  if (document.getElementById("ap-wrap").style.display !== "none") renderAnalisisPortes();
+}
+function abrirFacturaSeur(id) {
+  const wrap = document.getElementById("fs-wrap");
+  ["fs-excel", "fs-borrar", "fs-reclamacion"].forEach(b => document.getElementById(b).style.display = id ? "" : "none");
+  fsActual = id ? fsTodas.find(f => f.id === id) || null : null;
+  if (!fsActual) { wrap.style.display = "none"; document.getElementById("fs-resumen").textContent = id ? "No se ha encontrado la factura." : ""; scrollLateralArriba(wrap); return; }
+  wrap.style.display = "";
+  renderFacturaSeur();
+}
+function cotejarLineaFacturaSeur(l, f, cobros) {
+  const vivas = rfSeurLineas.filter(x => x.origen !== "anulada");
+  const ref = fsNorm(l.referencia);
+  let nuestro = ref ? vivas.find(x => fsNorm(x.ref) === ref) : null;
+  let por = nuestro ? "referencia" : "";
+  if (!nuestro && l.expedicion) { nuestro = vivas.find(x => String(x.expedicion) === String(l.expedicion)); if (nuestro) por = "expedición"; }
+  const avisos = [];
+  const devolucion = fsEsDevolucion(l);
+  if (devolucion) avisos.push({ t: "Devolución", g: "naranja" });
+  if (l.tipo && !/^venta$/i.test(l.tipo)) avisos.push({ t: "Tipo de línea: " + l.tipo, g: "naranja" });
+  if (!nuestro) avisos.push({ t: "No está en nuestros envíos", g: "rojo" });
+  // Devolución: nosotros no cobramos nada al cliente → tarifa 0, todo lo que
+  // cobra SEUR es pérdida (Jennifer, 2026-11-06).
+  const debe = devolucion ? 0 : nuestro ? nuestro.costeTarifa : null;
+  const dif = debe != null ? Math.round((l.importe - debe) * 100) / 100 : null;
+  // Devolución: referencia de lo que tenemos computado por ese producto, por
+  // si SEUR la cobra aún más cara (Jennifer, 2026-11-06).
+  const tarifaProducto = devolucion && nuestro && nuestro.costeTarifa != null ? nuestro.costeTarifa : null;
+  const excesoDevolucion = tarifaProducto != null ? Math.round((l.importe - tarifaProducto) * 100) / 100 : null;
+  if (excesoDevolucion != null && excesoDevolucion > 0.5) avisos.push({ t: "Devolución cobrada " + fmtPrecio(excesoDevolucion) + " más que la tarifa del producto (" + fmtPrecio(tarifaProducto) + ")", g: "rojo" });
+  if (dif != null && dif > 0.5 && !devolucion) avisos.push({ t: "Cobra " + fmtPrecio(dif) + " más que la tarifa", g: "rojo" });
+  if (nuestro && !devolucion && debe == null) avisos.push({ t: "Sin tarifa en Tarifas", g: "naranja" });
+  if (nuestro && nuestro.kilos != null && !nuestro.kilosEstimados && l.peso > nuestro.kilos + 1) avisos.push({ t: "Factura " + String(l.peso).replace(".", ",") + " kg y declaramos " + String(nuestro.kilos).replace(".", ",") + " kg", g: "naranja" });
+  if (nuestro && nuestro.bultos != null && l.bultos > nuestro.bultos) avisos.push({ t: "Factura " + l.bultos + " bultos y enviamos " + nuestro.bultos, g: "rojo" });
+  if (!devolucion) {
+    const ref2 = fsNorm(l.referencia);
+    const otros = cobros.filter(c => !(c.factura === f.id && c.linea === l.linea) && ((ref2 && c.ref === ref2) || (l.expedicion && c.exp === String(l.expedicion))));
+    if (otros.length) avisos.push({ t: "FACTURADO " + (otros.length + 1) + " VECES (también en " + [...new Set(otros.map(o => o.factura + " línea " + o.linea))].join(", ") + ")", g: "rojo" });
+  }
+  return { nuestro, por, debe, dif, avisos, devolucion, tarifaProducto, excesoDevolucion };
+}
+function renderFacturaSeur() {
+  const f = fsActual;
+  if (!f) return;
+  const cobros = fsCobros();
+  const filtro = document.getElementById("fs-filtro").value;
+  const filas = f.lineas.map(l => ({ l, c: cotejarLineaFacturaSeur(l, f, cobros), r: (f.revisiones || {})[l.linea] || {} }));
+  const total = filas.reduce((s, x) => s + x.l.importe, 0);
+  const comparables = filas.filter(x => x.c.debe != null);
+  const debe = comparables.reduce((s, x) => s + x.c.debe, 0);
+  const factComp = comparables.reduce((s, x) => s + x.l.importe, 0);
+  const conAviso = filas.filter(x => x.c.avisos.some(a => a.g === "rojo")).length;
+  const revisadas = filas.filter(x => x.r.estado).length;
+  const r2 = v => Math.round(v * 100) / 100;
+  document.getElementById("fs-resumen").innerHTML = "<strong>Factura " + escapeAttr(f.id) + "</strong> (" + escapeAttr(rfSeurFecha(f.fechaFactura)) + ") · " + filas.length + " líneas · facturado <strong>" + fmtPrecio(r2(total)) + "</strong> sin IVA · " +
+    "en las " + comparables.length + " líneas con tarifa: facturado " + fmtPrecio(r2(factComp)) + " / debe cobrar " + fmtPrecio(r2(debe)) +
+    ' → diferencia <strong style="color:' + (debe - factComp < -0.5 ? "#b91c1c" : "#15803d") + '">' + (debe - factComp > 0 ? "+" : "") + fmtPrecio(r2(debe - factComp)) + "</strong>" +
+    " · " + conAviso + " con aviso rojo · " + revisadas + " de " + filas.length + " envíos revisados";
+  const visibles = filas.filter(x => {
+    if (filtro === "avisos") return x.c.avisos.length > 0;
+    if (filtro === "mas") return x.c.dif != null && x.c.dif > 0.5 && !x.c.devolucion;
+    if (filtro === "sin-revisar") return !x.r.estado;
+    if (filtro === "reclamar") return x.r.estado === "reclamar";
+    return true;
+  });
+  const color = { rojo: "#b91c1c", naranja: "#c2410c" };
+  document.querySelector("#fs-table tbody").innerHTML = visibles.map(({ l, c, r }) => {
+    const n = c.nuestro;
+    return "<tr" + (c.avisos.some(a => a.g === "rojo") && !r.estado ? ' style="background:#fef2f2"' : "") + ">" +
+      "<td>" + l.linea + "</td><td>" + escapeAttr(rfSeurFecha(l.fechaServicio)) + "</td>" +
+      "<td><strong>" + escapeAttr(l.referencia || "") + "</strong>" + (n ? '<div style="font-size:11px;color:var(--muted)">' + escapeAttr(n.pedido + " · " + n.nombre) + "</div>" : '<div style="font-size:11px;color:var(--muted)">' + escapeAttr(l.destinatario || "") + "</div>") + "</td>" +
+      "<td>" + escapeAttr(String(l.expedicion || "")) + (c.por === "expedición" ? '<div style="font-size:11px;color:#c2410c">casado por expedición</div>' : "") + "</td>" +
+      "<td>" + escapeAttr(l.destino || "") + "</td><td>" + escapeAttr(l.servicio || "") + "</td>" +
+      "<td>" + (n ? escapeAttr(n.contenido || "") : "—") + "</td>" +
+      '<td style="text-align:center">' + l.bultos + " / " + (n && n.bultos != null ? (n.kilosEstimados ? "≈" : "") + n.bultos : "—") + "</td>" +
+      '<td style="text-align:center">' + String(l.peso).replace(".", ",") + " / " + (n && n.kilos != null ? (n.kilosEstimados ? "≈" : "") + String(n.kilos).replace(".", ",") : "—") + "</td>" +
+      '<td style="text-align:right;font-weight:600">' + fmtPrecio(l.importe) + "</td>" +
+      '<td style="text-align:right">' + (c.debe != null ? fmtPrecio(c.debe) : "—") + (c.devolucion ? '<div style="font-size:11px;color:var(--muted);white-space:nowrap">' + (c.tarifaProducto != null ? "Tarifa del producto: " + fmtPrecio(c.tarifaProducto) : "Sin tarifa del producto") + "</div>" : "") + "</td>" +
+      '<td style="text-align:right;font-weight:700;color:' + (c.dif == null ? "inherit" : c.dif > 0.5 ? "#b91c1c" : "#15803d") + '">' + (c.dif == null ? "—" : (c.dif < 0 ? "+" : c.dif > 0 ? "−" : "") + fmtPrecio(Math.abs(c.dif))) + "</td>" +
+      "<td>" + (c.avisos.map(a => '<div style="color:' + color[a.g] + ';font-weight:600;font-size:12px">' + escapeAttr(a.t) + "</div>").join("") || '<span style="color:#15803d">OK</span>') + "</td>" +
+      '<td><select class="fs-estado" data-linea="' + l.linea + '">' + [["", "Sin revisar"], ["ok", "✔ OK"], ["reclamar", "⚠ Reclamar"], ["reclamado", "📨 Reclamado"], ["abonado", "💶 Abonado"]].map(([v, t]) => '<option value="' + v + '"' + ((r.estado || "") === v ? " selected" : "") + ">" + t + "</option>").join("") + "</select></td>" +
+      '<td><input class="fs-nota" data-linea="' + l.linea + '" value="' + escapeAttr(r.nota || "") + '" style="width:100%" /></td></tr>';
+  }).join("") || '<tr><td colspan="15" style="text-align:center;color:var(--muted)">No hay líneas con este filtro.</td></tr>';
+  scrollLateralArriba(document.getElementById("fs-wrap"));
+}
+// Agrupa por artículo (SKU) y país las líneas facturadas que casan con un
+// envío nuestro de UN solo artículo y con tarifa.
+function analisisPortesSeur() {
+  const vivas = rfSeurLineas.filter(x => x.origen !== "anulada");
+  const grupos = new Map();
+  for (const fa of fsTodas) {
+    for (const l of fa.lineas || []) {
+      if (fsEsDevolucion(l)) continue;
+      const ref = fsNorm(l.referencia);
+      const n = (ref && vivas.find(x => fsNorm(x.ref) === ref)) || (l.expedicion && vivas.find(x => String(x.expedicion) === String(l.expedicion)));
+      if (!n || n.costeTarifa == null || (n.costeFaltan || []).length) continue;
+      const cont = String(n.contenido || "").trim();
+      if (!cont || cont.includes("+") || /\\(\\s*[2-9]/.test(cont)) continue;
+      const clave = cont.toUpperCase() + "|" + (n.pais || "");
+      if (!grupos.has(clave)) grupos.set(clave, { articulo: cont.toUpperCase(), pais: n.pais || "", tarifa: n.costeTarifa, importes: [], facturas: new Set(), pieza: n.pieza || null });
+      const g = grupos.get(clave);
+      g.importes.push(l.importe);
+      g.facturas.add(fa.id);
+      g.tarifa = n.costeTarifa;
+    }
+  }
+  const r2 = v => Math.round(v * 100) / 100;
+  return [...grupos.values()].map(g => {
+    const media = g.importes.reduce((s, v) => s + v, 0) / g.importes.length;
+    const encima = g.importes.filter(v => v - g.tarifa > 0.5).length;
+    const sobre = g.importes.reduce((s, v) => s + Math.max(0, v - g.tarifa), 0);
+    const dif = media - g.tarifa;
+    const pct = Math.round(encima / g.importes.length * 100);
+    return { ...g, envios: g.importes.length, media: r2(media), min: Math.min(...g.importes), max: Math.max(...g.importes), dif: r2(dif), pct, sobre: r2(sobre),
+      sugerencia: dif > 0.5 && pct >= 50 ? "Subir porte a " + fmtPrecio(r2(media)) : dif > 0.5 ? "Vigilar (no siempre)" : "" };
+  }).sort((a, b) => b.sobre - a.sobre || b.dif - a.dif);
+}
+function renderAnalisisPortes() {
+  const solo = document.getElementById("ap-solo-encima").checked;
+  const todos = analisisPortesSeur();
+  const lista = solo ? todos.filter(x => x.dif > 0.5) : todos;
+  const sobre = todos.reduce((s, x) => s + x.sobre, 0);
+  document.getElementById("ap-resumen").textContent = fsTodas.length
+    ? todos.length + " artículos/país analizados en " + fsTodas.length + " factura(s) · " + todos.filter(x => x.dif > 0.5).length + " cobrados por encima de media · sobrecoste total " + fmtPrecio(Math.round(sobre * 100) / 100) + " · " + todos.filter(x => x.sugerencia.startsWith("Subir")).length + " con sugerencia de subir el porte"
+    : "Todavía no hay facturas subidas.";
+  document.querySelector("#ap-table tbody").innerHTML = lista.map(x => "<tr>" +
+    "<td><strong>" + escapeAttr(x.articulo) + "</strong></td><td>" + escapeAttr(x.pais) + "</td><td style='text-align:center'>" + x.envios + "</td>" +
+    "<td style='text-align:right;font-weight:600'>" + fmtPrecio(x.media) + "</td><td style='text-align:right;font-size:12px'>" + fmtPrecio(x.min) + " – " + fmtPrecio(x.max) + "</td>" +
+    "<td style='text-align:right'>" + fmtPrecio(x.tarifa) + "</td>" +
+    "<td style='text-align:right;font-weight:700;color:" + (x.dif > 0.5 ? "#b91c1c" : "#15803d") + "'>" + (x.dif > 0 ? "+" : "") + fmtPrecio(x.dif) + "</td>" +
+    "<td style='text-align:center'>" + x.pct + " %</td><td style='text-align:right;color:#b91c1c'>" + (x.sobre ? fmtPrecio(x.sobre) : "—") + "</td>" +
+    "<td style='font-weight:700;color:" + (x.sugerencia.startsWith("Subir") ? "#b91c1c" : "#c2410c") + "'>" + escapeAttr(x.sugerencia) + "</td><td>" + (x.sugerencia.startsWith("Subir") && x.pieza && ["ES", "PT", "FR", "IT", "DE"].includes(x.pais)
+      ? "<button type='button' class='ap-aplicar' data-sm='" + escapeAttr(x.pieza.stockModel) + "' data-talla='" + escapeAttr(x.pieza.talla) + "' data-pais='" + escapeAttr(x.pais) + "' data-de='" + x.tarifa + "' data-a='" + x.media + "' style='font-size:12px;padding:2px 10px'>Aplicar " + fmtPrecio(x.media) + "</button>" : "") + "</td></tr>").join("")
+    || "<tr><td colspan='11' style='text-align:center;color:var(--muted)'>" + (fsTodas.length ? "Ningún artículo cobrado por encima de la tarifa." : "Sube una factura de SEUR para ver el análisis.") + "</td></tr>";
+  scrollLateralArriba(document.getElementById("ap-wrap"));
+}
+document.getElementById("ap-ver").addEventListener("click", () => {
+  const wrap = document.getElementById("ap-wrap");
+  const abrir = wrap.style.display === "none";
+  wrap.style.display = abrir ? "" : "none";
+  document.getElementById("ap-solo-label").style.display = abrir ? "inline-flex" : "none";
+  document.getElementById("ap-excel").style.display = abrir ? "" : "none";
+  document.getElementById("ap-ver").textContent = abrir ? "Ocultar análisis" : "Ver análisis";
+  if (abrir) renderAnalisisPortes(); else { document.getElementById("ap-resumen").textContent = ""; scrollLateralArriba(wrap); }
+});
+document.getElementById("ap-solo-encima").addEventListener("change", renderAnalisisPortes);
+async function cargarHistorialPortes() {
+  const tb = document.querySelector("#ap-historial-table tbody");
+  tb.innerHTML = "<tr><td colspan='9' style='color:var(--muted)'>Cargando...</td></tr>";
+  const lista = await fetch("/api/tarifas/envio-historial").then(r => r.ok ? r.json() : []).catch(() => []);
+  const nombres = { ES: "España", FR: "Francia", IT: "Italia", DE: "Alemania", PT: "Portugal" };
+  tb.innerHTML = lista.slice().reverse().map(h => "<tr" + (h.deshecho ? " style='opacity:.5;text-decoration:line-through'" : "") + "><td>" + escapeAttr(new Date(h.fecha).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })) + "</td>" +
+    "<td>" + escapeAttr(h.usuario || "") + "</td><td>" + escapeAttr(nombreCortoModelo(h.stockModel)) + "</td><td>" + escapeAttr(h.talla) + "</td><td>" + escapeAttr(nombres[h.pais] || h.pais) + "</td>" +
+    "<td style='text-align:right'>" + (h.antes == null ? "—" : fmtPrecio(h.antes)) + "</td><td style='text-align:right;font-weight:700'>" + (h.despues == null ? "—" : fmtPrecio(h.despues)) + "</td>" +
+    "<td style='font-size:12px'>" + escapeAttr(h.origen || "") + (h.deshecho ? "<div>Deshecho el " + escapeAttr(new Date(h.deshecho.fecha).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })) + "</div>" : "") + "</td>" +
+    "<td>" + (!h.deshecho && h.origen !== "Deshacer" ? "<button type='button' class='secondary ap-deshacer' data-id='" + escapeAttr(h.id) + "' style='font-size:12px;padding:2px 10px'>↩ Deshacer</button>" : "") + "</td></tr>").join("")
+    || "<tr><td colspan='9' style='text-align:center;color:var(--muted)'>Todavía no hay cambios registrados. Se registran desde ahora (los de antes no quedaron guardados).</td></tr>";
+}
+document.getElementById("ap-historial").addEventListener("click", () => {
+  const w = document.getElementById("ap-historial-wrap");
+  const abrir = w.style.display === "none";
+  w.style.display = abrir ? "" : "none";
+  document.getElementById("ap-historial").textContent = abrir ? "Ocultar historial" : "🕘 Historial de cambios de porte";
+  if (abrir) cargarHistorialPortes();
+});
+document.getElementById("ap-historial-table").addEventListener("click", async ev => {
+  const b = ev.target.closest(".ap-deshacer");
+  if (!b || !confirm("¿Deshacer este cambio de porte? Vuelve al porte de antes y se recalculan los precios de Tarifas y de los markets.")) return;
+  const res = await fetch("/api/tarifas/envio-deshacer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: b.dataset.id, usuario: currentUser || null }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { alert(d.error || "No se ha podido deshacer."); return; }
+  mostrarAvisoBreve("Cambio de porte deshecho.");
+  await cargarHistorialPortes();
+  const r = await fetch("/api/seur/revision-facturas").then(x => x.json()).catch(() => ({}));
+  if (r.ok) { rfSeurLineas = r.lineas || []; renderRevisionFacturasSeur(); if (document.getElementById("ap-wrap").style.display !== "none") renderAnalisisPortes(); renderResumenMesFacturasSeur(); if (fsActual) renderFacturaSeur(); }
+});
+// Aplicar la subida de porte en Tarifas (Jennifer, 2026-11-06). Portugal usa
+// el precio de España, así que se cambia el de España.
+document.getElementById("ap-table").addEventListener("click", async ev => {
+  const b = ev.target.closest(".ap-aplicar");
+  if (!b) return;
+  const pais = b.dataset.pais === "PT" ? "ES" : b.dataset.pais;
+  const a = Math.round(Number(b.dataset.a) * 100) / 100;
+  const nombres = { ES: "España", FR: "Francia", IT: "Italia", DE: "Alemania" };
+  const nuevo = prompt("Porte de " + nombreCortoModelo(b.dataset.sm) + " " + b.dataset.talla + " a " + nombres[pais] + (b.dataset.pais === "PT" ? " (Portugal usa el de España)" : "") +
+    ":\\n\\nAhora en Tarifas: " + fmtPrecio(Number(b.dataset.de)) + "\\nSEUR cobra de media: " + fmtPrecio(a) + "\\n\\n¿Nuevo porte? (se recalculan los precios de Tarifas)", String(a).replace(".", ","));
+  if (nuevo === null) return;
+  const v = Math.round(Number(String(nuevo).replace(",", ".")) * 100) / 100;
+  if (!(v > 0)) { alert("Importe no válido."); return; }
+  b.disabled = true;
+  const res = await fetch("/api/tarifas/envio", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ precios: { [b.dataset.sm]: { [b.dataset.talla]: { [pais]: v } } }, usuario: currentUser || null, origen: "Sugerencia revisión facturas SEUR" }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) { b.disabled = false; alert(d.error || "No se ha podido guardar en Tarifas."); return; }
+  mostrarAvisoBreve("Porte actualizado en Tarifas: " + nombreCortoModelo(b.dataset.sm) + " " + b.dataset.talla + " " + nombres[pais] + " → " + fmtPrecio(v));
+  const r = await fetch("/api/seur/revision-facturas").then(x => x.json()).catch(() => ({}));
+  if (r.ok) { rfSeurLineas = r.lineas || []; renderRevisionFacturasSeur(); renderAnalisisPortes(); renderResumenMesFacturasSeur(); if (fsActual) renderFacturaSeur(); }
+});
+document.getElementById("ap-excel").addEventListener("click", () => {
+  const filas = analisisPortesSeur().map(x => ({ "Artículo": x.articulo, "País": x.pais, "Envíos": x.envios, "SEUR cobra (media)": x.media, "Mínimo": x.min, "Máximo": x.max,
+    "Porte en Tarifas": x.tarifa, "Diferencia media": x.dif, "% por encima": x.pct, "Sobrecoste total": x.sobre, "Sugerencia": x.sugerencia, "Facturas": [...x.facturas].join(", ") }));
+  const ws = XLSX.utils.json_to_sheet(filas);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Portes por producto");
+  XLSX.writeFile(wb, "Analisis_portes_SEUR_" + new Date().toISOString().slice(0, 10) + ".xlsx");
+});
+async function guardarRevisionFacturaSeur(linea, cambios) {
+  if (!fsActual) return;
+  const res = await fetch("/api/seur/facturas/revision", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: fsActual.id, linea, usuario: currentUser, ...cambios }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { alert(d.error || "No se ha podido guardar."); return; }
+  fsActual.revisiones = fsActual.revisiones || {};
+  fsActual.revisiones[linea] = d.revision;
+}
+document.addEventListener("change", async ev => {
+  const s = ev.target.closest(".fs-estado");
+  if (s) { await guardarRevisionFacturaSeur(Number(s.dataset.linea), { estado: s.value }); renderFacturaSeur(); renderResumenMesFacturasSeur(); return; }
+  const n = ev.target.closest(".fs-nota");
+  if (n) await guardarRevisionFacturaSeur(Number(n.dataset.linea), { nota: n.value });
+});
+document.getElementById("fs-subir-btn").addEventListener("click", () => document.getElementById("fs-subir-input").click());
+document.getElementById("fs-select").addEventListener("change", ev => abrirFacturaSeur(ev.target.value));
+document.getElementById("fs-filtro").addEventListener("change", renderFacturaSeur);
+document.getElementById("fs-subir-input").addEventListener("change", async ev => {
+  const file = ev.target.files[0];
+  ev.target.value = "";
+  if (!file) return;
+  try {
+    const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: "" });
+    const head = (rows[0] || []).map(h => String(h).trim().toUpperCase());
+    // Por nombre de columna y, si no está, por su letra (AC = referencia, AN = importe sin IVA).
+    const col = (nombre, letraIdx) => { const i = head.indexOf(nombre.toUpperCase()); return i >= 0 ? i : letraIdx; };
+    const C = {
+      serie: col("Serie Factura", 1), numero: col("Numero Factura", 2), fechaFactura: col("Fecha Factura", 3), linea: col("Numero Linea", 4), fechaServicio: col("Fecha Servicio", 5),
+      destino: col("Destino", 9), servicio: col("Nombre Completo Servicio", 12), producto: col("Nombre Completo Producto", 14), expedicion: col("Numero Expedicion", 17),
+      destinatario: col("Destinatario", 24), cp: col("C. Postal Destinatario", 27), referencia: col("Referencia", 28), tipo: col("Tipo Línea", 29),
+      bultos: col("Bultos", 31), peso: col("Peso", 32), importe: col("Importe facturado (sin impuestos)", 39), portes: col("Portes", 47), combustible: col("Cargo Combustible", 51),
+    };
+    const lineas = rows.slice(1).filter(r => r && String(r[C.expedicion] || r[C.referencia] || "").trim()).map((r, i) => ({
+      linea: Number(r[C.linea]) || i + 1, fechaServicio: fsFechaCelda(r[C.fechaServicio]), destino: String(r[C.destino] || ""), servicio: String(r[C.servicio] || ""), producto: String(r[C.producto] || ""),
+      expedicion: String(r[C.expedicion] || "").trim(), destinatario: String(r[C.destinatario] || ""), cp: String(r[C.cp] || ""), referencia: String(r[C.referencia] || "").trim(), tipo: String(r[C.tipo] || ""),
+      bultos: fsNum(r[C.bultos]), peso: Math.round(fsNum(r[C.peso]) * 1000) / 1000, importe: Math.round(fsNum(r[C.importe]) * 100) / 100, portes: fsNum(r[C.portes]), combustible: fsNum(r[C.combustible]),
+    }));
+    if (!lineas.length) { alert("No encuentro líneas en esa factura."); return; }
+    const primera = rows[1] || [];
+    const id = (String(primera[C.serie] || "").trim() + String(primera[C.numero] || "").trim()) || file.name.replace(/\\.[^.]+$/, "");
+    if (fsIndice.some(f => f.id === id) && !confirm("La factura " + id + " ya estaba subida. ¿Reemplazarla? (se mantienen las revisiones y notas)")) return;
+    const factura = { id, nombre: file.name.replace(/\\.[^.]+$/, ""), fechaFactura: fsFechaCelda(primera[C.fechaFactura]), lineas };
+    const res = await fetch("/api/seur/facturas/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ factura, usuario: currentUser }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || !d.ok) { alert(d.error || "No se ha podido guardar la factura."); return; }
+    await loadFacturasSeur(id);
+    mostrarAvisoBreve("Factura " + id + " guardada (" + lineas.length + " líneas).");
+  } catch (err) {
+    alert("No se ha podido leer la factura: " + err.message);
+  }
+});
+document.getElementById("fs-borrar").addEventListener("click", async () => {
+  if (!fsActual || !confirm("¿Borrar la factura " + fsActual.id + " y sus revisiones? Deja de contar para los cobros dobles.")) return;
+  await fetch("/api/seur/facturas/borrar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: fsActual.id }) });
+  await loadFacturasSeur("");
+  abrirFacturaSeur("");
+});
+document.getElementById("fs-excel").addEventListener("click", () => { if (fsActual) excelRevisionFacturaSeur(fsActual); });
+function excelRevisionFacturaSeur(f) {
+  const cobros = fsCobros();
+  const estados = { ok: "OK", reclamar: "Reclamar", reclamado: "Reclamado", abonado: "Abonado" };
+  const filas = f.lineas.map(l => {
+    const c = cotejarLineaFacturaSeur(l, f, cobros);
+    const r = (f.revisiones || {})[l.linea] || {};
+    const n = c.nuestro;
+    return {
+      "Línea": l.linea, "Fecha servicio": rfSeurFecha(l.fechaServicio), "Referencia": l.referencia, "Expedición": l.expedicion, "Destino": l.destino, "Servicio": l.servicio,
+      "Pedido": n ? n.pedido : "", "Cliente": n ? n.nombre : l.destinatario, "Lo que enviamos": n ? n.contenido : "",
+      "Bultos facturados": l.bultos, "Bultos nuestros": n && n.bultos != null ? n.bultos : "", "Kilos facturados": l.peso, "Kilos declarados": n && n.kilos != null ? n.kilos : "",
+      "Facturado sin IVA": l.importe, "Debe cobrar (Tarifas)": c.debe != null ? c.debe : "", "Diferencia (tarifa − cobrado)": c.dif != null ? -c.dif : "", "Tarifa del producto (devolución)": c.tarifaProducto != null ? c.tarifaProducto : "",
+      "Avisos": c.avisos.map(a => a.t).join(" · "), "Revisión": estados[r.estado] || "", "Nota": r.nota || "",
+    };
+  });
+  const ws = XLSX.utils.json_to_sheet(filas);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Revision " + f.id);
+  XLSX.writeFile(wb, "Revision_factura_SEUR_" + f.id + ".xlsx");
+}
+
+function reclamacionFacturaSeur(f, cobros) {
+  const r2 = v => Math.round(v * 100) / 100;
+  const filas = [];
+  let total = 0;
+  for (const l of f.lineas) {
+    const c = cotejarLineaFacturaSeur(l, f, cobros);
+    const doble = c.avisos.find(a => /^FACTURADO /.test(a.t));
+    let reclamar = 0, motivo = "";
+    if (doble) { reclamar = l.importe; motivo = doble.t.replace(/^FACTURADO/, "Facturado"); }
+    else if (c.dif != null && c.dif > 0.5 && !c.devolucion) { reclamar = c.dif; motivo = "Cobrado por encima de la tarifa acordada"; }
+    else if (c.devolucion && c.excesoDevolucion != null && c.excesoDevolucion > 0.5) { reclamar = c.excesoDevolucion; motivo = "Devolución cobrada por encima de la tarifa del producto (" + fmtPrecio(c.tarifaProducto) + ")"; }
+    if (!reclamar) continue;
+    total += reclamar;
+    filas.push({ l, c, doble, reclamar: r2(reclamar), motivo });
+  }
+  return { filas, total: r2(total) };
+}
+function pdfReclamacionFacturaSeur(f) {
+  const { filas, total } = reclamacionFacturaSeur(f, fsCobros());
+  if (!filas.length) { alert("En la factura " + f.id + " no hay envíos cobrados por encima de la tarifa ni facturados dos veces."); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: "landscape" });
+  doc.setFontSize(16);
+  doc.text("Reclamación factura SEUR " + f.id, 14, 16);
+  doc.setFontSize(11);
+  doc.text("GLOBAL HAPPY DEAL, S.L. · Factura de " + rfSeurFecha(f.fechaFactura) + " · " + filas.length + " envíos · Total a reclamar: " + fmtPrecio(total) + " (sin IVA)", 14, 23);
+  doc.autoTable({
+    head: [["Fecha", "Referencia", "Expedición", "Destino", "Bultos", "Kilos", "Facturado", "Debería ser", "A reclamar", "Motivo"]],
+    body: filas.map(x => [rfSeurFecha(x.l.fechaServicio), x.l.referencia || "", String(x.l.expedicion || ""), x.l.destino || "", String(x.l.bultos), String(x.l.peso).replace(".", ","),
+      fmtPrecio(x.l.importe), x.doble ? "0,00 €" : x.c.devolucion && x.c.tarifaProducto != null ? fmtPrecio(x.c.tarifaProducto) : (x.c.debe != null ? fmtPrecio(x.c.debe) : "—"), fmtPrecio(x.reclamar), x.motivo]),
+    foot: [["", "", "", "", "", "", "", "TOTAL", fmtPrecio(total), ""]],
+    startY: 28, theme: "grid",
+    styles: { fontSize: 9, cellPadding: 2, valign: "middle" },
+    headStyles: { fillColor: [185, 28, 28] }, footStyles: { fillColor: [254, 226, 226], textColor: [127, 29, 29], fontStyle: "bold" },
+    columnStyles: { 6: { halign: "right" }, 7: { halign: "right" }, 8: { halign: "right", fontStyle: "bold" }, 9: { cellWidth: 70 } },
+  });
+  doc.save("Reclamacion_SEUR_" + f.id + ".pdf");
+}
+function renderResumenMesFacturasSeur() {
+  const sel = document.getElementById("fs-mes");
+  const MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+  const meses = [...new Set(fsTodas.map(x => String(x.fechaFactura || "").slice(0, 7)).filter(Boolean))].sort().reverse();
+  const actual = sel.value;
+  sel.innerHTML = '<option value="">Todos los meses</option>' + meses.map(m => '<option value="' + m + '">' + MESES[Number(m.slice(5, 7)) - 1] + " " + m.slice(0, 4) + "</option>").join("");
+  if (meses.includes(actual)) sel.value = actual;
+  const mes = sel.value;
+  document.getElementById("fs-mes-reclamacion").style.display = mes ? "" : "none";
+  const cobros = fsCobros();
+  const lista = fsTodas.filter(x => !mes || String(x.fechaFactura || "").slice(0, 7) === mes).sort((a, b) => String(a.fechaFactura).localeCompare(String(b.fechaFactura)));
+  let totImp = 0, totRec = 0, totLin = 0, totRev = 0, totEnv = 0, totDif = 0, totFact = 0, totTar = 0;
+  const filas = lista.map(x => {
+    const imp = x.lineas.reduce((s, l) => s + (l.importe || 0), 0);
+    const rev = x.lineas.filter(l => ((x.revisiones || {})[l.linea] || {}).estado).length;
+    const rec = reclamacionFacturaSeur(x, cobros);
+    // Diferencia neta = lo que tenemos en Tarifas − lo cobrado (negativo = nos cobran de más), devoluciones con tarifa 0 (Jennifer, 2026-11-06).
+    let fact = 0, tar = 0, nCmp = 0;
+    for (const l of x.lineas) { const c = cotejarLineaFacturaSeur(l, x, cobros); if (c.debe != null) { fact += l.importe; tar += c.debe; nCmp++; } }
+    const dif = Math.round((tar - fact) * 100) / 100;
+    totImp += imp; totRec += rec.total; totLin += x.lineas.length; totRev += rev; totEnv += rec.filas.length; totDif += tar - fact; totFact += fact; totTar += tar;
+    const estado = rev === 0 ? "<span style='color:#b91c1c;font-weight:600'>Sin revisar</span>" : rev < x.lineas.length ? "<span style='color:#c2410c;font-weight:600'>En curso</span>" : "<span style='color:#15803d;font-weight:600'>✔ Revisada</span>";
+    return "<tr><td><strong>" + escapeAttr(x.id) + "</strong> · " + escapeAttr(rfSeurFecha(x.fechaFactura)) + "<div style='font-size:12px;color:var(--muted)'>" + x.lineas.length + " líneas · " + fmtPrecio(Math.round(imp * 100) / 100) + " sin IVA</div></td>" +
+      "<td>" + estado + " · " + rev + " de " + x.lineas.length + " envíos revisados <button type='button' class='secondary fs-mes-abrir' data-id='" + escapeAttr(x.id) + "' style='font-size:12px;padding:2px 10px'>Abrir</button> <button type='button' class='secondary fs-mes-excel' data-id='" + escapeAttr(x.id) + "' style='font-size:12px;padding:2px 10px'>📥 Descargar Excel</button></td>" +
+      "<td>" + (rec.filas.length ? "<button type='button' class='fs-mes-pdf' data-id='" + escapeAttr(x.id) + "' style='font-size:12px;padding:2px 10px;background:#b91c1c;border-color:#b91c1c;color:#fff'>📄 PDF</button> " + rec.filas.length + " envíos · " + fmtPrecio(rec.total) + " a reclamar" : "<span style='color:#15803d'>Nada que reclamar</span>") + "</td>" +
+      "<td style='text-align:right'><strong style='font-size:15px;color:" + (dif < 0 ? "#b91c1c" : "#15803d") + "'>" + (dif > 0 ? "+" : "") + fmtPrecio(dif) + "</strong><div style='font-size:11px;color:var(--muted)'>" + (dif < 0 ? "nos cobran MÁS que la tarifa" : dif > 0 ? "nos cobran MENOS que la tarifa" : "igual que la tarifa") + "<br>cobrado " + fmtPrecio(Math.round(fact * 100) / 100) + " / tarifa " + fmtPrecio(Math.round(tar * 100) / 100) + " (" + nCmp + " líneas)</div></td></tr>";
+  });
+  const r2 = v => Math.round(v * 100) / 100;
+  document.querySelector("#fs-mes-table tbody").innerHTML = filas.join("") + (lista.length > 1 || mes
+    ? "<tr style='background:var(--bg, #f3f4f6);font-weight:700'><td>TOTAL " + (mes ? MESES[Number(mes.slice(5, 7)) - 1].toUpperCase() + " " + mes.slice(0, 4) : "") + " · " + lista.length + " facturas · " + fmtPrecio(r2(totImp)) + "</td><td>" + totRev + " de " + totLin + " envíos revisados</td><td>" + totEnv + " envíos · " + fmtPrecio(r2(totRec)) + " a reclamar</td><td style='text-align:right'><span style='font-size:15px;color:" + (totDif < 0 ? "#b91c1c" : "#15803d") + "'>" + (totDif > 0 ? "+" : "") + fmtPrecio(r2(totDif)) + "</span><div style='font-size:11px;font-weight:400;color:var(--muted)'>" + (totDif < 0 ? "nos cobran MÁS" : "nos cobran MENOS") + " · cobrado " + fmtPrecio(r2(totFact)) + " / tarifa " + fmtPrecio(r2(totTar)) + "</div></td></tr>" : "")
+    || "<tr><td colspan='4' style='text-align:center;color:var(--muted)'>Todavía no hay facturas subidas.</td></tr>";
+}
+document.getElementById("fs-mes").addEventListener("change", renderResumenMesFacturasSeur);
+// Todas las reclamaciones de un mes en un solo PDF (Jennifer, 2026-11-06).
+document.getElementById("fs-mes-reclamacion").addEventListener("click", () => {
+  const mes = document.getElementById("fs-mes").value;
+  if (!mes) return;
+  const MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+  const nombreMes = MESES[Number(mes.slice(5, 7)) - 1] + " " + mes.slice(0, 4);
+  const cobros = fsCobros();
+  const facturas = fsTodas.filter(x => String(x.fechaFactura || "").slice(0, 7) === mes).sort((a, b) => String(a.fechaFactura).localeCompare(String(b.fechaFactura)));
+  const bloques = facturas.map(x => ({ f: x, ...reclamacionFacturaSeur(x, cobros) })).filter(b => b.filas.length);
+  if (!bloques.length) { alert("En las facturas de " + nombreMes + " no hay nada que reclamar."); return; }
+  const r2 = v => Math.round(v * 100) / 100;
+  const total = r2(bloques.reduce((s, b) => s + b.total, 0));
+  const nEnvios = bloques.reduce((s, b) => s + b.filas.length, 0);
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: "landscape" });
+  doc.setFontSize(16);
+  doc.text("Reclamación SEUR · " + nombreMes, 14, 16);
+  doc.setFontSize(11);
+  doc.text("GLOBAL HAPPY DEAL, S.L. · " + bloques.length + " factura(s) · " + nEnvios + " envíos · Total a reclamar: " + fmtPrecio(total) + " (sin IVA)", 14, 23);
+  const body = [];
+  for (const b of bloques) {
+    body.push([{ content: "Factura " + b.f.id + " · " + rfSeurFecha(b.f.fechaFactura) + " · " + b.filas.length + " envíos · " + fmtPrecio(b.total), colSpan: 10, styles: { fillColor: [254, 226, 226], textColor: [127, 29, 29], fontStyle: "bold" } }]);
+    for (const x of b.filas) body.push([rfSeurFecha(x.l.fechaServicio), x.l.referencia || "", String(x.l.expedicion || ""), x.l.destino || "", String(x.l.bultos), String(x.l.peso).replace(".", ","),
+      fmtPrecio(x.l.importe), x.doble ? "0,00 €" : x.c.devolucion && x.c.tarifaProducto != null ? fmtPrecio(x.c.tarifaProducto) : (x.c.debe != null ? fmtPrecio(x.c.debe) : "—"), fmtPrecio(x.reclamar), x.motivo]);
+  }
+  doc.autoTable({
+    head: [["Fecha", "Referencia", "Expedición", "Destino", "Bultos", "Kilos", "Facturado", "Debería ser", "A reclamar", "Motivo"]],
+    body,
+    foot: [["", "", "", "", "", "", "", "TOTAL " + nombreMes.toUpperCase(), fmtPrecio(total), ""]],
+    startY: 28, theme: "grid",
+    styles: { fontSize: 9, cellPadding: 2, valign: "middle" },
+    headStyles: { fillColor: [185, 28, 28] }, footStyles: { fillColor: [254, 226, 226], textColor: [127, 29, 29], fontStyle: "bold" },
+    columnStyles: { 6: { halign: "right" }, 7: { halign: "right" }, 8: { halign: "right", fontStyle: "bold" }, 9: { cellWidth: 70 } },
+  });
+  doc.save("Reclamacion_SEUR_" + mes + ".pdf");
+});
+document.getElementById("fs-mes-table").addEventListener("click", ev => {
+  const ab = ev.target.closest(".fs-mes-abrir");
+  const pdf = ev.target.closest(".fs-mes-pdf");
+  const xls = ev.target.closest(".fs-mes-excel");
+  if (xls) { const x = fsTodas.find(y => y.id === xls.dataset.id); if (x) excelRevisionFacturaSeur(x); }
+  if (ab) { document.getElementById("fs-select").value = ab.dataset.id; abrirFacturaSeur(ab.dataset.id); document.getElementById("fs-resumen").scrollIntoView({ behavior: "smooth", block: "start" }); }
+  if (pdf) { const x = fsTodas.find(y => y.id === pdf.dataset.id); if (x) pdfReclamacionFacturaSeur(x); }
+});
+// Documento de reclamación (Jennifer, 2026-11-06): todos los envíos de la
+// factura que SEUR cobra por encima de nuestra estimación (Tarifas) o que
+// ya se cobraron en otra factura.
+document.getElementById("fs-reclamacion").addEventListener("click", () => { if (fsActual) pdfReclamacionFacturaSeur(fsActual); });
+
+async function loadReclamacionesSeur() {
+  await loadOrders();
+  renderReclamacionesSeur();
+}
+function renderReclamacionesSeur() {
+  const todos = casosReclamacionSeur();
+  const verCerrados = document.getElementById("reclamaciones-seur-cerradas").checked;
+  const abiertos = todos.filter(c => !c.cerradoMano);
+  // Búsqueda (Jennifer, 2026-10-28): nº de caso, referencia, cliente,
+  // plataforma, expedición, motivo, notas o nº de factura. Si busca algo,
+  // también mira en los cerrados.
+  const q = document.getElementById("reclamaciones-seur-buscar").value.trim().toLowerCase();
+  const textoCaso = c => [c.numero, c.ref, c.info.refSeur, c.o.name, c.o.platform || "Shopify", refLabel(c.o), c.expedicion, c.envio, c.motivo,
+    (c.info.notasCaso || {})[c.clave], ((c.info.facturasReclamacion || {})[c.clave] || {}).numero].filter(Boolean).join(" ").toLowerCase();
+  const lista = q ? todos.filter(c => textoCaso(c).includes(q)) : verCerrados ? todos : abiertos;
+  document.getElementById("reclamaciones-seur-count").textContent = abiertos.length + " caso(s) abiertos" + (todos.length > abiertos.length ? " · " + (todos.length - abiertos.length) + " cerrados" : "");
+  if (q) document.getElementById("reclamaciones-seur-count").textContent = lista.length + " caso(s) encontrados";
+  document.querySelector("#reclamaciones-seur-table tbody").innerHTML = lista.length ? lista.map((c, i) => {
+    const estado = c.cerradoMano ? '<span class="badge" style="background:#e5e7eb;color:#374151">Cerrado ' + new Date(c.cerradoMano).toLocaleDateString("es-ES") + "</span>"
+      : c.resuelto ? '<span class="badge" style="background:#dcfce7;color:#166534">SEUR dice resuelta ' + new Date(c.resuelto).toLocaleDateString("es-ES") + "</span>"
+      : '<span class="badge" style="background:#fef3c7;color:#92400e">Abierto</span>';
+    return "<tr>"
+      + "<td><strong>" + escapeAttr(c.numero) + "</strong></td>"
+      + "<td>" + (c.fecha ? new Date(c.fecha).toLocaleDateString("es-ES") : "") + plazoDocumentacionSeur(c) + enlacesCasoSeur(c) + "</td>"
+      + "<td>" + escapeAttr(c.ref) + "</td>"
+      + "<td>" + escapeAttr(c.o.platform || "Shopify") + "</td>"
+      + "<td>" + escapeAttr(c.o.name || "") + "</td>"
+      + "<td>" + escapeAttr(c.expedicion) + (c.envio && c.envio !== c.expedicion ? '<br><small>Envío en el caso: ' + escapeAttr(c.envio) + "</small>" : "") + (c.estadoSeur ? '<br><small style="color:var(--muted)">' + escapeAttr(c.estadoSeur) + "</small>" : "") + "</td>"
+      + '<td style="max-width:360px;white-space:pre-wrap;font-size:12px">' + escapeAttr(c.motivo.slice(0, 400)) + archivosCasoSeur(c, i) + "</td>"
+      + "<td>" + estado + respuestasCasoSeur(c, i) + "</td>"
+      + "<td>" + textoIndemnizacion((c.info.indemnizaciones || {})[c.clave]) + textoFacturaReclamacion(c) + portesCasoHtml(c) + "</td>"
+      + '<td><textarea class="recl-seur-nota" data-i="' + i + '" rows="3" style="width:100%;min-width:240px;resize:vertical" placeholder="Notas...">' + escapeAttr((c.info.notasCaso || {})[c.clave] || "") + "</textarea></td>"
+      + '<td><button type="button" class="secondary recl-seur-indem" data-i="' + i + '">💶 INDEMNIZACIÓN</button> '
+      + '<button type="button" class="secondary recl-seur-factura" data-i="' + i + '" title="Factura con lo que pagó el cliente, en el formato de las facturas BEZEN">📄 Factura'
+      + ((c.info.facturasReclamacion || {})[c.clave] ? " " + escapeAttr(c.info.facturasReclamacion[c.clave].numero) : "") + "</button> "
+      + '<button type="button" class="secondary recl-seur-ver" data-i="' + i + '">💬 Ver conversación</button> '
+      + '<button type="button" class="secondary recl-seur-cerrar" data-i="' + i + '">' + (c.cerradoMano ? "Reabrir" : "Cerrar caso") + "</button></td>"
+      + "</tr>";
+  }).join("") : '<tr><td colspan="11" style="color:var(--muted)">' + (q ? 'No hay ningún caso que coincida con la búsqueda.' : 'No hay casos de reclamación abiertos con SEUR.') + '</td></tr>';
+  document.querySelectorAll(".recl-seur-archivos").forEach(inp => inp.addEventListener("change", async () => {
+    const c = lista[Number(inp.dataset.i)];
+    const files = [...inp.files];
+    if (!c || !files.length) return;
+    try {
+      const agregar = [];
+      for (const f of files) {
+        const blob = await reducirImagenSeur(f);
+        if (blob.size > 1300000) { alert(f.name + " pesa demasiado (máx. 1,3 MB)."); continue; }
+        agregar.push({ id: await subirArchivoSeur(blob, f.name), nombre: f.name, fecha: new Date().toISOString(), usuario: currentUser || "" });
+      }
+      if (agregar.length) await guardarArchivosCasoSeur(c, agregar);
+      renderReclamacionesSeur();
+    } catch (err) { alert(err.message || "No se han podido subir los archivos."); }
+  }));
+  document.querySelectorAll(".recl-seur-portes").forEach(btn => btn.addEventListener("click", async () => {
+    const c = lista.find(x => String(x.clave) === btn.dataset.clave && x.ref === btn.dataset.ref);
+    if (!c) return;
+    const cobrado = btn.dataset.cobrado === "1";
+    let importe = null;
+    if (cobrado) {
+      const txt = prompt("Portes cobrados del caso " + c.numero + ". Importe abonado por SEUR (€, opcional):", "");
+      if (txt === null) return;
+      importe = Number(txt.replace(/\\./g, "").replace(",", ".")) || null;
+    } else if (!confirm("¿Quitar la marca de portes cobrados del caso " + c.numero + "?")) return;
+    const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ orderId: c.o.id, ref: c.ref, portesCobrados: { clave: c.clave, cobrado, importe, usuario: currentUser || "" } }) });
+    if (!res.ok) { alert("No se ha podido guardar (" + res.status + ")."); return; }
+    const d = await res.json().catch(() => ({}));
+    if (d.info) c.o.enviosSeurInfo[c.ref] = d.info;
+    renderReclamacionesSeur();
+  }));
+  document.querySelectorAll(".recl-seur-doc").forEach(btn => btn.addEventListener("click", async () => {
+    const c = lista.find(x => String(x.clave) === btn.dataset.clave && x.ref === btn.dataset.ref);
+    if (!c) return;
+    const subida = btn.dataset.subida === "1";
+    if (!confirm(subida ? "¿Confirmas que ya has subido la documentación del caso " + c.numero + " en SEUR?" : "¿Quitar la marca de documentación subida del caso " + c.numero + "?")) return;
+    if (await marcarDocumentacionSeur(c.o, c.ref, c.clave, subida)) { renderReclamacionesSeur(); revisarAvisosDocumentacionSeur(); }
+  }));
+  document.querySelectorAll(".recl-seur-ver-link").forEach(a => a.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    const c = lista[Number(a.dataset.i)];
+    abrirCorreoSeur({ orderId: c.o.id, ref: c.ref, nombre: c.o.name, pais: c.o.countryCode, numeroExpedicion: c.expedicion, estadoSeur: c.estadoSeur, correo: c.info.correo, correoNoLeidos: 0 });
+  }));
+  // Notas de cada caso (Jennifer, 2026-10-28). Se guardan al salir del cuadro.
+  document.querySelectorAll(".recl-seur-nota").forEach(ta => {
+    ta.addEventListener("focus", () => { editing = true; });
+    ta.addEventListener("blur", async () => {
+      editing = false;
+      const c = lista[Number(ta.dataset.i)];
+      if (ta.value === ((c.info.notasCaso || {})[c.clave] || "")) return;
+      const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: c.o.id, ref: c.ref, notaCaso: { clave: c.clave, texto: ta.value } }) });
+      if (!res.ok) { alert("No se ha podido guardar la nota (" + res.status + ")."); return; }
+      c.info.notasCaso = { ...(c.info.notasCaso || {}), [c.clave]: ta.value };
+    });
+  });
+  document.querySelectorAll(".recl-seur-indem").forEach(btn => btn.addEventListener("click", () => abrirIndemnizacion(lista[Number(btn.dataset.i)])));
+  document.querySelectorAll(".recl-seur-factura").forEach(btn => btn.addEventListener("click", async () => {
+    const c = lista[Number(btn.dataset.i)];
+    if (await generarFacturaReclamacion(c) != null) renderReclamacionesSeur();
+  }));
+  document.querySelectorAll(".recl-seur-ver").forEach(btn => btn.addEventListener("click", () => {
+    const c = lista[Number(btn.dataset.i)];
+    abrirCorreoSeur({ orderId: c.o.id, ref: c.ref, nombre: c.o.name, pais: c.o.countryCode, numeroExpedicion: c.expedicion, estadoSeur: c.estadoSeur, correo: c.info.correo, correoNoLeidos: 0 });
+  }));
+  document.querySelectorAll(".recl-seur-cerrar").forEach(btn => btn.addEventListener("click", async () => {
+    const c = lista[Number(btn.dataset.i)];
+    const cerrar = !c.cerradoMano;
+    if (!confirm((cerrar ? "¿Cerrar" : "¿Reabrir") + " el caso " + c.numero + " de " + c.ref + "?")) return;
+    const res = await fetch("/api/seur/envios/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: c.o.id, ref: c.ref, casoCerrado: { numero: c.clave, cerrado: cerrar } }) });
+    if (!res.ok) { alert("No se ha podido guardar."); return; }
+    await loadReclamacionesSeur();
+  }));
+}
+document.getElementById("reclamaciones-seur-cerradas").addEventListener("change", renderReclamacionesSeur);
+document.getElementById("reclamaciones-seur-buscar").addEventListener("input", renderReclamacionesSeur);
+document.getElementById("reclamaciones-seur-actualizar").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const d = await fetch("/api/seur/correos/actualizar", { method: "POST" }).then(r => r.json()).catch(() => ({}));
+    if (!d.ok) alert("No se han podido leer los correos de SEUR" + (d.error ? ": " + d.error : "."));
+    await loadReclamacionesSeur();
+  } finally { btn.disabled = false; }
+});
+
+// Pendiente de devolución a fábrica (Jennifer, 2026-10-28): en las
+// reposiciones por Furniture, la pieza dañada que retiran casi siempre se
+// devuelve a la fábrica. Salen solas de las reposiciones de tapicería por
+// Furniture (salvo que al crearla se dijera que no hay que devolver nada) y
+// de las de colchón con recogida "vuelve a instalaciones"; el seguimiento se
+// guarda en el pendiente (devolucionFabrica). También se pueden añadir a
+// mano (p. ej. mercancía que el cliente rechaza), guardadas aparte.
+// "Devuelto al almacén" es lo mismo que devuelto a fábrica (Jennifer,
+// 2026-10-28): un solo estado; el antiguo "almacen" cuenta como devuelto.
+const DEVFAB_ESTADOS = { recoger: "🚚 Furniture tiene que recogerla", devuelta: "📦 Devuelto al almacén", "no-devolver": "✖ No hay que devolver" };
+const DEVFAB_MOTIVOS = { incidencia: "Incidencia", rechazo: "Rechazo del cliente", otro: "Otro" };
+let devolucionesFabricaManual = [];
+function esDevolucionFabrica(b) {
+  if (!b.reposicion || b.revisionMontaje || b.estado === "cancelado" || b.tipo === "servicio") return false;
+  if (b.agenciaReposicion && b.agenciaReposicion !== "FURNITURE") return false;
+  if (b.devolucionFabrica) return true;
+  if (b.tipo === "colchon") return !!b.recogida && b.recogidaDestino !== "desechar";
+  return b.tipo === "tapiceria";
+}
+// Filas de la lista: reposiciones + añadidas a mano, con los mismos campos.
+function filasDevolucionFabrica() {
+  const fecha = iso => iso ? new Date(iso).toLocaleDateString("es-ES") : "";
+  const deReposicion = backorders.filter(esDevolucionFabrica).map(b => {
+    const o = allOrders.find(x => String(x.id) === String(b.orderId)) || {};
+    const df = b.devolucionFabrica || {};
+    const carga = b.cargaId && allCargas.find(c => c.id === b.cargaId);
+    return {
+      key: "b:" + b.id, ref: refLabel(b) + (b.refSuffix || ""), fecha: b.fecha, cliente: o.name || "", ciudad: o.city || "",
+      pieza: df.que || b.piezaTexto || (b.stockModel + " " + (b.talla || "")), proveedor: b.proveedor || "", df,
+      motivo: DEVFAB_MOTIVOS[df.motivo || "incidencia"] + " · reposición",
+      repo: b.estado === "servido" ? "✅ Entregada" + (b.fechaServido ? " " + fecha(b.fechaServido) : "")
+        : carga ? "🚛 En la carga de Furniture del " + fechaCortaEs(carga.fecha) : b.cargaId ? "🚛 En una carga de Furniture" : "⏳ Pendiente de salir",
+    };
+  });
+  const aMano = devolucionesFabricaManual.filter(m => !m.borrado).map(m => {
+    const o = allOrders.find(x => refLabel(x).toUpperCase() === String(m.ref || "").toUpperCase() || String(x.orderRef || "").toUpperCase() === String(m.ref || "").toUpperCase()) || {};
+    return { key: "m:" + m.id, ref: m.ref || "", fecha: m.creado, cliente: m.cliente || o.name || "", ciudad: o.city || "", pieza: m.que || "", proveedor: m.proveedor || "",
+      df: m, motivo: DEVFAB_MOTIVOS[m.motivo] || m.motivo || "", repo: "✍ Añadida a mano" + (m.creadoPor ? " (" + m.creadoPor + ")" : ""), manual: true };
+  });
+  return deReposicion.concat(aMano).sort((a, b) => String(b.fecha || "").localeCompare(String(a.fecha || "")));
+}
+async function loadDevolucionesFabrica() {
+  try {
+    const [bo, man] = await Promise.all([fetch("/api/inventario/pendientes").then(r => r.json()), fetch("/api/devoluciones-fabrica").then(r => r.json())]);
+    backorders = bo;
+    devolucionesFabricaManual = Array.isArray(man) ? man : [];
+  } catch (e) { return; }
+  if (!allOrders.length) await loadOrders();
+  const provs = [...new Set(filasDevolucionFabrica().map(f => f.proveedor || "Sin fábrica"))].sort();
+  const sel = document.getElementById("devfab-proveedor");
+  const actual = sel.value;
+  sel.innerHTML = '<option value="">Todas las fábricas</option>' + provs.map(p => '<option value="' + escapeAttr(p) + '">' + escapeAttr(p) + "</option>").join("");
+  sel.value = provs.includes(actual) ? actual : "";
+  renderDevolucionesFabrica();
+}
+function renderDevolucionesFabrica() {
+  const filtro = document.getElementById("devfab-estado").value;
+  const prov = document.getElementById("devfab-proveedor").value;
+  const q = document.getElementById("devfab-search").value.trim().toLowerCase();
+  const todas = filasDevolucionFabrica();
+  const est = f => (f.df.estado === "almacen" ? "devuelta" : f.df.estado) || "recoger";
+  const lista = todas.filter(f => {
+    if (filtro === "activas" && (est(f) === "devuelta" || est(f) === "no-devolver")) return false;
+    if (!["activas", "todas"].includes(filtro) && est(f) !== filtro) return false;
+    if (prov && (f.proveedor || "Sin fábrica") !== prov) return false;
+    if (q && ![f.ref, f.cliente, f.pieza, f.motivo, f.df.nota].filter(Boolean).join(" ").toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const pendientes = todas.filter(f => !["devuelta", "no-devolver"].includes(est(f))).length;
+  document.getElementById("devfab-count").textContent = lista.length + " pieza(s) en la lista · " + pendientes + " pendiente(s) de devolver";
+  const fecha = iso => iso ? new Date(iso).toLocaleDateString("es-ES") : "";
+  document.querySelector("#devfab-table tbody").innerHTML = lista.length ? lista.map(f => {
+    const e = est(f);
+    const color = e === "devuelta" ? "#dcfce7;color:#166534" : e === "no-devolver" ? "#e5e7eb;color:#374151" : "#fef3c7;color:#92400e";
+    const historial = (f.df.historial || []).map(h => fecha(h.fecha) + " " + (DEVFAB_ESTADOS[h.estado] || h.estado) + (h.usuario ? " (" + h.usuario + ")" : "")).join("\\n");
+    const botones = Object.keys(DEVFAB_ESTADOS).filter(k => k !== e).map(k => '<button type="button" class="secondary devfab-estado-btn" data-key="' + escapeAttr(f.key) + '" data-estado="' + k + '" style="padding:2px 6px;font-size:11px;margin:2px 2px 0 0">' + DEVFAB_ESTADOS[k] + "</button>").join("");
+    return "<tr>"
+      + "<td><strong>" + escapeAttr(f.ref) + "</strong><br><small>" + fecha(f.fecha) + "</small></td>"
+      + "<td>" + escapeAttr(f.cliente) + (f.ciudad ? "<br><small>" + escapeAttr(f.ciudad) + "</small>" : "") + "</td>"
+      + '<td style="max-width:280px">' + escapeAttr(f.pieza) + '<br><small style="color:var(--muted)">' + escapeAttr(f.motivo) + "</small></td>"
+      + "<td>" + escapeAttr(f.proveedor || "—") + "</td>"
+      + "<td>" + escapeAttr(f.repo) + "</td>"
+      + '<td><span class="badge" style="background:' + color + '" title="' + escapeAttr(historial) + '">' + DEVFAB_ESTADOS[e] + "</span>"
+      + (f.df.fecha ? '<br><small style="color:var(--muted)">' + fecha(f.df.fecha) + (f.df.usuario ? " · " + escapeAttr(f.df.usuario) : "") + "</small>" : "") + "<br>" + botones + "</td>"
+      + '<td><textarea class="devfab-nota" data-key="' + escapeAttr(f.key) + '" rows="2" style="width:100%;min-width:200px;resize:vertical" placeholder="Nota (nº de recogida, albarán de devolución...)">' + escapeAttr(f.df.nota || "") + "</textarea></td>"
+      + "<td>" + (f.manual ? '<button type="button" class="secondary devfab-borrar-btn" data-key="' + escapeAttr(f.key) + '" style="padding:2px 6px;font-size:11px">Quitar</button>' : "") + "</td></tr>";
+  }).join("") : '<tr><td colspan="8" style="color:var(--muted)">No hay piezas con este filtro.</td></tr>';
+}
+async function guardarDevolucionFabrica(key, cambios) {
+  const [tipo, id] = [key.slice(0, 1), key.slice(2)];
+  const actual = tipo === "b" ? backorders.find(x => x.id === id) : devolucionesFabricaManual.find(x => x.id === id);
+  if (!actual) return false;
+  const previo = tipo === "b" ? (actual.devolucionFabrica || {}) : actual;
+  const extra = {};
+  if (cambios.estado && cambios.estado !== (previo.estado || "recoger")) {
+    extra.fecha = new Date().toISOString();
+    extra.usuario = currentUser || null;
+    extra.historial = [...(previo.historial || []), { estado: cambios.estado, fecha: extra.fecha, usuario: currentUser || null }];
+  }
+  if (tipo === "b") {
+    const nuevo = { ...previo, ...cambios, ...extra };
+    const res = await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, devolucionFabrica: nuevo }) });
+    if (!res.ok) { alert("No se ha podido guardar (" + res.status + ")."); return false; }
+    actual.devolucionFabrica = nuevo;
+    return true;
+  }
+  const res = await fetch("/api/devoluciones-fabrica/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, ...cambios, ...extra }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { alert(d.error || "No se ha podido guardar (" + res.status + ")."); return false; }
+  Object.assign(actual, d.entrada);
+  return true;
+}
+document.getElementById("devfab-estado").addEventListener("change", renderDevolucionesFabrica);
+document.getElementById("devfab-proveedor").addEventListener("change", renderDevolucionesFabrica);
+document.getElementById("devfab-search").addEventListener("input", renderDevolucionesFabrica);
+// Añadir a mano (Jennifer, 2026-10-28: "en ocasiones también hay que subir
+// cosas que quizá un cliente rechace la mercancía").
+document.getElementById("devfab-anadir").addEventListener("click", async () => {
+  const ref = prompt("Referencia del pedido (ej. BEZEN12174 o 10002247570-A):");
+  if (!ref || !ref.trim()) return;
+  const que = prompt("¿Qué hay que devolver a la fábrica? (ej. CANAPÉ POLIPIEL 150X190 Negro)");
+  if (!que || !que.trim()) return;
+  const o = allOrders.find(x => refLabel(x).toUpperCase() === ref.trim().toUpperCase() || String(x.orderRef || "").toUpperCase() === ref.trim().toUpperCase());
+  const proveedor = prompt("¿A qué fábrica? (POLIVAL, LUSO, NEW...)", "POLIVAL");
+  if (proveedor === null) return;
+  const m = prompt("Motivo:\\n1. Incidencia\\n2. Rechazo del cliente\\n3. Otro\\n\\nEscribe el número:", "2");
+  if (m === null) return;
+  const motivo = ["incidencia", "rechazo", "otro"][Number(m) - 1] || "otro";
+  const ahora = new Date().toISOString();
+  const res = await fetch("/api/devoluciones-fabrica/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+    ref: ref.trim().toUpperCase(), que: que.trim().toUpperCase(), proveedor: proveedor.trim().toUpperCase(), motivo, cliente: o ? o.name || "" : "",
+    estado: "recoger", fecha: ahora, usuario: currentUser || null, creadoPor: currentUser || null, historial: [{ estado: "recoger", fecha: ahora, usuario: currentUser || null }] }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { alert(d.error || "No se ha podido guardar."); return; }
+  loadDevolucionesFabrica();
+});
+document.querySelector("#devfab-table tbody").addEventListener("click", async (e) => {
+  const borrar = e.target.closest(".devfab-borrar-btn");
+  if (borrar) {
+    if (!confirm("¿Quitar esta devolución de la lista?")) return;
+    if (await guardarDevolucionFabrica(borrar.dataset.key, { borrado: true })) renderDevolucionesFabrica();
+    return;
+  }
+  const btn = e.target.closest(".devfab-estado-btn");
+  if (!btn) return;
+  btn.disabled = true;
+  if (await guardarDevolucionFabrica(btn.dataset.key, { estado: btn.dataset.estado })) renderDevolucionesFabrica();
+  else btn.disabled = false;
+});
+document.querySelector("#devfab-table tbody").addEventListener("focusin", (e) => { if (e.target.closest(".devfab-nota")) editing = true; });
+document.querySelector("#devfab-table tbody").addEventListener("focusout", async (e) => {
+  const ta = e.target.closest(".devfab-nota");
+  if (!ta) return;
+  editing = false;
+  const f = filasDevolucionFabrica().find(x => x.key === ta.dataset.key);
+  if (!f || ta.value === (f.df.nota || "")) return;
+  await guardarDevolucionFabrica(ta.dataset.key, { nota: ta.value });
+});
+
 async function abrirCorreoSeur(e) {
   correoSeurAbierto = e;
   document.getElementById("seur-correo-texto").value = "";
+  limpiarFotosSeur();
   pintarCorreoSeur();
   document.getElementById("seur-correo-overlay").classList.add("open");
   if (e.correoNoLeidos) {
@@ -8824,16 +14870,79 @@ async function abrirCorreoSeur(e) {
   }
 }
 document.getElementById("seur-correo-cerrar").addEventListener("click", () => document.getElementById("seur-correo-overlay").classList.remove("open"));
+// Fotos para SEUR (Jennifer, 2026-10-23): hasta 10; las imágenes se reducen
+// a 1600 px en JPEG para que el correo no pese demasiado.
+let fotosSeur = [];
+function limpiarFotosSeur() {
+  fotosSeur = [];
+  document.getElementById("seur-correo-fotos").value = "";
+  document.getElementById("seur-correo-fotos-lista").textContent = "";
+}
+function reducirImagenSeur(file) {
+  return new Promise((resolve) => {
+    if (!/^image\\//.test(file.type)) { resolve(file); return; }
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k);
+      c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      c.toBlob(b => resolve(b ? new File([b], file.name.replace(/\\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" }) : file), "image/jpeg", 0.8);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+    img.src = url;
+  });
+}
+document.getElementById("seur-correo-fotos").addEventListener("change", async (ev) => {
+  const nuevas = [...ev.target.files];
+  ev.target.value = "";
+  for (const f of nuevas) {
+    if (fotosSeur.length >= 10) { alert("Máximo 10 adjuntos por mensaje."); break; }
+    const r = await reducirImagenSeur(f);
+    if (r.size > 1300000) { alert("«" + f.name + "» pesa demasiado (máx. 1,3 MB)."); continue; }
+    fotosSeur.push(r);
+  }
+  document.getElementById("seur-correo-fotos-lista").innerHTML = fotosSeur.length
+    ? fotosSeur.map((f, i) => escapeAttr(f.name) + ' <a href="#" data-quitar-foto-seur="' + i + '" title="Quitar">✕</a>').join(" · ")
+    : "";
+});
+document.getElementById("seur-correo-fotos-lista").addEventListener("click", (ev) => {
+  const a = ev.target.closest("[data-quitar-foto-seur]");
+  if (!a) return;
+  ev.preventDefault();
+  fotosSeur.splice(Number(a.dataset.quitarFotoSeur), 1);
+  document.getElementById("seur-correo-fotos-lista").innerHTML = fotosSeur.map((f, i) => escapeAttr(f.name) + ' <a href="#" data-quitar-foto-seur="' + i + '" title="Quitar">✕</a>').join(" · ");
+});
+async function subirFotosSeur() {
+  const ids = [];
+  for (const f of fotosSeur) {
+    const base64 = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result).split(",")[1] || "");
+      fr.onerror = () => reject(new Error("No se pudo leer " + f.name));
+      fr.readAsDataURL(f);
+    });
+    const res = await fetch("/api/seur/factura", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nombre: f.name, tipo: f.type || "application/octet-stream", base64 }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || !d.ok) throw new Error(d.error || "No se pudo subir " + f.name);
+    ids.push(d.id);
+  }
+  return ids;
+}
 document.getElementById("seur-correo-enviar").addEventListener("click", async () => {
   const e = correoSeurAbierto;
   const texto = document.getElementById("seur-correo-texto").value.trim();
   if (!e || !texto) { alert("Escribe el mensaje para SEUR."); return; }
   const primera = !(e.correo && e.correo.mensajes && e.correo.mensajes.length);
-  if (!confirm((primera ? "¿Enviar este email a SEUR" : "¿Responder a SEUR") + " por el envío " + e.ref + "?")) return;
+  if (!confirm((primera ? "¿Enviar este email a SEUR" : "¿Responder a SEUR") + " por el envío " + e.ref + (fotosSeur.length ? " con " + fotosSeur.length + " adjunto(s)" : "") + "?")) return;
   const btn = document.getElementById("seur-correo-enviar");
   btn.disabled = true;
   try {
-    const res = await fetch(primera ? "/api/seur/envios/escribir" : "/api/seur/envios/responder", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, texto }) });
+    const adjuntos = fotosSeur.length ? await subirFotosSeur() : [];
+    const res = await fetch(primera ? "/api/seur/envios/escribir" : "/api/seur/envios/responder", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: e.orderId, ref: e.ref, texto, adjuntos }) });
     const d = await res.json().catch(() => ({}));
     if (!d.ok) {
       alert("No se ha podido enviar: " + (d.error === "script_sin_actualizar" || /no_json/.test(d.error || "") ? "falta actualizar el script de Google (Aviso almacén) a la versión nueva." : (d.error || res.status)));
@@ -8958,7 +15067,7 @@ function renderHistorialCargas(cargas) {
 
   document.querySelectorAll("#historial-cargas-list .item-recibido-check").forEach(chk => {
     chk.addEventListener("change", async () => {
-      await fetch("/api/inventario/pendientes/" + encodeURIComponent(chk.dataset.id) + "/resolver", { method: "POST" });
+      await fetch("/api/inventario/pendientes/" + encodeURIComponent(chk.dataset.id) + "/resolver", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ recibido: chk.checked }) });
       const b = backorders.find(x => x.id === chk.dataset.id);
       if (b) b.recibidoFabrica = chk.checked;
     });
@@ -8986,13 +15095,22 @@ function formatSeurCargaTitulo(carga) {
   return "Carga " + carga.dia + " · " + fecha.toLocaleDateString("es-ES");
 }
 
-function seurOrderRowCells(o, refSuffix) {
+// Unidades a la vista en las cargas de SEUR (Jennifer, 2026-11-04,
+// MP9992630700309041-A: "este pedido es de dos unidades, pero en el sistema
+// de SEUR no veo cuántas unidades has metido"). Con b (colchón preparado
+// desde Luso/New) se ve lo que sale en ESE envío; sin b, las del pedido.
+function unidadesSeurBadge(o, b) {
+  const n = b ? Number(b.cantidad) || 1 : ((o.items || []).reduce((s, i) => s + (Number(i.qty) || 1), 0) || Number(o.qty) || 1);
+  return ' <span class="badge" style="background:' + (n > 1 ? "#dc2626" : "#6b7280") + ';color:#fff;white-space:nowrap">' + (n > 1 ? n + " UNIDADES" : "1 unidad") + '</span>';
+}
+function seurOrderRowCells(o, refSuffix, b) {
+  const producto = b && b.stockModel ? escapeAttr((Number(b.cantidad) || 1) + "x " + b.stockModel + " (" + (b.talla || "") + ")") : o.product;
   return \`
     <td>\${refLabel(o)}\${refSuffix || ""}\${valdemoroTag(o)}</td>
     <td>\${o.name}</td>
     <td>\${o.furnitureAddress || o.address || ""}\${direccionButton(o)}</td>
     <td>\${o.phone}</td>
-    <td>\${o.product}\${cambiosPedidoHtml(o)}</td>
+    <td>\${producto}\${unidadesSeurBadge(o, b)}\${cambiosPedidoHtml(o)}</td>
   \`;
 }
 
@@ -9123,8 +15241,108 @@ function renderSeurFueraCarga() {
 }
 
 const busquedaCargaSeur = {};
+// Retenidos sin fecha (Jennifer, 2026-10-22): colchones ya recibidos que no
+// se envían hasta que el cliente diga. Al ponerles día entran en esa carga.
+function renderSeurRetenidos() {
+  const cont = document.getElementById("seur-retenidos");
+  const lista = backorders.filter(b => b.retenidoCliente && b.estado === "listo-seur" && !b.cargaId)
+    .sort((a, b) => parseFechaGenerica(a.fechaRecibido || a.fecha) - parseFechaGenerica(b.fechaRecibido || b.fecha));
+  if (!lista.length) { cont.innerHTML = ""; return; }
+  const diaPorDefecto = primerDiaSeur();
+  cont.innerHTML = \`
+    <div class="carga-abierta-box retenidos-box">
+      <div class="toolbar"><h3 style="margin:0">⏸ Retenidos sin fecha (SEUR)</h3></div>
+      <div class="inventario-count">\${lista.length} artículo(s) recibidos que NO se envían hasta que el cliente nos diga</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Pedido</th><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Producto</th><th>Recibido</th><th>Etiqueta de reserva</th><th></th></tr></thead>
+          <tbody>\${lista.map(b => \`<tr>
+            \${seurBackorderRowCells(b)}
+            <td>\${origenUnidadesSeurHtml(b)}</td>
+            <td>\${etiquetaReservaSeurHtml(b)}</td>
+            <td>
+              <input type="date" class="seur-ret-fecha" data-id="\${escapeAttr(b.id)}" min="\${hoyMadrid()}" value="\${diaPorDefecto}" />
+              <button type="button" class="seur-ret-btn" data-id="\${escapeAttr(b.id)}">El cliente ya lo quiere: a la carga</button>
+            </td>
+          </tr>\`).join("")}</tbody>
+        </table>
+      </div>
+    </div>\`;
+}
+// Pasar a retenido algo que ya estaba en una carga (Jennifer, 2026-10-28,
+// REPBEZEN12022: "en almacén, a falta de confirmación de envío por el
+// cliente"): sale de la carga, queda en Retenidos sin fecha y se manda la
+// etiqueta de reserva al almacén para que no salga para otra persona.
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".retener-seur-btn");
+  if (!btn) return;
+  e.preventDefault();
+  const b = backorders.find(x => x.id === btn.dataset.id);
+  if (!confirm((b ? refLabel(b) + (b.refSuffix || "") : "Este artículo") + ": ¿sacarlo de la carga y dejarlo en el almacén hasta que el cliente diga la fecha? Se manda la etiqueta de reserva al almacén.")) return;
+  btn.disabled = true;
+  const res = await fetch("/api/cargas/seur/retener", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ backorderId: btn.dataset.id }) });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.ok) { alert(r.error || "No se ha podido retener (" + res.status + ")."); btn.disabled = false; return; }
+  if (r.emailOk) mostrarAvisoBreve("Retenido sin fecha (SEUR > Retenidos sin fecha). Email de reserva enviado al almacén.");
+  else alert("Retenido sin fecha (SEUR > Retenidos sin fecha), pero NO se ha podido mandar el email de reserva al almacén. Avísales tú, por favor.");
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  if (typeof loadSeur === "function" && document.getElementById("view-seur").style.display !== "none") loadSeur();
+});
+// De dónde sale cada unidad (Jennifer, 2026-10-28, REPBEZEN12022: "ya había
+// un colchón en stock reservado y vino el otro en la fecha que se marcó"):
+// las que se cogieron del stock al crearlo y las que llegaron de fábrica.
+function origenUnidadesSeurHtml(b) {
+  const f = iso => iso ? new Date(iso).toLocaleDateString("es-ES") : "";
+  const total = Number(b.cantidad) || 1;
+  const deStock = Math.min(total, Number(b.enStock) || 0);
+  const deFabrica = total - deStock;
+  const partes = [];
+  if (deStock) partes.push(deStock + " ud. del stock (apartada" + (deStock > 1 ? "s" : "") + " el " + f(b.fecha) + ")");
+  if (deFabrica) partes.push(deFabrica + " ud. de " + (b.proveedor || "fábrica") + (b.fechaRecibido ? ", recibida" + (deFabrica > 1 ? "s" : "") + " el " + f(b.fechaRecibido) : ", pendiente de recibir"));
+  if (!deStock) return f(b.fechaRecibido);
+  return partes.map(p => '<div style="white-space:nowrap">' + escapeAttr(p) + "</div>").join("");
+}
+// ¿Se mandó la etiqueta de reserva al almacén? (Jennifer, 2026-10-28): con
+// su fecha, como la de recibido; si no, botón para mandarla.
+function etiquetaReservaSeurHtml(b) {
+  const f = iso => new Date(iso).toLocaleDateString("es-ES");
+  const anteriores = (b.reservasAnteriores || []).map(x => '<br><small style="color:var(--muted)">antes: enviada ' + f(x) + "</small>").join("");
+  if (b.reservaEnviada) return '<span class="badge" style="background:#dcfce7;color:#166534" title="Email de reserva enviado al almacén">✅ Enviada ' + f(b.reservaEnviada) + "</span>" + anteriores;
+  return '<span class="badge" style="background:#fee2e2;color:#991b1b">⚠ Sin enviar</span><br><button type="button" class="secondary reservar-almacen-btn" data-reservar-almacen="' + escapeAttr(b.id) + '" title="Manda al almacén el email con la etiqueta de reserva">📦 Mandar etiqueta de reserva</button>';
+}
+function esRetenidoRecibidoSeur(b) {
+  return !!(b && b.retenidoCliente && b.estado === "listo-seur" && !b.cargaId);
+}
+// "El cliente ya lo quiere: a la carga" — desde SEUR > Retenidos sin fecha
+// o desde la lista del proveedor (Jennifer, 2026-10-22).
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".seur-ret-btn");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const b = backorders.find(x => x.id === btn.dataset.id);
+  const inp = btn.parentElement.querySelector(".seur-ret-fecha");
+  const fecha = inp ? inp.value : "";
+  const error = errorFechaSeur(fecha);
+  if (error) { alert(error); return; }
+  if (!confirm((b ? refLabel(b) : "Este artículo") + ": ¿el cliente ya lo quiere? Entra en la carga de SEUR del " + fecha.slice(8, 10) + "/" + fecha.slice(5, 7) + ".")) return;
+  btn.disabled = true;
+  const res = await fetch("/api/cargas/seur/mover", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ backorderId: btn.dataset.id, fecha }),
+  });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || r.ok === false) { alert(r.error || "No se ha podido meter en la carga."); btn.disabled = false; return; }
+  if (b && retenidoSinFechaSeur(b)) await guardarRetencion([b.orderId], null);
+  mostrarAvisoBreve((b ? refLabel(b) : "Artículo") + ": a la carga de SEUR del " + fecha.slice(8, 10) + "/" + fecha.slice(5, 7) + ". Recuerda avisar al almacén del día de salida.");
+  backorders = await (await fetch("/api/inventario/pendientes")).json();
+  await loadOrders();
+  if (document.getElementById("seur-retenidos").offsetParent) renderSeur();
+  else loadPendientes();
+}, true);
+
 function renderSeurCargas() {
   renderSeurFueraCarga();
+  renderSeurRetenidos();
   const cargasAbiertas = allCargas.filter(c => c.tipo === "seur" && c.estado === "abierta").sort((a, b) => a.fecha.localeCompare(b.fecha));
   const cont = document.getElementById("seur-cargas-list");
   if (!cargasAbiertas.length) {
@@ -9139,7 +15357,7 @@ function renderSeurCargas() {
   const tarjeta = carga => {
     const filas = seurEnviosDeCarga(carga.id);
     const filasHtml = filas.map(({ o, refSuffix, backorderId, backorder }) => {
-      const cells = backorder && (backorder.gestoComercial || backorder.reposicion) ? seurBackorderRowCells(backorder) : seurOrderRowCells(o, refSuffix);
+      const cells = backorder && (backorder.gestoComercial || backorder.reposicion) ? seurBackorderRowCells(backorder) : seurOrderRowCells(o, refSuffix, backorder);
       const quitarLabel = backorder && backorder.gestoComercial ? "El gesto comercial no vino: quitar" : (backorder && backorder.reposicion ? "La reposición no vino: quitar" : "El colchón no vino: quitar");
       // Mover a cualquier día laborable (Jennifer, 2026-09-30).
       const moverHtml = \`<div class="mover-seur"><input type="date" class="mover-seur-fecha" min="\${hoyMadrid()}" /><button type="button" class="secondary mover-seur-btn" data-order-id="\${backorderId ? "" : escapeAttr(String(o.id))}" data-backorder-id="\${backorderId ? escapeAttr(backorderId) : ""}">Mover a ese día</button></div>\`;
@@ -9148,9 +15366,11 @@ function renderSeurCargas() {
         <td><input type="checkbox" class="sel-envio-seur" data-order-id="\${escapeAttr(String(o.id))}" /></td>
         \${cells}
         <td class="seur-envio-notas" data-carga-id="\${carga.id}" data-order-id="\${escapeAttr(String(o.id))}" data-suffix="\${escapeAttr(refSuffix || "")}" data-backorder="\${backorderId ? "1" : ""}"><span style="color:var(--muted);font-size:11px">…</span></td>
-        <td>\${backorderId
-          ? \`<button type="button" class="quitar-seur-btn" data-id="\${backorderId}">\${quitarLabel}</button>\`
-          : \`<button type="button" class="sacar-carga-btn sacar-carga-seur-btn" data-order-id="\${escapeAttr(String(o.id))}">Sacar de la carga</button>\`}\${moverHtml}</td>
+        <td>\${backorder && backorder.recordatorioSeur
+          ? \`<div class="cambio-medida-tag" style="background:#fef3c7;color:#92400e" title="Su colchón se usó para otro pedido. No entra en el fichero de SEUR hasta que llegue el nuevo de \${escapeAttr(backorder.proveedor || "fábrica")} y lo prepares para SEUR.">⏳ RECORDATORIO: pendiente de recibir de \${escapeAttr(backorder.proveedor || "fábrica")} (ya pedido)</div>\`
+          : backorderId
+          ? \`<button type="button" class="quitar-seur-btn" data-id="\${backorderId}">\${quitarLabel}</button>\${backorder && backorder.tipo === "colchon" && !backorder.reposicion && backorder.estado === "listo-seur" ? \`<button type="button" class="secondary usar-otro-seur-btn" data-id="\${backorderId}" title="Su colchón se lo das a otro cliente: vuelve a pendientes de \${escapeAttr(backorder.proveedor || "")} como ya pedido y sigue aquí como recordatorio">Su colchón es para otro pedido</button>\` : ""}\`
+          : \`<button type="button" class="sacar-carga-btn sacar-carga-seur-btn" data-order-id="\${escapeAttr(String(o.id))}">Sacar de la carga</button>\`}\${moverHtml}\${backorderId && backorder && backorder.estado === "listo-seur" ? \`<button type="button" class="secondary retener-seur-btn" data-id="\${escapeAttr(backorderId)}" style="margin-top:4px;font-size:12px" title="Sale de esta carga y se queda en el almacén apartado (email de reserva) hasta que el cliente diga cuándo lo quiere">⏸ En almacén, a falta de fecha del cliente</button>\` : ""}</td>
       </tr>
     \`;
     }).join("");
@@ -9221,6 +15441,21 @@ function renderSeurCargas() {
         alert(data.error || "No se pudo deshacer.");
         return;
       }
+      loadSeur();
+    });
+  });
+  // Su colchón se lo queda otro pedido (Jennifer, 2026-10-20, 2001801948-A):
+  // vuelve a pendientes del proveedor como ya pedido y la fila sigue en la
+  // carga como recordatorio (fuera del fichero de SEUR hasta prepararlo).
+  document.querySelectorAll(".usar-otro-seur-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const b = backorders.find(x => x.id === btn.dataset.id);
+      if (!b) return;
+      if (!confirm("¿El colchón de " + refLabel(b) + " (" + nombreCortoModelo(b.stockModel) + " " + b.talla + ") es para otro pedido?\\n\\nVuelve a pendientes de " + (b.proveedor || "su proveedor") + " como YA PEDIDO y se queda en esta carga como recordatorio (no sale en el fichero de SEUR hasta que llegue el nuevo y lo prepares).")) return;
+      const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(b.id) + "/deshacer-seur", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mantenerCarga: true, mantenerRef: true, nota: "Su colchón se usó para otro pedido" }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) { alert(data.error || "No se pudo cambiar."); return; }
+      backorders = await (await fetch("/api/inventario/pendientes")).json();
       loadSeur();
     });
   });
@@ -9380,9 +15615,14 @@ async function descargarFicheroSeur(cargaId, seleccion) {
 function seurEnviosDeCarga(cargaId) {
   const directos = allOrders.filter(o => o.agencia === "SEUR" && o.cargaId === cargaId)
     .map(o => ({ o, refSuffix: "", backorderId: null, backorder: null }));
-  const divididos = backorders.filter(b => (b.tipo === "colchon" || b.tipo === "topper" || b.gestoComercial) && b.cargaId === cargaId)
+  // Almohadas/protectores preparados a mano para la carga ("listo-seur")
+  // también salen en el fichero: se pintan igual, salvo si su pedido ya
+  // está entero en la carga (Jennifer, 2026-11-11, BEZEN12418 no se veía).
+  const idsDirectos = new Set(directos.map(d => String(d.o.id)));
+  const divididos = backorders.filter(b => b.cargaId === cargaId && ((b.tipo === "colchon" || b.tipo === "topper" || b.gestoComercial)
+      || (b.estado === "listo-seur" && !idsDirectos.has(String(b.orderId)))))
     .map(b => {
-      const o = allOrders.find(x => x.orderNumber === b.orderNumber);
+      const o = (allOrders.find(x => String(x.id) === String(b.orderId)) || allOrders.find(x => x.orderNumber === b.orderNumber));
       return o ? { o, refSuffix: b.refSuffix || "", backorderId: b.id, backorder: b } : null;
     }).filter(Boolean);
   return [...directos, ...divididos];
@@ -9395,7 +15635,7 @@ function seurEnviosDeCarga(cargaId) {
 // reposición), no del pedido original (que puede llevar un artículo
 // totalmente distinto, o ya estar entregado/cancelado).
 function seurBackorderRowCells(b) {
-  const o = allOrders.find(x => x.orderNumber === b.orderNumber) || {};
+  const o = allOrders.find(x => String(x.id) === String(b.orderId)) || allOrders.find(x => x.orderNumber === b.orderNumber) || {};
   return \`
     <td>\${refLabel(b)}\${valdemoroTag(o)}</td>
     <td>\${o.name || ""}</td>
@@ -9430,7 +15670,7 @@ function renderHistorialCargasSeur(cargas) {
   }
   cont.innerHTML = cargas.map(c => {
     const filas = seurEnviosDeCarga(c.id);
-    const filasHtml = filas.map(({ o, refSuffix, backorder }) => \`<tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>\${backorder && (backorder.gestoComercial || backorder.reposicion) ? seurBackorderRowCells(backorder) : seurOrderRowCells(o, refSuffix)}</tr>\`).join("");
+    const filasHtml = filas.map(({ o, refSuffix, backorder }) => \`<tr\${o.cancelado ? ' class="fila-cancelada"' : ""}>\${backorder && (backorder.gestoComercial || backorder.reposicion) ? seurBackorderRowCells(backorder) : seurOrderRowCells(o, refSuffix, backorder)}</tr>\`).join("");
     return \`
     <details class="carga-historial-card">
       <summary>\${formatSeurCargaTitulo(c)} — \${filas.length} pedidos — cerrada el \${new Date(c.fechaCierre).toLocaleDateString("es-ES")}</summary>
@@ -9589,6 +15829,11 @@ async function abrirReposicionDesdePedido(orderId) {
   document.getElementById("reposicion-motivo").value = "";
   document.getElementById("reposicion-pieza-otra").value = "";
   document.getElementById("reposicion-otra-agencia").value = "";
+  document.getElementById("reposicion-nacex-retorno").value = "";
+  document.getElementById("reposicion-nacex-bultos").value = "1";
+  document.getElementById("reposicion-nacex-que").value = "";
+  document.getElementById("reposicion-nacex-que-block").style.display = "none";
+  document.getElementById("reposicion-nacex-retorno-block").style.display = "none";
   document.getElementById("reposicion-otra-agencia-block").style.display = "none";
   document.getElementById("reposicion-unidades").value = "1";
   document.getElementById("reposicion-modal-result").textContent = "";
@@ -9598,6 +15843,19 @@ async function abrirReposicionDesdePedido(orderId) {
   document.getElementById("reposicion-colchon-agencia-block").style.display = "none";
   document.getElementById("reposicion-colchon-recogida-block").style.display = "none";
   document.getElementById("reposicion-colchon-destino-block").style.display = "none";
+  document.querySelectorAll(".reposicion-servicio").forEach(c => { c.checked = c.value === ""; });
+  document.getElementById("reposicion-servicio-otro").value = "";
+  document.getElementById("reposicion-servicios-block").style.display = "none";
+  document.getElementById("reposicion-devfab-block").style.display = "none";
+  document.getElementById("reposicion-mercancia-block").style.display = "none";
+  document.getElementById("reposicion-mercancia-select").value = "";
+  document.getElementById("reposicion-devfab-select").value = "";
+  document.getElementById("reposicion-devfab-que").value = "";
+  document.getElementById("reposicion-devfab-que").style.display = "none";
+  document.getElementById("reposicion-recoger-que").value = "";
+  document.getElementById("reposicion-recoger-que").style.display = "none";
+  document.getElementById("reposicion-recoger-aviso").style.display = "none";
+  document.getElementById("reposicion-devfab-aviso").style.display = "none";
   activarCambioReposicion(false);
   cargarPiezasReposicion();
   document.getElementById("reposicion-modal-overlay").classList.add("open");
@@ -9689,6 +15947,7 @@ async function cargarPiezasReposicion() {
   const body = await res.json();
   ultimasPiezasReposicion = (res.ok && body.ok && body.piezas) ? body.piezas : [];
   ultimoTipoReposicion = (res.ok && body.ok) ? (body.tipo || "") : "";
+  actualizarServiciosReposicion();
   document.getElementById("reposicion-colchon-agencia-block").style.display = ultimoTipoReposicion === "colchon" ? "" : "none";
   if (ultimoTipoReposicion !== "colchon") {
     document.getElementById("reposicion-agencia-select").value = "";
@@ -9752,7 +16011,45 @@ document.getElementById("reposicion-recogida-select").addEventListener("change",
   const hayRecogida = e.target.value === "si";
   document.getElementById("reposicion-colchon-destino-block").style.display = hayRecogida ? "" : "none";
   if (!hayRecogida) document.getElementById("reposicion-destino-select").value = "";
+  document.getElementById("reposicion-recoger-que").style.display = hayRecogida ? "" : "none";
+  document.getElementById("reposicion-recoger-aviso").style.display = hayRecogida ? "" : "none";
 });
+// Qué colchón hay que recoger (Jennifer, 2026-11-12: REPBEZEN12277, se repone
+// un París 135X190 pero hay que recoger uno de 135X180).
+// Servicios adicionales (Jennifer, 2026-10-20): solo si la reposición sale
+// por Furniture (tapicería siempre; colchón u "otra cosa" si se eligió).
+function agenciaEfectivaReposicion() {
+  if (document.getElementById("reposicion-pieza-otra").value.trim()) return document.getElementById("reposicion-otra-agencia").value;
+  if (ultimoTipoReposicion === "colchon") return document.getElementById("reposicion-agencia-select").value;
+  return "FURNITURE";
+}
+function actualizarServiciosReposicion() {
+  const ver = agenciaEfectivaReposicion() === "FURNITURE";
+  document.getElementById("reposicion-servicios-block").style.display = ver ? "" : "none";
+  // ¿Hay que devolver algo a fábrica? (Jennifer, 2026-10-28). En el colchón
+  // ya lo dice la recogida ("vuelve a nuestras instalaciones").
+  document.getElementById("reposicion-devfab-block").style.display = ver && ultimoTipoReposicion !== "colchon" ? "" : "none";
+  // ¿Tiene el cliente la mercancía en casa? (Jennifer, 2026-10-28)
+  document.getElementById("reposicion-mercancia-block").style.display = ver ? "" : "none";
+}
+document.getElementById("reposicion-devfab-select").addEventListener("change", (e) => {
+  document.getElementById("reposicion-devfab-que").style.display = e.target.value === "si" ? "" : "none";
+  document.getElementById("reposicion-devfab-aviso").style.display = e.target.value === "si" ? "" : "none";
+});
+function serviciosReposicionElegidos() {
+  if (agenciaEfectivaReposicion() !== "FURNITURE") return [];
+  const marcados = [...document.querySelectorAll(".reposicion-servicio:checked")].map(c => c.value).filter(Boolean);
+  const otro = document.getElementById("reposicion-servicio-otro").value.trim().toUpperCase();
+  return otro ? marcados.concat(otro) : marcados;
+}
+document.getElementById("reposicion-nacex-retorno").addEventListener("change", ev => {
+  document.getElementById("reposicion-nacex-que-block").style.display = ev.target.value === "si" ? "" : "none";
+});
+document.getElementById("reposicion-otra-agencia").addEventListener("change", ev => {
+  document.getElementById("reposicion-nacex-retorno-block").style.display = ev.target.value === "NACEX" ? "" : "none";
+});
+["reposicion-agencia-select", "reposicion-otra-agencia", "reposicion-item-select"].forEach(id => document.getElementById(id).addEventListener("change", () => setTimeout(actualizarServiciosReposicion, 0)));
+document.getElementById("reposicion-pieza-otra").addEventListener("input", actualizarServiciosReposicion);
 function cerrarModalReposicion() {
   document.getElementById("reposicion-modal-overlay").classList.remove("open");
   reposicionOrderActual = null;
@@ -9797,6 +16094,21 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
     resultEl.textContent = "Indica por dónde sale: FURNITURE, SEUR o NACEX.";
     return;
   }
+  const nacexRetorno = document.getElementById("reposicion-nacex-retorno").value;
+  const nacexBultos = Math.floor(Number(document.getElementById("reposicion-nacex-bultos").value));
+  if (piezaManual && otraAgencia === "NACEX" && !(nacexBultos >= 1 && nacexBultos <= 20)) {
+    resultEl.textContent = "NACEX: indica cuántos bultos (de 1 a 20).";
+    return;
+  }
+  if (piezaManual && otraAgencia === "NACEX" && !nacexRetorno) {
+    resultEl.textContent = "NACEX: indica si tiene algo para recoger en casa del cliente (envío con retorno).";
+    return;
+  }
+  const nacexQue = document.getElementById("reposicion-nacex-que").value.trim();
+  if (piezaManual && otraAgencia === "NACEX" && nacexRetorno === "si" && !nacexQue) {
+    resultEl.textContent = "NACEX: indica qué se recoge en casa del cliente.";
+    return;
+  }
   const cambio = datosCambioReposicion();
   if (cambio && (!cambio.productId || !cambio.talla)) {
     resultEl.textContent = "Para un cambio, elige el modelo y la medida nuevos.";
@@ -9820,6 +16132,28 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
       resultEl.textContent = "Indica si el colchón recogido vuelve a nuestras instalaciones o es para desechar.";
       return;
     }
+  }
+  const conDevFab = document.getElementById("reposicion-devfab-block").style.display !== "none";
+  const devFab = conDevFab ? document.getElementById("reposicion-devfab-select").value : "";
+  if (conDevFab && !devFab) {
+    resultEl.textContent = "Indica si Furniture tiene que devolver algo a la fábrica.";
+    return;
+  }
+  // Qué hay que recoger, siempre (Jennifer, 2026-11-12): si se envió mal, no
+  // coincide con lo que se repone.
+  if (devFab === "si" && !document.getElementById("reposicion-devfab-que").value.trim()) {
+    resultEl.textContent = "Escribe qué hay que recoger (pieza, medida y color). Si se envió mal, no es lo mismo que lo que se envía ahora.";
+    return;
+  }
+  if (ultimoTipoReposicion === "colchon" && !piezaManual && agenciaReposicion === "FURNITURE" && recogidaValue === "si" && !document.getElementById("reposicion-recoger-que").value.trim()) {
+    resultEl.textContent = "Escribe qué colchón hay que recoger (modelo y medida). Si se envió mal, no es el mismo que se envía ahora.";
+    return;
+  }
+  const conMercancia = document.getElementById("reposicion-mercancia-block").style.display !== "none";
+  const mercanciaCliente = conMercancia ? document.getElementById("reposicion-mercancia-select").value : "";
+  if (conMercancia && !mercanciaCliente) {
+    resultEl.textContent = "Indica si el cliente tiene la mercancía en casa.";
+    return;
   }
   resultEl.textContent = "Registrando...";
   const res = await fetch("/api/inventario/reposicion", {
@@ -9848,6 +16182,7 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
       recogidaDestino: !piezaManual && recogidaValue === "si" ? recogidaDestino : null,
       cambio,
       unidades,
+      serviciosReposicion: serviciosReposicionElegidos(),
     }),
   });
   const body = await res.json();
@@ -9856,10 +16191,49 @@ document.getElementById("reposicion-modal-confirmar").addEventListener("click", 
     return;
   }
   cerrarModalReposicion();
+  if (piezaManual && otraAgencia === "NACEX" && body.id) {
+    await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: body.id, nacex: { retorno: nacexRetorno === "si", retornoQue: nacexRetorno === "si" ? nacexQue : null, bultos: nacexBultos } }) }).catch(() => null);
+  }
+  if (mercanciaCliente && body.id) {
+    await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: body.id, mercanciaCliente }) }).catch(() => null);
+  }
+  const recogerQue = document.getElementById("reposicion-recoger-que").value.trim();
+  if (body.id && ultimoTipoReposicion === "colchon" && !piezaManual && recogidaValue === "si" && recogerQue) {
+    await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: body.id, recogidaQue: recogerQue }) }).catch(() => null);
+  }
+  if (!devFab && body.id && ultimoTipoReposicion === "colchon" && !piezaManual && recogidaValue === "si" && recogidaDestino === "instalaciones" && recogerQue) {
+    const ahora = new Date().toISOString();
+    await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: body.id,
+      devolucionFabrica: { estado: "recoger", que: recogerQue, motivo: "incidencia", fecha: ahora, usuario: currentUser || null, historial: [{ estado: "recoger", fecha: ahora, usuario: currentUser || null }] } }) }).catch(() => null);
+  }
+  if (devFab && body.id) {
+    const ahora = new Date().toISOString();
+    const estado = devFab === "si" ? "recoger" : "no-devolver";
+    const que = document.getElementById("reposicion-devfab-que").value.trim();
+    await fetch("/api/inventario/pendientes/set-campo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: body.id,
+      devolucionFabrica: { estado, que: que || null, motivo: "incidencia", fecha: ahora, usuario: currentUser || null, historial: [{ estado, fecha: ahora, usuario: currentUser || null }] } }) }).catch(() => null);
+  }
   // Stock parcial (Jennifer, 2026-10-07): avisar de cuántas salen de stock.
   const deStock = Number(body.enStock) || 0;
+  // Colchón por SEUR que sale entero del stock (Jennifer, 2026-10-22: "no
+  // me sale en la carga de SEUR de mañana"): no hay nada que esperar de
+  // fábrica, así que entra ya en la carga, como al pulsar "Marcar recibido".
+  let enCargaSeur = "";
+  if (deStock >= unidades && body.id && ultimoTipoReposicion === "colchon" && !piezaManual && agenciaReposicion === "SEUR") {
+    try {
+      backorders = await (await fetch("/api/inventario/pendientes")).json();
+      const nuevo = backorders.find(b => b.id === body.id);
+      if (nuevo) {
+        const r = await marcarRecibidoSeur(nuevo);
+        if (r && r.ok && r.carga) enCargaSeur = " Ya está en la carga de SEUR del " + new Date(r.carga.fecha + "T00:00:00").toLocaleDateString("es-ES") + ".";
+        else if (r && r.ok && r.programada) enCargaSeur = " Ya está en la carga de SEUR del día programado.";
+        if (r && r.ok === false) alert("La reposición está creada, pero no ha entrado sola en la carga de SEUR: " + (r.error || "") + "\\nMárcala como recibida en Proveedores.");
+      }
+    } catch (err) { alert("La reposición está creada, pero no ha entrado sola en la carga de SEUR. Márcala como recibida en Proveedores."); }
+  }
+  if (body.cargaFurniture) enCargaSeur = " Ya está en la carga de Furniture del " + new Date(body.cargaFurniture.fecha + "T00:00:00").toLocaleDateString("es-ES") + ".";
   alert(deStock > 0
-    ? "Reposición registrada (una sola línea de " + unidades + " ud.) — " + deStock + " ya en stock" + (unidades > deStock ? ", pedir " + (unidades - deStock) + " a fábrica." : " (no hace falta pedir a fábrica).")
+    ? "Reposición registrada (una sola línea de " + unidades + " ud.) — " + deStock + " ya en stock" + (unidades > deStock ? ", pedir " + (unidades - deStock) + " a fábrica." : " (no hace falta pedir a fábrica)." + enCargaSeur)
     : "Reposición registrada — ya está en Proveedores pendientes.");
   await loadOrders();
   if (document.getElementById("view-pendientes").style.display !== "none") loadPendientes();
@@ -9893,6 +16267,16 @@ function abrirGestoComercialDesdePedido(orderId) {
   document.getElementById("gesto-comercial-cantidad-select").value = "1";
   document.getElementById("gesto-comercial-motivo").value = "";
   document.getElementById("gesto-comercial-modal-result").textContent = "";
+  // FURNITURE solo si le queda algo por salir por Furniture (Jennifer,
+  // 2026-10-20): la almohada se junta con esa parte del pedido.
+  const quedaFurniture = backorders.some(b => String(b.orderId) === String(order.id) && (b.estado === "pendiente" || b.estado === "cubierto")
+    && !b.reposicion && !b.gestoComercial && !b.envioAparte && !b.paraStock && !((b.tipo === "colchon" || b.tipo === "topper") && b.tipoEnvio !== "FUR"));
+  const selAg = document.getElementById("gesto-comercial-agencia-select");
+  selAg.value = "SEUR";
+  selAg.querySelector('option[value="FURNITURE"]').disabled = !quedaFurniture;
+  document.getElementById("gesto-comercial-agencia-nota").textContent = quedaFurniture
+    ? "Le queda mercancía por enviar con Furniture: puedes mandarla junto con ese envío."
+    : "FURNITURE no disponible: este pedido no tiene nada pendiente de enviar por Furniture.";
   document.getElementById("gesto-comercial-modal-overlay").classList.add("open");
 }
 function cerrarModalGestoComercial() {
@@ -9918,6 +16302,7 @@ document.getElementById("gesto-comercial-modal-confirmar").addEventListener("cli
       orderId: gestoComercialOrderActual.id, orderNumber: gestoComercialOrderActual.orderNumber,
       platform: gestoComercialOrderActual.platform, orderRef: gestoComercialOrderActual.orderRef,
       orderDate: gestoComercialOrderActual.orderDate, productId, talla, cantidad, motivo,
+      agencia: document.getElementById("gesto-comercial-agencia-select").value,
     }),
   });
   const body = await res.json();
@@ -9926,7 +16311,8 @@ document.getElementById("gesto-comercial-modal-confirmar").addEventListener("cli
     return;
   }
   cerrarModalGestoComercial();
-  alert(body.cubiertoConStock >= cantidad
+  if (body.furniture) alert("Gesto comercial registrado — va con FURNITURE, junto con lo que le queda por enviar del pedido" + (body.cubiertoConStock >= cantidad ? " (cubierto con stock)." : ". " + (cantidad - body.cubiertoConStock) + " ud. quedan pendientes en Polival (" + body.referencia + ")."));
+  else alert(body.cubiertoConStock >= cantidad
     ? "Gesto comercial registrado — cubierto con stock real" + (body.carga ? ", va en la " + formatSeurCargaTitulo(body.carga) + "." : ". Prepáralo para SEUR desde Proveedores · Polival.")
     : "Gesto comercial registrado — " + (cantidad - body.cubiertoConStock) + " ud. quedan en Proveedores pendientes (" + body.referencia + ").");
   await loadOrders();
@@ -9997,9 +16383,18 @@ function fechaProgramadaSeur(b) {
   const r = o ? retencionDe(o) : null;
   return r && r.hasta && r.hasta >= hoyMadrid() ? r.hasta : null;
 }
+// Retenido sin fecha (Jennifer, 2026-10-22): "no enviar hasta que el
+// cliente nos diga". Se guarda como retención del pedido sin "hasta"; al
+// marcarlo recibido no entra en ninguna carga (SEUR > Retenidos sin fecha).
+function retenidoSinFechaSeur(b) {
+  const o = allOrders.find(x => x.id === b.orderId);
+  const r = o ? retencionDe(o) : null;
+  return !!(r && !r.hasta && !r.montana);
+}
 function fechaProgramadaSeurTag(b) {
+  if (retenidoSinFechaSeur(b)) return ' <span class="badge" style="background:#ede9fe;color:#5b21b6" title="Al marcarlo recibido NO entra en ninguna carga: queda en SEUR > Retenidos sin fecha">⏸ Sin fecha: espera al cliente</span>';
   const f = fechaProgramadaSeur(b);
-  return f ? ' <span class="badge" style="background:#ede9fe;color:#5b21b6" title="Al marcarlo recibido irá a la carga de SEUR de ese día">📅 Sale el ' + f.slice(8, 10) + "/" + f.slice(5, 7) + "</span>" : "";
+  return f ?' <span class="badge" style="background:#ede9fe;color:#5b21b6" title="Al marcarlo recibido irá a la carga de SEUR de ese día">📅 Sale el ' + f.slice(8, 10) + "/" + f.slice(5, 7) + "</span>" : "";
 }
 function abrirModalFechaSeur(id, modo) {
   const b = backorders.find(x => x.id === id);
@@ -10008,13 +16403,32 @@ function abrirModalFechaSeur(id, modo) {
   const programada = fechaProgramadaSeur(b);
   document.getElementById("seur-fecha-modal-titulo").textContent = seurFechaModo === "programar" ? "¿En qué carga de SEUR saldrá cuando llegue?" : "¿En qué carga de SEUR sale?";
   document.getElementById("seur-fecha-ok-btn").textContent = seurFechaModo === "programar" ? "Guardar fecha (sin marcar recibido)" : "Preparar para ese día";
-  document.getElementById("seur-fecha-quitar-btn").style.display = seurFechaModo === "programar" && programada ? "" : "none";
+  const sinFecha = retenidoSinFechaSeur(b);
+  document.getElementById("seur-fecha-quitar-btn").style.display = seurFechaModo === "programar" && (programada || sinFecha) ? "" : "none";
   seurFechaModalBackorderId = id;
   document.getElementById("seur-fecha-modal-texto").textContent = refLabel(b) + " — " + b.cantidad + "x " + b.stockModel + " (" + b.talla + ")";
   const input = document.getElementById("seur-fecha-input");
   input.min = hoyMadrid();
   input.value = programada || primerDiaSeur();
+  document.querySelector('input[name="seur-fecha-tipo"][value="' + (sinFecha ? "sin-fecha" : "fecha") + '"]').checked = true;
   document.getElementById("seur-fecha-modal-overlay").classList.add("open");
+}
+document.getElementById("seur-fecha-input").addEventListener("input", () => {
+  document.querySelector('input[name="seur-fecha-tipo"][value="fecha"]').checked = true;
+});
+// Recibido pero sin carga (Jennifer, 2026-10-22): queda en SEUR > Retenidos
+// sin fecha y se avisa al almacén para que lo aparte para este cliente.
+async function recibirRetenidoSeur(bo) {
+  const res = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/resolver-seur", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fecha: "retenido" }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) return { ok: false, error: data.error };
+  const rr = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/reservar-almacen?forzar=1", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agencia: "SEUR" }),
+  });
+  const dr = await rr.json().catch(() => ({}));
+  return { ok: true, retenido: true, emailOk: !!dr.ok };
 }
 function cerrarModalFechaSeur() {
   document.getElementById("seur-fecha-modal-overlay").classList.remove("open");
@@ -10033,14 +16447,33 @@ async function confirmarFechaSeur(fecha) {
     body: JSON.stringify({ fecha }),
   });
   const data = await res.json();
+  const b = backorders.find(x => x.id === id);
   cerrarModalFechaSeur();
   if (!res.ok || data.ok === false) {
     alert(data.error || "No se pudo preparar para SEUR.");
     return;
   }
+  // Ya tiene día: deja de estar retenido sin fecha.
+  if (b && retenidoSinFechaSeur(b)) await guardarRetencion([b.orderId], null);
   loadPendientes();
 }
-document.getElementById("seur-fecha-ok-btn").addEventListener("click", () => {
+document.getElementById("seur-fecha-ok-btn").addEventListener("click", async () => {
+  if (document.querySelector('input[name="seur-fecha-tipo"]:checked').value === "sin-fecha") {
+    const b = backorders.find(x => x.id === seurFechaModalBackorderId);
+    cerrarModalFechaSeur();
+    if (!b) return;
+    await guardarRetencion([b.orderId], { hasta: null });
+    if (seurFechaModo === "programar") {
+      mostrarAvisoBreve(refLabel(b) + ": retenido sin fecha. Cuando lo marques recibido NO entrará en ninguna carga hasta que el cliente diga.");
+    } else {
+      const r = await recibirRetenidoSeur(b);
+      if (!r.ok) { alert(r.error || "No se pudo marcar recibido."); }
+      else if (!r.emailOk) alert("Recibido y retenido sin fecha (SEUR > Retenidos sin fecha), pero NO se ha podido mandar el email de reserva al almacén. Avísales tú, por favor.");
+      else mostrarAvisoBreve(refLabel(b) + ": recibido y retenido sin fecha. Está en SEUR > Retenidos sin fecha. Email de reserva enviado al almacén.");
+    }
+    loadPendientes();
+    return;
+  }
   const fecha = document.getElementById("seur-fecha-input").value;
   const error = errorFechaSeur(fecha);
   if (error) { alert(error); return; }
@@ -10649,6 +17082,9 @@ async function guardarCaso(extra) {
   document.getElementById("caso-modal-overlay").classList.remove("open");
   await loadCasos();
   renderCasos();
+  // El botón "📒 Abrir caso" del pedido pasa a "Ver caso".
+  try { render(currentFiltered()); } catch (err) {}
+  try { if (typeof renderEnviosSeur === "function" && enviosSeur.length) renderEnviosSeur(); } catch (err) {}
 }
 document.getElementById("caso-modal-ok").addEventListener("click", () => guardarCaso({}));
 document.getElementById("caso-cerrar-btn").addEventListener("click", () => {
@@ -10680,6 +17116,33 @@ loadCasos().then(() => { if (casos.length && document.getElementById("view-shopi
 let tareas = [];
 let tareaEditando = null;
 let tareasAvisoMostrado = false;
+// Grupos de tareas (Jennifer, 2026-11-04): "que podamos clasificar las
+// tareas dentro de esos grupos". El orden es el de la vista por grupos y el
+// del aviso emergente.
+const TAREA_GRUPOS = [
+  { id: "FURNITURE", label: "Furniture", color: "#2563eb" },
+  { id: "POLIVAL", label: "Polival", color: "#7c3aed" },
+  { id: "LUSO", label: "Luso", color: "#0891b2" },
+  { id: "FERNANDO", label: "Fernando", color: "#b45309" },
+  { id: "SERGIO", label: "Sergio", color: "#dc2626" },
+  { id: "JENNIFER", label: "Jennifer", color: "#ea580c" },
+  { id: "CONTABILIDAD", label: "Contabilidad", color: "#16a34a" },
+  { id: "SEUR", label: "SEUR", color: "#0d9488" },
+  { id: "WORTEN", label: "Worten", color: "#e11d48" },
+  { id: "TRABAJO PERSONAL", label: "Trabajo personal", color: "#db2777" },
+];
+const TAREA_SIN_GRUPO = { id: "", label: "Sin grupo", color: "#6b7280" };
+function grupoTarea(t) {
+  return TAREA_GRUPOS.find(g => g.id === (t && t.grupo)) || null;
+}
+function chipGrupoTarea(t) {
+  const g = grupoTarea(t);
+  return g ? '<span class="badge" style="background:' + g.color + ';color:#fff;margin-right:4px">' + escapeAttr(g.label) + '</span>' : "";
+}
+// [{ g, lista }] en el orden de TAREA_GRUPOS, "Sin grupo" al final, sin vacíos.
+function tareasPorGrupo(lista) {
+  return [...TAREA_GRUPOS, TAREA_SIN_GRUPO].map(g => ({ g, lista: lista.filter(t => (grupoTarea(t) ? t.grupo : "") === g.id) })).filter(x => x.lista.length);
+}
 function tareaParaMi(t) {
   return !t.para || t.para === "AMBOS" || t.para === currentUser;
 }
@@ -10695,13 +17158,127 @@ async function loadTareas() {
   badge.style.display = deHoy.length ? "" : "none";
   badge.textContent = deHoy.length;
   badge.style.background = atrasadas ? "#dc2626" : "#0d9488";
-  if (!tareasAvisoMostrado && currentUser) {
-    tareasAvisoMostrado = true;
-    const mias = deHoy.filter(tareaParaMi);
-    if (mias.length) mostrarAvisoBreve("📌 Hoy tienes " + mias.length + (mias.length === 1 ? " tarea" : " tareas") + (atrasadas ? " (alguna atrasada)" : "") + " — Agenda de casos > Tareas");
-  }
+  comprobarRondaTareas();
   if (document.getElementById("view-tareas").style.display !== "none") renderTareas();
 }
+
+// Aviso emergente de tareas (Jennifer, 2026-10-22: "tal cual abra el
+// programa por las mañanas me salten en modo pop up todos los avisos de las
+// tareas pendientes... a las 16:00 que se haga otra ronda"). Dos rondas al
+// día por persona: la de la mañana (primera vez que se abre antes de las
+// 16:00) y la de la tarde (a las 16:00 o al abrir después). Desde el aviso:
+// posponer a la tarde, pasar a mañana, hecha o eliminar.
+function horaMadrid() {
+  return Number(new Date().toLocaleString("en-GB", { timeZone: "Europe/Madrid", hour: "2-digit", hour12: false }).slice(0, 2)) % 24;
+}
+function rondaTareasActual() {
+  return horaMadrid() >= 16 ? "tarde" : "manana";
+}
+function rondaTareasMostrada(ronda) {
+  try { return localStorage.getItem("hd_tareas_ronda_" + currentUser) === hoyMadrid() + "|" + ronda; } catch (e) { return tareasAvisoMostrado === hoyMadrid() + "|" + ronda; }
+}
+function marcarRondaTareas(ronda) {
+  tareasAvisoMostrado = hoyMadrid() + "|" + ronda;
+  try { localStorage.setItem("hd_tareas_ronda_" + currentUser, tareasAvisoMostrado); } catch (e) { /* sin almacenamiento: vale la marca en memoria */ }
+}
+function tareasDeLaRonda(ronda) {
+  const hoy = hoyMadrid();
+  return tareasDeHoy().filter(tareaParaMi).filter(t => ronda === "tarde" || t.pospuestaTarde !== hoy)
+    .sort((a, b) => a.fecha.localeCompare(b.fecha));
+}
+let rondaTareasAbierta = null;
+function comprobarRondaTareas() {
+  if (!currentUser || rondaTareasAbierta) return;
+  const ronda = rondaTareasActual();
+  if (rondaTareasMostrada(ronda)) return;
+  marcarRondaTareas(ronda);
+  if (!tareasDeLaRonda(ronda).length) return;
+  rondaTareasAbierta = ronda;
+  pintarAvisoTareas();
+  document.getElementById("aviso-tareas-overlay").classList.add("open");
+}
+function pintarAvisoTareas() {
+  const ronda = rondaTareasAbierta;
+  const hoy = hoyMadrid();
+  const lista = tareasDeLaRonda(ronda);
+  if (!lista.length) { cerrarAvisoTareas(); return; }
+  document.getElementById("aviso-tareas-titulo").textContent = "📌 " + (ronda === "tarde" ? "Ronda de la tarde" : "Buenos días") + " — " + lista.length + (lista.length === 1 ? " tarea pendiente" : " tareas pendientes");
+  document.getElementById("aviso-tareas-pie").textContent = ronda === "tarde"
+    ? "Lo que cierres sin tocar seguirá pendiente en Tareas."
+    : "Lo que cierres sin tocar volverá a salir a las 16:00.";
+  const tarjeta = (t) => {
+    const atrasada = t.fecha < hoy;
+    return '<div style="border:1px solid var(--border, #e5e7eb);border-left:4px solid ' + (atrasada ? "#dc2626" : "#f59e0b") + ';border-radius:8px;padding:10px 12px;margin-bottom:8px">'
+      + '<div style="font-weight:600">' + escapeAttr(t.texto || "") + '</div>'
+      + '<div style="font-size:12px;color:var(--muted);margin:2px 0 8px">'
+      + (atrasada ? '<span class="badge" style="background:#dc2626;color:#fff">Atrasada · era el ' + escapeAttr(fechaTarea(t.fecha).slice(0, 5)) + '</span> ' : "Para hoy · ")
+      + escapeAttr(RESPONSABLE_LABELS[t.para] || "Los dos")
+      + (t.pedidoRef ? " · Pedido <strong>" + escapeAttr(t.pedidoRef) + "</strong>" : "")
+      + (t.pospuestaTarde === hoy ? " · pospuesta esta mañana" : "")
+      + '</div>'
+      // Última nota (Jennifer, 2026-11-04: editar la tarea desde el aviso).
+      + ((t.notas || []).length ? '<div style="font-size:12px;background:var(--bg-soft, #f8fafc);border-radius:6px;padding:4px 8px;margin:-4px 0 8px">📝 ' + escapeAttr(t.notas[t.notas.length - 1].texto) + ((t.notas.length > 1) ? ' <span style="color:var(--muted)">(' + t.notas.length + ' notas)</span>' : "") + '</div>' : "")
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      + '<button type="button" class="secondary" data-tarea-abrir="' + escapeAttr(t.id) + '">✏ Editar / nota</button>'
+      + (ronda === "manana" ? '<button type="button" class="secondary aviso-tarea-accion" data-accion="tarde" data-id="' + escapeAttr(t.id) + '">🕓 Recordar por la tarde</button>' : "")
+      + '<button type="button" class="secondary aviso-tarea-accion" data-accion="manana" data-id="' + escapeAttr(t.id) + '">➡ Llevar a mañana</button>'
+      + '<button type="button" class="secondary aviso-tarea-accion" data-accion="hecha" data-id="' + escapeAttr(t.id) + '">✓ Hecha</button>'
+      + '<button type="button" class="cancelar-pendiente-btn aviso-tarea-accion" data-accion="eliminar" data-id="' + escapeAttr(t.id) + '">🗑 Eliminar</button>'
+      + '</div></div>';
+  };
+  // Por grupos (Jennifer, 2026-11-04): cada grupo es un desplegable cerrado
+  // con su número de tareas; se abre el que interese. Lo abierto se mantiene
+  // al marcar/posponer una tarea mientras el aviso sigue en pantalla.
+  const cont = document.getElementById("aviso-tareas-lista");
+  cont.innerHTML = tareasPorGrupo(lista).map(({ g, lista: delGrupo }) => {
+    const atrasadas = delGrupo.filter(t => t.fecha < hoy).length;
+    return '<details class="aviso-tareas-grupo" data-grupo="' + escapeAttr(g.id) + '"' + (avisoTareasGruposAbiertos.has(g.id) ? " open" : "")
+      + ' style="border:1px solid var(--border, #e5e7eb);border-left:5px solid ' + g.color + ';border-radius:8px;margin-bottom:8px;padding:8px 10px">'
+      + '<summary style="cursor:pointer;font-size:15px"><strong>' + escapeAttr(g.label) + '</strong> '
+      + '<span class="badge" style="background:' + g.color + ';color:#fff">' + delGrupo.length + (delGrupo.length === 1 ? " tarea" : " tareas") + '</span>'
+      + (atrasadas ? ' <span class="badge" style="background:#dc2626;color:#fff">' + atrasadas + (atrasadas === 1 ? " atrasada" : " atrasadas") + '</span>' : "")
+      + '</summary><div style="margin-top:8px">' + delGrupo.map(tarjeta).join("") + '</div></details>';
+  }).join("");
+  cont.querySelectorAll("details.aviso-tareas-grupo").forEach(d => d.addEventListener("toggle", () => {
+    if (d.open) avisoTareasGruposAbiertos.add(d.dataset.grupo); else avisoTareasGruposAbiertos.delete(d.dataset.grupo);
+  }));
+}
+const avisoTareasGruposAbiertos = new Set();
+function cerrarAvisoTareas() {
+  rondaTareasAbierta = null;
+  avisoTareasGruposAbiertos.clear();
+  document.getElementById("aviso-tareas-overlay").classList.remove("open");
+}
+document.getElementById("aviso-tareas-cerrar").addEventListener("click", cerrarAvisoTareas);
+document.getElementById("aviso-tareas-ver").addEventListener("click", () => { cerrarAvisoTareas(); selectTareas(); });
+document.getElementById("aviso-tareas-lista").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".aviso-tarea-accion");
+  if (!btn) return;
+  const t = tareas.find(x => x.id === btn.dataset.id);
+  if (!t) return;
+  const accion = btn.dataset.accion;
+  if (accion === "eliminar" && !confirm("¿Eliminar la tarea \\"" + (t.texto || "") + "\\"?")) return;
+  btn.disabled = true;
+  const hoy = hoyMadrid();
+  const res = accion === "eliminar"
+    ? await fetch("/api/tareas/borrar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: t.id }) })
+    : await fetch("/api/tareas/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(
+        accion === "tarde" ? { id: t.id, pospuestaTarde: hoy, usuario: currentUser }
+        : accion === "manana" ? { id: t.id, fecha: sumarDias(hoy, 1), pospuestaTarde: null, usuario: currentUser }
+        : { id: t.id, hecha: true, usuario: currentUser }) });
+  if (!res.ok) { btn.disabled = false; alert("No se ha podido guardar. Inténtalo otra vez."); return; }
+  // Se quita de la lista al momento; luego se recarga todo (globo, Tareas).
+  if (accion === "eliminar") tareas = tareas.filter(x => x.id !== t.id);
+  else if (accion === "tarde") t.pospuestaTarde = hoy;
+  else if (accion === "manana") { t.fecha = sumarDias(hoy, 1); t.pospuestaTarde = null; }
+  else t.hecha = true;
+  pintarAvisoTareas();
+  loadTareas();
+});
+// Ronda de las 16:00 con el programa ya abierto: se mira cada minuto.
+setInterval(() => {
+  if (currentUser && !rondaTareasAbierta && !rondaTareasMostrada(rondaTareasActual())) loadTareas();
+}, 60000);
 function fechaTarea(iso) {
   return iso ? iso.slice(8, 10) + "/" + iso.slice(5, 7) + "/" + iso.slice(0, 4) : "";
 }
@@ -10742,12 +17319,12 @@ function tituloDia(iso, hoy) {
   if (iso === sumarDias(hoy, -1)) return "Ayer · " + base;
   return base;
 }
-function filaTarea(t, hoy) {
+function filaTarea(t, hoy, conFecha) {
   const o = t.pedidoId != null ? allOrders.find(p => String(p.id) === String(t.pedidoId)) : null;
   const atrasada = !t.hecha && t.fecha < hoy;
   return '<tr>' +
     '<td style="width:40px"><input type="checkbox" class="tarea-hecha-check" data-id="' + escapeAttr(t.id) + '"' + (t.hecha ? " checked" : "") + ' title="Marcar como hecha" /></td>' +
-    '<td>' + (atrasada ? '<span class="badge" style="background:#dc2626;color:#fff">Atrasada · era el ' + escapeAttr(fechaTarea(t.fecha).slice(0, 5)) + '</span><br>' : "") + escapeAttr(t.texto || "") +
+    '<td>' + (atrasada ? '<span class="badge" style="background:#dc2626;color:#fff">Atrasada · era el ' + escapeAttr(fechaTarea(t.fecha).slice(0, 5)) + '</span><br>' : conFecha ? '<span style="font-size:12px;color:var(--muted)">' + escapeAttr(tituloDia(t.fecha, hoy)) + '</span><br>' : "") + chipGrupoTarea(t) + escapeAttr(t.texto || "") +
       (t.hecha ? '<div style="font-size:11.5px;color:var(--muted)">Hecha por ' + escapeAttr(t.hechaPor || "") + " el " + escapeAttr(fechaHoraCaso(t.fechaHecha)) + '</div>' : "") +
       ((t.notas || []).length ? '<div style="font-size:12px;margin-top:4px;padding-left:8px;border-left:2px solid var(--border, #e5e7eb)">📝 <strong>' + escapeAttr(t.notas[t.notas.length - 1].autor || "") + '</strong> (' + escapeAttr(fechaHoraCaso(t.notas[t.notas.length - 1].fecha)) + '): ' + escapeAttr(t.notas[t.notas.length - 1].texto) + (t.notas.length > 1 ? ' <span style="color:var(--muted)">· ' + t.notas.length + ' notas</span>' : "") + '</div>' : "") + '</td>' +
     '<td><strong>' + escapeAttr(t.pedidoRef || "") + '</strong>' + (o ? '<div style="font-size:11.5px;color:var(--muted);max-width:300px">' + resumenPedidoCaso(o) + '</div>' : "") + '</td>' +
@@ -10760,11 +17337,44 @@ function renderTareas() {
   const q = document.getElementById("tareas-search").value.trim().toLowerCase();
   const para = document.getElementById("tareas-para-filter").value;
   const verHechas = document.getElementById("tareas-vista").value === "hechas";
+  const grupoFiltro = document.getElementById("tareas-grupo-filter").value;
+  const porGrupos = document.getElementById("tareas-agrupar").value === "grupos";
   const filas = tareas.filter(t => !!t.hecha === verHechas
     && filtroPersonaAgenda(para, t.para)
+    && (!grupoFiltro || (grupoFiltro === "-" ? !grupoTarea(t) : t.grupo === grupoFiltro))
     && (!q || [t.texto, t.pedidoRef].join(" ").toLowerCase().includes(q)));
   const nHoy = filas.filter(t => !t.hecha && t.fecha <= hoy).length;
   document.getElementById("tareas-count").textContent = verHechas ? filas.length + " tareas hechas" : filas.length + " tareas pendientes" + (nHoy ? " · " + nHoy + " para hoy o atrasadas" : "");
+  // Vista por grupos (Jennifer, 2026-11-04): un desplegable por grupo;
+  // dentro, por fecha (con el día indicado en cada tarea).
+  if (porGrupos) {
+    const contG = document.getElementById("tareas-dias");
+    const bloques = tareasPorGrupo(filas);
+    if (!bloques.length) {
+      contG.innerHTML = '<p style="color:var(--muted)">' + (verHechas ? "No hay tareas hechas." : "No hay tareas pendientes.") + '</p>';
+      return;
+    }
+    contG.innerHTML = bloques.map(({ g, lista }) => {
+      lista.sort((a, b) => verHechas ? b.fecha.localeCompare(a.fecha) : a.fecha.localeCompare(b.fecha));
+      const clave = "grupo:" + g.id;
+      const abierto = tareasDiasAbiertos.has(clave);
+      const atrasadas = verHechas ? 0 : lista.filter(t => t.fecha < hoy).length;
+      return '<details class="tareas-dia" data-dia="' + escapeAttr(clave) + '"' + (abierto ? " open" : "") + ' style="border-left:4px solid ' + g.color + '">' +
+        '<summary><strong>' + escapeAttr(g.label) + '</strong> <span class="badge" style="background:' + g.color + ';color:#fff">' + lista.length + (lista.length === 1 ? " tarea" : " tareas") + '</span>' +
+        (atrasadas ? ' <span class="badge" style="background:#dc2626;color:#fff">' + atrasadas + (atrasadas === 1 ? " atrasada" : " atrasadas") + '</span>' : "") + '</summary>' +
+        '<div class="table-wrap"><table class="tareas-dia-table"><thead><tr><th>Hecha</th><th>Qué hay que hacer</th><th>Pedido</th><th>Para</th><th></th></tr></thead><tbody>' +
+        lista.map(t => filaTarea(t, hoy, true)).join("") + '</tbody></table></div></details>';
+    }).join("");
+    contG.querySelectorAll("details.tareas-dia").forEach(d => d.addEventListener("toggle", () => {
+      if (d.open) tareasDiasAbiertos.add(d.dataset.dia); else tareasDiasAbiertos.delete(d.dataset.dia);
+    }));
+    contG.querySelectorAll(".tarea-hecha-check").forEach(chk => chk.addEventListener("change", async () => {
+      await fetch("/api/tareas/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: chk.dataset.id, hecha: chk.checked, usuario: currentUser }) });
+      await loadTareas();
+      renderTareas();
+    }));
+    return;
+  }
   // Grupos: "atrasadas" (pendientes de días pasados) y luego un grupo por día.
   const grupos = new Map();
   if (!verHechas) {
@@ -10802,8 +17412,14 @@ function renderTareas() {
     renderTareas();
   }));
 }
-["tareas-search", "tareas-para-filter", "tareas-vista"].forEach(id => {
+["tareas-search", "tareas-para-filter", "tareas-vista", "tareas-grupo-filter"].forEach(id => {
   document.getElementById(id).addEventListener(id === "tareas-search" ? "input" : "change", renderTareas);
+});
+// La forma de ver (días o grupos) se recuerda en este navegador.
+try { if (localStorage.getItem("hd_tareas_agrupar") === "grupos") document.getElementById("tareas-agrupar").value = "grupos"; } catch (e) { /* sin almacenamiento */ }
+document.getElementById("tareas-agrupar").addEventListener("change", () => {
+  try { localStorage.setItem("hd_tareas_agrupar", document.getElementById("tareas-agrupar").value); } catch (e) { /* sin almacenamiento */ }
+  renderTareas();
 });
 
 function abrirModalTarea(t) {
@@ -10813,6 +17429,8 @@ function abrirModalTarea(t) {
   document.getElementById("tarea-texto").value = t ? t.texto || "" : "";
   document.getElementById("tarea-fecha").value = t ? t.fecha : hoyMadrid();
   document.getElementById("tarea-para").value = t ? t.para || "AMBOS" : "AMBOS";
+  const filtroG = document.getElementById("tareas-grupo-filter").value;
+  document.getElementById("tarea-grupo").value = t ? (grupoTarea(t) ? t.grupo : "") : (filtroG && filtroG !== "-" ? filtroG : "");
   document.getElementById("tarea-pedido").value = t ? t.pedidoRef || "" : "";
   const o = t && t.pedidoId != null ? allOrders.find(p => String(p.id) === String(t.pedidoId)) : null;
   document.getElementById("tarea-pedido-info").innerHTML = resumenPedidoCaso(o);
@@ -10836,6 +17454,7 @@ document.getElementById("tarea-modal-ok").addEventListener("click", async () => 
     texto: document.getElementById("tarea-texto").value.trim(),
     fecha: document.getElementById("tarea-fecha").value,
     para: document.getElementById("tarea-para").value,
+    grupo: document.getElementById("tarea-grupo").value || null,
     pedidoId: o ? o.id : null,
     pedidoRef: o ? refLabel(o) : pedidoTxt,
     nota: document.getElementById("tarea-nota").value,
@@ -10848,6 +17467,8 @@ document.getElementById("tarea-modal-ok").addEventListener("click", async () => 
   document.getElementById("tarea-modal-overlay").classList.remove("open");
   await loadTareas();
   renderTareas();
+  // Editada desde el aviso de tareas: se repinta con lo nuevo.
+  if (rondaTareasAbierta) pintarAvisoTareas();
 });
 document.getElementById("tarea-borrar-btn").addEventListener("click", async () => {
   if (!tareaEditando || !confirm("¿Borrar esta tarea?")) return;
@@ -10855,6 +17476,7 @@ document.getElementById("tarea-borrar-btn").addEventListener("click", async () =
   document.getElementById("tarea-modal-overlay").classList.remove("open");
   await loadTareas();
   renderTareas();
+  if (rondaTareasAbierta) pintarAvisoTareas();
 });
 document.getElementById("tarea-modal-cancel").addEventListener("click", () => document.getElementById("tarea-modal-overlay").classList.remove("open"));
 document.getElementById("tarea-nueva-btn").addEventListener("click", () => abrirModalTarea(null));
@@ -10903,8 +17525,30 @@ function montanaTag(o) {
   const z = zonaMontana(o);
   if (!z || !esTapiceriaMontana(o)) return "";
   const pag = suplementoPagado(o);
-  return '<br><span class="caso-tag" style="margin-left:0;font-weight:700;background:' + (pag ? "#dcfce7;color:#166534" : "#fef3c7;color:#92400e") + '" title="Furniture cobra 80 € de suplemento por CP de ' + z.toLowerCase() + '">⛰️ CP DE ' + z + (pag ? " · suplemento pagado" : " · cobrar suplemento 80 €") + "</span>";
+  return '<br><span class="caso-tag" style="margin-left:0;font-weight:700;background:' + (pag ? "#dcfce7;color:#166534" : "#fef3c7;color:#92400e") + '" title="Furniture cobra 80 € de suplemento por CP de ' + z.toLowerCase() + '">⛰️ CP DE ' + z + (pag ? " · suplemento pagado" : " · cobrar suplemento 80 €") + "</span>"
+    + ' <button type="button" class="secondary" style="font-size:11px;padding:1px 6px" data-supl-pedido="' + escapeAttr(o.id) + '" data-supl-pagar="' + (pag ? "0" : "1") + '">' + (pag ? "Deshacer pago" : "⛰️ Marcar suplemento pagado") + "</button>";
 }
+// Marcar/desmarcar el suplemento desde el propio pedido (Jennifer, 2026-10-16).
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-supl-pedido]");
+  if (!btn) return;
+  const id = btn.dataset.suplPedido;
+  const pagar = btn.dataset.suplPagar === "1";
+  const o = allOrders.find(x => String(x.id) === id) || Object.values(marketplaceOrdersByPlatform).flat().find(x => String(x.id) === id);
+  if (!o) return;
+  if (!confirm(pagar ? "¿El cliente de " + refLabel(o) + " ha pagado el suplemento de montaña de Furniture (80 €)?" : "¿Quitar la marca de suplemento pagado de " + refLabel(o) + "? Volverá a quedar retenido en Furniture.")) return;
+  const r = await fetch("/api/pedidos/shopify/meta", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: o.id, suplementoMontana: { pagado: pagar } }),
+  });
+  if (!r.ok) { alert("No se ha podido guardar. Inténtalo de nuevo en un momento."); return; }
+  const nuevo = { avisado: true, pagado: pagar };
+  allOrders.filter(x => String(x.id) === id).forEach(x => { x.suplementoMontana = nuevo; });
+  Object.values(marketplaceOrdersByPlatform).forEach(l => l.filter(x => String(x.id) === id).forEach(x => { x.suplementoMontana = nuevo; }));
+  try { applyFilter(); } catch (err) {}
+  Object.keys(marketplaceOrdersByPlatform).forEach(pid => { try { renderMarketplace(pid); } catch (err) {} });
+  if (document.getElementById("view-furniture").style.display !== "none") { try { renderFurniture(); } catch (err) {} }
+  if (pagar) mostrarAvisoBreve(refLabel(o) + ": suplemento de montaña pagado. Ya puede salir en una carga de Furniture.");
+});
 // Aviso emergente (Jennifer: "si subo un fichero o se mete un pedido que
 // tiene esta característica, me salte un aviso"): una vez por pedido.
 const AVISO_MONTANA_DESDE = "2026-09-01";
@@ -10914,10 +17558,12 @@ function fechaISOPedido(o) {
   return m ? m[3] + "-" + m[2] + "-" + m[1] : s.slice(0, 10);
 }
 let avisoMontanaAbierto = false;
+// Ya vistos en esta sesión (por si el guardado tarda o falla, no repetir).
+const avisosMontanaVistos = new Set();
 function revisarAvisosMontana() {
   if (avisoMontanaAbierto) return;
   const nuevos = allOrders.filter(o => zonaMontana(o) && esTapiceriaMontana(o) && !o.cancelado && !o.suplementoMontana
-    && fechaISOPedido(o) >= AVISO_MONTANA_DESDE && !(o.furnitureTracking || []).length);
+    && fechaISOPedido(o) >= AVISO_MONTANA_DESDE && !(o.furnitureTracking || []).length && !avisosMontanaVistos.has(String(o.id)));
   if (!nuevos.length) return;
   avisoMontanaAbierto = true;
   document.getElementById("montana-modal-lista").innerHTML = nuevos.map(o => "<li><b>" + escapeAttr(refLabel(o)) + "</b> — " + escapeAttr(o.name || "") + " · CP " + escapeAttr(o.postalCode || "") + " " + escapeAttr(o.city || "") + " (zona " + zonaMontana(o) + ")</li>").join("");
@@ -10925,6 +17571,7 @@ function revisarAvisosMontana() {
   ov.classList.add("open");
   document.getElementById("montana-modal-ok").onclick = async () => {
     ov.classList.remove("open");
+    nuevos.forEach(o => avisosMontanaVistos.add(String(o.id)));
     await Promise.all(nuevos.map(o => fetch("/api/pedidos/shopify/meta", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: o.id, suplementoMontana: { avisado: true } }),
     })));
@@ -11037,8 +17684,9 @@ function renderDevoluciones() {
   const q = document.getElementById("devoluciones-search").value.trim().toLowerCase();
   const filtro = document.getElementById("devoluciones-filtro").value;
   const filas = devoluciones.filter(d => {
-    if (q && ![refLabel(d), d.nombre, d.producto, d.notas].join(" ").toLowerCase().includes(q)) return false;
+    if (q && ![refLabel(d), d.refUnidad, d.nombre, d.producto, d.notas].join(" ").toLowerCase().includes(q)) return false;
     if (filtro === "sin-llegar" && d.fechaLlegada) return false;
+    if (filtro === "pendiente-devolucion" && !(d.prevista && !d.devueltoSeur && !d.fechaLlegada)) return false;
     if (filtro === "sin-decidir" && (!d.fechaLlegada || devolucionResuelta(d))) return false;
     if (filtro === "resueltas" && !devolucionResuelta(d)) return false;
     return true;
@@ -11051,14 +17699,19 @@ function renderDevoluciones() {
       ? '<span class="pedido-generado-tag">✓ Al stock ' + new Date(d.alStock.fecha).toLocaleDateString("es-ES") + "</span><br><small>" + escapeAttr(nombreCortoModelo(d.alStock.stockModel) + " " + d.alStock.talla) + (d.alStock.usuario ? " (" + escapeAttr(d.alStock.usuario) + ")" : "") + "</small>"
       : '<button type="button" class="secondary dev-stock-btn" data-id="' + idA + '" title="El colchón ha vuelto bien: suma 1 unidad al stock">＋ Pasar al stock</button>';
     return "<tr" + (devolucionResuelta(d) ? "" : ' class="fila-cuarentena"') + ">"
-      + "<td>" + new Date(d.creado).toLocaleDateString("es-ES") + "<br><small>" + (d.origen === "manual" ? "a mano" + (d.creadoPor ? " (" + escapeAttr(d.creadoPor) + ")" : "") : "automático") + "</small>"
+      + "<td>" + new Date(d.creado).toLocaleDateString("es-ES") + "<br><small>" + (d.prevista ? "prevista" + (d.creadoPor ? " (" + escapeAttr(d.creadoPor) + ")" : "") : d.origen === "manual" ? "a mano" + (d.creadoPor ? " (" + escapeAttr(d.creadoPor) + ")" : "") : "automático") + "</small>"
       // Borrar una devolución metida por error (Jennifer, 2026-10-16: "sin
       // tener que recurrir a ti"): visible al principio de la fila.
       + '<br><button type="button" class="cancelar-pendiente-btn dev-borrar-btn" data-id="' + idA + '" title="Borrar esta devolución (metida por error)">🗑 Borrar</button></td>'
-      + "<td>" + escapeAttr(refLabel(d)) + "<br><small>" + escapeAttr(d.platform || "Shopify") + "</small></td>"
+      + "<td>" + escapeAttr(refLabel(d)) + (d.refUnidad ? '<br><strong style="font-size:11px">Unidad: ' + escapeAttr(d.refUnidad) + "</strong>" : "") + "<br><small>" + escapeAttr(d.platform || "Shopify") + "</small></td>"
       + "<td>" + escapeAttr(d.nombre || "") + "</td>"
       + "<td>" + escapeAttr(d.producto || "") + "</td>"
-      + "<td>" + (d.seguimiento ? '<a href="' + escapeAttr(d.seguimiento) + '" target="_blank" rel="noopener">' + escapeAttr(d.estadoSeur || "Ver en SEUR") + "</a>" : escapeAttr(d.estadoSeur || "")) + "</td>"
+      + "<td>" + (d.prevista
+        ? (d.devueltoSeur
+          ? '<span class="pedido-generado-tag">✓ SEUR ya lo da devuelto</span><br>'
+          : '<span class="badge" style="background:#ede9fe;color:#5b21b6">⏳ Pendiente de devolución</span><br><small>avisado el ' + new Date(d.creado).toLocaleDateString("es-ES") + (d.refEnvio ? " · " + escapeAttr(d.refEnvio) : "") + "</small><br>")
+        : "")
+      + (d.seguimiento ? '<a href="' + escapeAttr(d.seguimiento) + '" target="_blank" rel="noopener">' + escapeAttr(d.estadoSeur || "Ver en SEUR") + "</a>" : escapeAttr(d.estadoSeur || "")) + "</td>"
       + "<td>" + devSelect("motivo", DEV_MOTIVOS, d.motivo, d.id) + "</td>"
       + '<td><input type="date" class="dev-campo" data-id="' + idA + '" data-campo="fechaLlegada" value="' + escapeAttr(d.fechaLlegada || "") + '"></td>'
       + "<td>" + devSelect("estadoColchon", DEV_ESTADOS, d.estadoColchon, d.id) + "</td>"
@@ -11119,7 +17772,7 @@ document.addEventListener("click", async (e) => {
   const r = await res.json().catch(() => ({}));
   if (!res.ok || !r.ok) { alert(r.error || "No se ha podido pasar al stock."); return; }
   mostrarAvisoBreve("Sumado al stock: " + nombreCortoModelo(elegido.stockModel) + " " + elegido.talla + " (ahora hay " + r.cantidad + ")");
-  await asignarAltaAPendientes(elegido.stockModel, elegido.talla, 1);
+  await asignarAltaAPendientes(elegido.stockModel, elegido.talla, 1, refLabel(d));
   loadDevoluciones();
 });
 document.getElementById("devoluciones-search").addEventListener("input", renderDevoluciones);
@@ -11171,9 +17824,25 @@ function limpiarTelefonoFurniture(phone) {
   return (phone || "").replace(/^\+34\s*/, "").trim();
 }
 
+// Además del "Montaje: Con Montaje" de Shopify, cuenta el montaje pagado a
+// posteriori como pedido aparte que se funde en servicios ("1x MONTAJE",
+// "MONTAJE 39€") — Jennifer, 2026-10-26, BEZEN12338 salió sin montaje.
+// "Desmontaje" no cuenta (\b).
+// Servicios del pedido con el montaje manual aplicado (Jennifer, 2026-11-11):
+// order.montajeManual {valor} manda sobre lo que digan los servicios.
+function serviciosEfectivos(o) {
+  const base = String((o && o.services) || "");
+  const mm = o && o.montajeManual;
+  if (!mm || typeof mm.valor !== "boolean") return base;
+  const sinMontaje = base.split("·").map((p) => p.trim()).filter((p) => p && !/^Montaje:/i.test(p) && !(/\bmontaje\b/i.test(p) && !/desmontaje/i.test(p))).join(" · ");
+  return mm.valor ? [sinMontaje, "Montaje: Con Montaje"].filter(Boolean).join(" · ") : sinMontaje;
+}
 function tieneMontajeFurniture(services) {
-  const m = /Montaje:\s*([^·]+)/i.exec(services || "");
-  return !!(m && m[1].trim().toLowerCase().startsWith("con montaje"));
+  return String(services || "").split("·").some((parte) => {
+    const m = /^\s*Montaje:\s*(.*)$/i.exec(parte);
+    if (m) return m[1].trim().toLowerCase().startsWith("con montaje");
+    return /\bmontaje\b/i.test(parte);
+  });
 }
 
 // "Tapa de Canapé: Tapa Entera" / "Tapa Reforzada | €25.00" / "Tapa Partida
@@ -11188,6 +17857,12 @@ function tapaPartidaFurniture(services) {
 // un poco del que se dictó de palabra (confirmado con pedidos reales).
 function observacionesRetiradaFurniture(services) {
   const matches = [...(services || "").matchAll(/Servicios adicionales:\s*([^·]+)/gi)].map((m) => m[1].trim());
+  // La retirada pagada a posteriori como pedido aparte se funde en servicios
+  // sin "Servicios adicionales:" delante (Jennifer, 2026-10-28, BEZEN12224:
+  // "1x retirada de colchón y canape con desmontaje al pedido").
+  for (const parte of String(services || "").split("·")) {
+    if (!parte.includes(":") && /retirada/i.test(parte)) matches.push(parte.trim());
+  }
   const relevante = matches.find((v) => v.toLowerCase() !== "ninguno");
   if (!relevante) return "";
   const v = relevante.toLowerCase();
@@ -11271,19 +17946,28 @@ function bultosCanapeMadera(modelo, medida, color, referencia, tapaPartida) {
   return [linea("TAPA"), linea("CAJÓN"), linea("FONDO"), linea("JUEGO BISAGRAS E HIDRÁULICOS")];
 }
 
+// Hasta 120 de ancho los canapés tapizados (tela, polipiel...) llevan un
+// solo cajón, sin cajón cabecero/piecero (Jennifer, 2026-10-22). No aplica
+// a los de madera (Zenit/Astra), que van por bultosCanapeMadera.
+function cajonesCanapeTapizado(linea, medida) {
+  return medida.ancho <= 120 ? [linea("CAJÓN")] : [linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+}
+
 function bultosCanapeGranCapacidad(modelo, medida, color, referencia, tapaPartida, gemelo) {
   const linea = (parte) => ({ parte, texto: [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ") });
   if (gemelo) return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2")];
-  if (tapaPartida) return [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
-  return [linea("TAPA"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+  const cajones = cajonesCanapeTapizado(linea, medida);
+  if (tapaPartida) return [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), ...cajones];
+  return [linea("TAPA"), ...cajones];
 }
 
 function bultosCanapeMagnum(modelo, medida, color, referencia, tapaPartida, gemelo) {
   const linea = (parte) => ({ parte, texto: [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ") });
   if (gemelo) return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2")];
+  const cajones = cajonesCanapeTapizado(linea, medida);
   const rows = tapaPartida
-    ? [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")]
-    : [linea("TAPA"), linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+    ? [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), ...cajones]
+    : [linea("TAPA"), ...cajones];
   if (medida.ancho >= 135) rows.push(linea("FONDO"));
   return rows;
 }
@@ -11291,11 +17975,9 @@ function bultosCanapeMagnum(modelo, medida, color, referencia, tapaPartida, geme
 function bultosCanapeInitial(modelo, medida, color, referencia, tapaPartida, gemelo) {
   const linea = (parte) => ({ parte, texto: [referencia, parte, modelo, medida.text, color].filter(Boolean).join(" ") });
   if (gemelo) return [linea("TAPA ½"), linea("TAPA 2/2"), linea("CAJÓN ½"), linea("CAJÓN 2/2"), linea("JUEGO DE PATAS")];
-  // El INITIAL y el SOUL de 105 llevan un solo cajón, sin cabecero/piecero
-  // (Jennifer, 2026-10-14 y 2026-10-15).
-  const cajones = (modelo === "CANAPÉ INITIAL" || modelo === "CANAPÉ SOUL") && medida.ancho === 105
-    ? [linea("CAJÓN")]
-    : [linea("CAJÓN CABECERO"), linea("CAJÓN PIECERO")];
+  // El INITIAL y el SOUL de 105 llevan un solo cajón (Jennifer, 2026-10-14
+  // y 2026-10-15); generalizado a todo tapizado hasta 120 el 2026-10-22.
+  const cajones = cajonesCanapeTapizado(linea, medida);
   const rows = tapaPartida
     ? [linea("TAPA PARTIDA ½"), linea("TAPA PARTIDA 2/2"), ...cajones]
     : [linea("TAPA"), ...cajones];
@@ -11360,6 +18042,16 @@ function marcarTapaReforzada(piezas) {
   });
 }
 
+// Varias unidades de tapicería en la misma línea (Jennifer, 2026-10-29,
+// Groupon 1182173613: 2 bases salían como una): un juego de bultos por
+// unidad, con "1/2", "2/2"... al final para distinguirlos.
+function repetirPorCantidad(piezas, cantidad) {
+  if (!(cantidad > 1)) return piezas;
+  const out = [];
+  for (let i = 1; i <= cantidad; i++) for (const p of piezas) out.push({ ...p, texto: p.texto + " " + i + "/" + cantidad });
+  return out;
+}
+
 // `servicios` (opcional): el texto de servicios del pedido, para detectar
 // la tapa reforzada.
 function piezasBackorder(b, productoTexto, tapaPartida, servicios) {
@@ -11390,18 +18082,27 @@ function piezasBackorder(b, productoTexto, tapaPartida, servicios) {
         ? { ...p, texto: "STOCK " + (referencia && p.texto.startsWith(referencia + " ") ? p.texto.slice(referencia.length + 1) : p.texto) }
         : p));
     }
-    return piezas;
+    // Pieza suelta del stock de tapicería (Jennifer, 2026-10-20): ese bulto
+    // sale con la referencia de su ficha (o "STOCK"); el resto, con la nueva.
+    for (const d of b.piezasStockDetalle || []) {
+      const i = piezas.findIndex((p) => !p.deStock && (p.parte === d.pieza || p.parte.replace(" REFORZADA", "") === d.pieza));
+      if (i < 0) continue;
+      const p = piezas[i];
+      const resto = referencia && p.texto.startsWith(referencia + " ") ? p.texto.slice(referencia.length + 1) : p.texto;
+      piezas[i] = { ...p, deStock: true, texto: (d.referencia || "STOCK") + " " + resto };
+    }
+    return repetirPorCantidad(piezas, b.cantidad);
   }
   if (t.includes("cabecero")) {
     const medidaTxt = extraerMedidaDeMercancia(b.mercanciaFabrica) || b.talla || "";
     const key = matchCabeceroRecipeKey(stockModel);
     const modeloWeb = key ? key.charAt(0).toUpperCase() + key.slice(1) : stockModel;
-    return [{ parte: "CABECERO", texto: [referencia, "CABECERO", modeloWeb, medidaTxt, color].filter(Boolean).join(" ") }];
+    return repetirPorCantidad([{ parte: "CABECERO", texto: [referencia, "CABECERO", modeloWeb, medidaTxt, color].filter(Boolean).join(" ") }], b.cantidad);
   }
   if (t.includes("base")) {
     const medida = parseMedidaFurniture(b.talla);
     if (!medida) return [{ parte: "REVISAR", texto: `REVISAR (sin medida): ${stockModel} ${b.talla}` }];
-    return bultosBase(medida, color, referencia);
+    return repetirPorCantidad(bultosBase(medida, color, referencia), b.cantidad);
   }
   // Colchón / almohada / topper / protector: sin referencia, formato
   // "{PREFIJO} {n}/{total} {MODELO CORTO} {MEDIDA}" cuando hay 2+ iguales.
@@ -11449,6 +18150,32 @@ function buildFurnitureCsv(rows) {
   return "﻿" + lines.join("\r\n");
 }
 
+// Dirección de envío de NACEX: nombre, dirección, CP, población y teléfono
+// del pedido, en mayúsculas, como en los emails de siempre.
+function lineasDireccionNacex(o) {
+  return [o.name, o.furnitureAddress || o.streetAddress || o.address, o.postalCode, o.city, limpiarTelefonoFurniture(o.phone)]
+    .map((x) => String(x || "").trim().toUpperCase()).filter(Boolean);
+}
+
+// Artículos de un pedido que van en su línea del fichero de Furniture — los
+// mismos que pasan a servido al cerrar la carga.
+function articulosFurnitureDePedido(backorders, orderId) {
+  return backorders.filter((b) => b.orderId === orderId
+    && (b.estado === "pendiente" || b.estado === "cubierto")
+    && !b.reposicion
+    && !(b.gestoComercial && !b.gcFurniture)
+    && !b.envioAparte // sale después, como línea propia (ver más abajo)
+    && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
+}
+// Pedido cancelado / reembolsado (Jennifer, 2026-11-05, Carrefour 76441060-A
+// reembolsado y aun así en la carga de SEUR): nunca sale en un fichero de carga.
+function pedidoCanceladoSrv(o) {
+  return !!(o && (o.cancelado || o.shopifyCancelado || /cancelad|reembolsad|rechazad|anulad/i.test(o.estado || "")));
+}
+function articulosFurnitureDeCarga(orders, backorders, cargaId) {
+  return orders.filter((o) => o.cargaId === cargaId && !pedidoCanceladoSrv(o)).flatMap((o) => articulosFurnitureDePedido(backorders, o.id));
+}
+
 async function buildFurnitureExport(env, cargaId) {
   const ordersId = env.ORDERS_STORE.idFromName("shopify");
   const ordersStub = env.ORDERS_STORE.get(ordersId);
@@ -11466,7 +18193,7 @@ async function buildFurnitureExport(env, cargaId) {
   // van seguidos y como UN solo envío — referencia, nombre, dirección y
   // contacto del pedido principal en todas sus líneas.
   const clavePedido = (o) => String(o.grupoEnvio || o.id);
-  const pedidos = orders.filter((o) => o.cargaId === carga.id)
+  const pedidos = orders.filter((o) => o.cargaId === carga.id && !pedidoCanceladoSrv(o))
     .sort((a, b) => clavePedido(a).localeCompare(clavePedido(b)) || (a.id === a.grupoEnvio ? -1 : b.id === b.grupoEnvio ? 1 : 0));
 
   // Se sube el día antes de la carga (Jennifer, 2026-08-26): carga viernes
@@ -11482,9 +18209,10 @@ async function buildFurnitureExport(env, cargaId) {
   const rowKeys = []; // "o:<pedido>" o "b:<pendiente>" de cada fila, para descargar solo lo marcado
   for (const o of pedidos) {
     const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
-    const montaje = tieneMontajeFurniture(o.services);
+    const montaje = tieneMontajeFurniture(serviciosEfectivos(o));
     const tapaPartida = tapaPartidaFurniture(o.services);
-    const observaciones = observacionesRetiradaFurniture(o.services);
+    // Servicio quitado a mano (Jennifer, 2026-10-23): el cliente ya no quiere la retirada.
+    const observaciones = o.servicioQuitado ? "" : observacionesRetiradaFurniture(o.services);
     const telefono = limpiarTelefonoFurniture(envio.phone);
     // Igual que en el desglose de Furniture: un colchón marcado "FPK" sale
     // independiente por SEUR, no entra en esta exportación. Ampliado
@@ -11498,12 +18226,7 @@ async function buildFurnitureExport(env, cargaId) {
     // aquí (Jennifer, 2026-09-21: tienen su propia línea independiente, con
     // su propia carga — ver más abajo, reposicionesEnCarga — así que no
     // dependen de si el resto del pedido está en esta carga o no).
-    const backordersPedido = backorders.filter((b) => b.orderId === o.id
-      && (b.estado === "pendiente" || b.estado === "cubierto")
-      && !b.reposicion
-      && !b.gestoComercial
-      && !b.envioAparte // sale después, como línea propia (ver más abajo)
-      && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
+    const backordersPedido = articulosFurnitureDePedido(backorders, o.id);
 
     const descripciones = backordersPedido.length
       ? backordersPedido.flatMap((b) => descripcionesBackorder(b, o.product, tapaPartida, o.services))
@@ -11539,7 +18262,7 @@ async function buildFurnitureExport(env, cargaId) {
   for (const b of reposicionesEnCarga) {
     const o = orders.find((x) => x.id === b.orderId);
     if (!o) continue;
-    const montaje = tieneMontajeFurniture(o.services);
+    const montaje = tieneMontajeFurniture(serviciosEfectivos(o));
     // Sin la retirada de cama/colchón del pedido original (Jennifer,
     // 2026-09-21): esa retirada ya se hizo con el envío original — una
     // reposición no vuelve a retirar la cama entera, solo la pieza rota,
@@ -11549,16 +18272,30 @@ async function buildFurnitureExport(env, cargaId) {
     // que distinguir si el colchón recogido vuelve a nuestras instalaciones
     // o es para desechar — para el resto (tapicería) se mantiene el aviso
     // fijo de siempre, que ya asume la recogida de la pieza dañada.
-    let observaciones = "REPOSICIÓN — desmontar y retirar la pieza dañada, devolver a almacén";
+    let observaciones = b.servicioMontaje ? "SERVICIO DE MONTAJE — no se lleva mercancía, montar lo que ya tiene el cliente" + (b.detalleMontaje ? ": " + b.detalleMontaje : "")
+      : b.revisionMontaje ? "REVISIÓN DE MONTAJE — no se lleva mercancía" : "REPOSICIÓN — desmontar y retirar la pieza dañada, devolver a almacén";
     if (b.tipo === "colchon") {
       if (!b.recogida) {
         observaciones = "REPOSICIÓN — colchón nuevo, SIN recogida del colchón anterior";
       } else if (b.recogidaDestino === "desechar") {
-        observaciones = "REPOSICIÓN — recoger el colchón dañado, es PARA DESECHAR";
+        observaciones = "REPOSICIÓN — recoger el colchón dañado" + (b.recogidaQue ? " (" + String(b.recogidaQue).toUpperCase() + ")" : "") + ", es PARA DESECHAR";
       } else {
-        observaciones = "REPOSICIÓN — recoger el colchón dañado y devolver a nuestras instalaciones";
+        const queRecoger = (b.devolucionFabrica && b.devolucionFabrica.que) || b.recogidaQue;
+        observaciones = "REPOSICIÓN — recoger el colchón dañado" + (queRecoger ? " (" + String(queRecoger).toUpperCase() + ")" : "") + " y devolver a nuestras instalaciones";
       }
     }
+    // Servicios adicionales elegidos al crear la reposición (Jennifer,
+    // 2026-10-20): mandan sobre el aviso fijo de la tapicería; en un colchón
+    // se añaden a lo de la recogida.
+    const servRep = (b.serviciosReposicion || []).filter(Boolean);
+    if (servRep.length) observaciones = (b.tipo === "colchon" ? observaciones + " + " : "REPOSICIÓN — ") + servRep.join(" + ");
+    // Tapicería: lo que hay que recoger, si se escribió (Jennifer, 2026-11-12).
+    if (b.tipo !== "colchon" && b.devolucionFabrica && b.devolucionFabrica.estado === "recoger" && b.devolucionFabrica.que && !b.servicioMontaje && !b.revisionMontaje) observaciones += " · RECOGER: " + String(b.devolucionFabrica.que).toUpperCase();
+    // El cliente NO tiene la mercancía en casa (Jennifer, 2026-10-28): se
+    // junta con lo que está bien del pedido y se entrega todo junto.
+    if (b.mercanciaCliente === "juntar") observaciones = OBSERVACIONES_REPOSICION_JUNTAR;
+    // La revisión de montaje solo lleva subida a piso (Jennifer, 2026-10-22).
+    const montajeRep = b.servicioMontaje || (!b.revisionMontaje && (montaje || servRep.some((s) => /MONTAJE/i.test(s))));
     const telefono = limpiarTelefonoFurniture(o.phone);
     // Varias piezas o canapé completo (Jennifer, 2026-10-07): un bulto por
     // pieza elegida, con las mismas reglas que un canapé normal (y por cada
@@ -11574,10 +18311,10 @@ async function buildFurnitureExport(env, cargaId) {
     }
     for (const descrip of descripciones) {
       rows.push([
-        fechaTexto, "", "REP" + referenciaPedido(o), o.name, o.furnitureAddress || o.address || "",
+        fechaTexto, "", refReposicionFurniture(b, o), o.name, o.furnitureAddress || o.address || "",
         o.postalCode || "", o.city || "", descrip, "1", "1229", telefono, telefono, observaciones,
         "", "", "", "", "", "", "", "", "", "", "",
-        montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
+        montajeRep ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
         o.email || "", provinciaPorCp(o.postalCode), "",
       ]);
       rowKeys.push("b:" + b.id);
@@ -11593,7 +18330,7 @@ async function buildFurnitureExport(env, cargaId) {
     const o = orders.find((x) => x.id === b.orderId);
     if (!o) continue;
     const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
-    const montaje = tieneMontajeFurniture(o.services);
+    const montaje = tieneMontajeFurniture(serviciosEfectivos(o));
     const telefono = limpiarTelefonoFurniture(envio.phone);
     const observaciones = "Resto del pedido " + referenciaPedido(o) + " (segundo envío)";
     for (const descrip of descripcionesBackorder(b, o.product, tapaPartidaFurniture(o.services), o.services)) {
@@ -11649,30 +18386,36 @@ async function buildListadoAlmacen(env, cargaId) {
 
   // Mismo orden y mismos artículos que el fichero de Furniture.
   const clavePedido = (o) => String(o.grupoEnvio || o.id);
-  const pedidos = orders.filter((o) => o.cargaId === carga.id)
+  const pedidos = orders.filter((o) => o.cargaId === carga.id && !pedidoCanceladoSrv(o))
     .sort((a, b) => clavePedido(a).localeCompare(clavePedido(b)) || (a.id === a.grupoEnvio ? -1 : b.id === b.grupoEnvio ? 1 : 0));
   const filas = [];
   // reservado (Jennifer, 2026-10-02): fecha del email con la etiqueta de
   // reserva — ese artículo ya está apartado y etiquetado en el almacén.
+  // clave: la misma del check de la carga (o:<pedido> / b:<pendiente>), para
+  // sacar solo lo marcado (Jennifer, 2026-10-22).
+  let clave = "";
   const fila = (pedido, o, referencia, producto, cantidad, b) =>
-    filas.push({ pedido, referencia: referencia || "", producto, cantidad: cantidad || 1, montaje: tieneMontajeFurniture(o.services), reservado: (b && b.reservaEnviada) || null });
+    filas.push({ pedido, referencia: referencia || "", producto, cantidad: cantidad || 1, montaje: tieneMontajeFurniture(serviciosEfectivos(o)), reservado: (b && b.reservaEnviada) || null, clave });
 
   for (const o of pedidos) {
+    clave = "o:" + o.id;
     const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
     const lineas = backorders.filter((b) => b.orderId === o.id
       && (b.estado === "pendiente" || b.estado === "cubierto")
-      && !b.reposicion && !b.gestoComercial && !b.envioAparte
+      && !b.reposicion && !(b.gestoComercial && !b.gcFurniture) && !b.envioAparte
       && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
     if (!lineas.length) { fila(referenciaPedido(envio), o, "", o.product || "", 1); continue; }
     for (const b of lineas) fila(referenciaPedido(envio), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad, b);
   }
   for (const b of backorders.filter((b) => b.reposicion && b.estado === "pendiente" && b.cargaId === carga.id && !((b.tipo === "colchon" || b.piezaManual) && b.agenciaReposicion === "SEUR") && b.agenciaReposicion !== "NACEX")) {
     const o = orders.find((x) => x.id === b.orderId);
-    if (o) fila("REP" + referenciaPedido(o), o, b.referencia, "REPOSICIÓN: " + [b.stockModel, b.talla, b.color].filter(Boolean).join(" "), b.cantidad);
+    clave = "b:" + b.id;
+    if (o) fila(refReposicionFurniture(b, o), o, b.referencia, b.servicioMontaje ? "SERVICIO MONTAJE (sin mercancía)" + (b.detalleMontaje ? ": " + b.detalleMontaje : "") : b.revisionMontaje ? "REVISIÓN MONTAJE (sin mercancía)" : (b.mercanciaCliente === "juntar" ? "REPOSICIÓN (JUNTAR CON EL RESTO DEL PEDIDO): " : "REPOSICIÓN: ") + [b.stockModel, b.talla, b.color].filter(Boolean).join(" "), b.cantidad);
   }
   for (const b of backorders.filter((b) => b.envioAparte && (b.estado === "pendiente" || b.estado === "cubierto") && b.cargaId === carga.id)) {
     const o = orders.find((x) => x.id === b.orderId);
     if (!o) continue;
+    clave = "b:" + b.id;
     const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
     fila(referenciaPedido(envio) + (b.refSuffix || ""), o, b.referencia, productoAlmacen(b, o.product, o.services), b.cantidad, b);
   }
@@ -11808,6 +18551,16 @@ function observacionesSeur(linea) {
 // el almacén... si es algo marcado como recibido hoy tiene que ponerlo, si
 // es de stock tiene que ponerlo para que así no lo busquen en el sitio
 // incorrecto"). Mismos artículos que el fichero de SEUR.
+// Referencia de una reposición en Furniture (Jennifer, 2026-10-28): si el
+// cliente NO tiene la mercancía en casa, va con el nº de pedido + "BIS" para
+// juntarla con lo que está bien; si la tiene, "REP" delante como siempre.
+const OBSERVACIONES_REPOSICION_JUNTAR = "JUNTAR CON LAS PARTES DEL PEDIDO QUE ESTÁN BIEN Y ENTREGAR. NO MANDAR LA PIEZA SOLA";
+function refReposicionFurniture(b, o) {
+  if (b.servicioMontaje) return "MONTAJE" + referenciaPedido(o);
+  if (b.revisionMontaje) return "REVISIÓN" + referenciaPedido(o);
+  if (b.mercanciaCliente === "juntar") return referenciaPedido(o) + "BIS";
+  return "REP" + referenciaPedido(o);
+}
 async function buildListadoAlmacenSeur(env, cargaId) {
   const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
   const [orders, cargas, backorders] = await Promise.all([
@@ -11823,7 +18576,7 @@ async function buildListadoAlmacenSeur(env, cargaId) {
   const producto = (b) => [b.tipo === "almohada" ? "ALMOHADA" : b.tipo === "colchon" ? "COLCHÓN" : b.tipo === "topper" && !/topper/i.test(nombreCortoProducto(b.stockModel)) ? "TOPPER" : "", nombreCortoProducto(b.stockModel), b.talla].filter(Boolean).join(" ");
   const filas = [];
   for (const o of orders) {
-    if (o.agencia !== "SEUR" || o.cargaId !== carga.id) continue;
+    if (o.agencia !== "SEUR" || o.cargaId !== carga.id || pedidoCanceladoSrv(o)) continue;
     const cubiertos = backorders.filter((b) => b.orderId === o.id && b.estado === "cubierto");
     if (!cubiertos.length) { filas.push({ pedido: referenciaSeur(o, "", ""), cliente: o.name || "", producto: o.product || "", cantidad: 1, origen: "STOCK" }); continue; }
     for (const b of cubiertos) filas.push({ pedido: referenciaSeur(o, b.refSuffix || "", ""), cliente: o.name || "", producto: producto(b), cantidad: b.cantidad || 1, origen: b.reservaEnviada ? "YA APARTADO CON ETIQUETA DE RESERVA (" + corto(b.reservaEnviada) + ")" : "STOCK" });
@@ -11831,10 +18584,12 @@ async function buildListadoAlmacenSeur(env, cargaId) {
   for (const b of backorders) {
     if (b.estado !== "listo-seur" || b.cargaId !== carga.id) continue;
     const o = orders.find((x) => x.id === b.orderId);
-    if (!o) continue;
+    if (!o || pedidoCanceladoSrv(o)) continue;
     const prefijo = b.reposicion ? "REP" : b.gestoComercial ? "GC" : "";
     let origen;
-    if (b.reservaEnviada) origen = "YA APARTADO CON ETIQUETA DE RESERVA (" + corto(b.reservaEnviada) + ")";
+    // Colchón que viene de una devolución (Jennifer, 2026-10-28).
+    if (b.desdeDevolucion) origen = "ES UNA DEVOLUCIÓN (" + (b.desdeDevolucion.ref || "") + ")";
+    else if (b.reservaEnviada) origen = "YA APARTADO CON ETIQUETA DE RESERVA (" + corto(b.reservaEnviada) + ")";
     else if (/^ENVÍO SUELTO/i.test(b.mercanciaFabrica || "")) origen = "APARTADO EN ALMACÉN";
     // Gesto comercial cubierto con stock (Jennifer, 2026-10-15): se coge del stock.
     else if (b.desdeStock || (b.gestoComercial && /ya en stock/i.test(b.mercanciaFabrica || ""))) origen = "STOCK";
@@ -11856,6 +18611,142 @@ function cpSeur(o) {
 
 // Todo lo que necesita buildSeurExport, para cargarlo una sola vez cuando
 // se recorren muchas cargas (lista de "Envíos SEUR").
+// Nº de recogida y de expedición en la respuesta de NACEX (Jennifer,
+// 2026-11-06). NACEX no escribe siempre igual: "Recogida 2822/388093 -
+// 2822/11513310", "con nº 2822/388298 y nº de envío 2822/11515149",
+// "misma recogida, seguimiento 2822/11515191". Por la palabra de delante y,
+// si no la hay, por la longitud: recogida = 6 cifras tras la barra,
+// expedición/envío = 7 o más.
+function leerNumerosNacex(texto) {
+  const s = String(texto || "");
+  let recogida = "", expedicion = "";
+  const re = /([0-9]{4})\s*[\/-]\s*([0-9]{5,})/g;
+  let m, finAnterior = 0;
+  while ((m = re.exec(s))) {
+    const num = m[1] + "/" + m[2];
+    const antes = s.slice(Math.max(finAnterior, m.index - 25), m.index).toLowerCase();
+    finAnterior = m.index + m[0].length;
+    const esExp = /env[ií]o|exp|seguimiento|albar/.test(antes) ? true : /recogida/.test(antes) && !/misma/.test(antes) ? false : m[2].length >= 7;
+    if (esExp) { if (!expedicion) expedicion = num; } else if (!recogida) recogida = num;
+  }
+  if (!recogida && /misma\s+recogida/i.test(s)) recogida = "misma recogida";
+  return { recogida, expedicion };
+}
+
+// Informe mensual de NACEX (Jennifer, 2026-11-06): el día 1 de cada mes,
+// desde las 9:00 de Madrid, a contabilidad y a Jonathan Estrada con todos los
+// envíos mandados a NACEX el mes anterior, para repasar la factura.
+// mes = "AAAA-MM". Con probar: solo devuelve lo que se mandaría.
+async function enviarInformeNacexMensual(env, { mes, forzar, probar } = {}) {
+  const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  const ahora = new Date();
+  const hoyMadrid = ahora.toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  const hora = Number(ahora.toLocaleString("en-GB", { timeZone: "Europe/Madrid", hour: "2-digit", hour12: false }));
+  if (!mes) {
+    const [y, m] = hoyMadrid.split("-").map(Number);
+    const prev = m === 1 ? [y - 1, 12] : [y, m - 1];
+    mes = prev[0] + "-" + String(prev[1]).padStart(2, "0");
+  }
+  if (!forzar && !probar) {
+    if (hoyMadrid.slice(8, 10) !== "01" || hora < 9) return { ok: true, enviado: false, motivo: "no_toca" };
+    const { mes: ultimo } = await (await stub.fetch("https://do/nacex/informe-mes")).json();
+    if (ultimo === mes) return { ok: true, enviado: false, motivo: "ya_enviado" };
+  }
+  const [backorders, orders] = await Promise.all([
+    inventoryStub(env).fetch("https://do/backorders").then((x) => x.json()),
+    stub.fetch("https://do/orders").then((x) => x.json()),
+  ]);
+  const mesDe = (iso) => (iso ? new Date(iso).toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" }).slice(0, 7) : "");
+  const fecha = (iso) => (iso ? new Date(iso).toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" }) : "");
+  const lista = backorders.filter((b) => b.nacex && b.nacex.documentado && b.estado !== "cancelado" && mesDe(b.nacex.documentado) === mes)
+    .sort((a, b) => String(a.nacex.documentado).localeCompare(String(b.nacex.documentado)));
+  const MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+  const nombreMes = MESES[Number(mes.slice(5, 7)) - 1] + " " + mes.slice(0, 4);
+  const filas = lista.map((b) => {
+    const o = orders.find((x) => String(x.id) === String(b.orderId)) || {};
+    const n = b.nacex;
+    const p = String(n.expedicion || "").replace(/ /g, "").split("/");
+    const seguimiento = p.length === 2 && /^[0-9]+$/.test(p[0]) && /^[0-9]+$/.test(p[1])
+      ? "https://www.nacex.es/seguimientoDetalle.do?agencia_origen=" + p[0] + "&numero_albaran=" + p[1] + "&estado=1&internacional=0&externo=N&usr=null&pas=null" : "";
+    return {
+      fecha: fecha(n.documentado), pedido: (b.reposicion ? "REP " : "") + referenciaPedido(o.id ? o : b), cliente: o.name || "",
+      que: (b.cantidad || 1) + "x " + (b.piezaTexto || b.stockModel || "") + (b.talla ? " " + b.talla : ""),
+      bultos: n.bultos || 1, retorno: n.retorno ? "SÍ" : "NO", recogida: n.recogida || "", expedicion: n.expedicion || "",
+      estado: b.estado === "servido" ? "Enviado" : "Pedido a NACEX", seguimiento,
+    };
+  });
+  const bultos = filas.reduce((s, f) => s + Number(f.bultos || 1), 0);
+  const conRetorno = filas.filter((f) => f.retorno === "SÍ").length;
+  const asunto = (forzar ? "" : "") + "Envíos NACEX de " + nombreMes + " (" + filas.length + ") — para repasar la factura";
+  const esc = (x) => String(x == null ? "" : x).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const cab = ["Fecha", "Pedido", "Cliente", "Qué se envía", "Bultos", "Retorno", "Nº recogida", "Nº expedición", "Estado", "Seguimiento"];
+  const html = "<div style=\"font-family:Arial,sans-serif;font-size:13px\"><p>Buenos días,</p><p>Os pasamos el listado de los envíos que hemos mandado por <strong>NACEX</strong> en <strong>" + esc(nombreMes) + "</strong>, para que podáis repasar la factura.</p>"
+    + "<p><strong>" + filas.length + " envíos</strong> · " + bultos + " bultos · " + conRetorno + " con retorno.</p>"
+    + (filas.length ? "<table cellpadding=\"5\" cellspacing=\"0\" border=\"1\" style=\"border-collapse:collapse;font-size:12px\"><tr style=\"background:#1f8a4c;color:#fff\">" + cab.map((c) => "<th>" + c + "</th>").join("") + "</tr>"
+      + filas.map((f) => "<tr><td>" + [f.fecha, f.pedido, f.cliente, f.que, f.bultos, f.retorno, f.recogida, f.expedicion, f.estado].map(esc).join("</td><td>") + "</td><td>" + (f.seguimiento ? "<a href=\"" + esc(f.seguimiento) + "\">Ver</a>" : "") + "</td></tr>").join("")
+      + "</table>" : "<p>No ha habido envíos por NACEX este mes.</p>")
+    + "<p>Va también adjunto en un fichero para abrir con Excel.</p><p>Un saludo.</p></div>";
+  const texto = "Envíos por NACEX de " + nombreMes + ": " + filas.length + " (" + bultos + " bultos, " + conRetorno + " con retorno).\n\n"
+    + filas.map((f) => [f.fecha, f.pedido, f.cliente, f.que, f.bultos + " bulto(s)", "retorno " + f.retorno, "recogida " + f.recogida, "exp " + f.expedicion].join(" · ")).join("\n");
+  const csv = "﻿" + [cab.join(";")].concat(filas.map((f) => [f.fecha, f.pedido, f.cliente, f.que, f.bultos, f.retorno, f.recogida, f.expedicion, f.estado, f.seguimiento]
+    .map((v) => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"').join(";"))).join("\r\n");
+  if (probar) return { ok: true, probar: true, mes, asunto, envios: filas.length, filas };
+  const bytes = new TextEncoder().encode(csv);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  // OJO: un script viejo manda al ALMACÉN cualquier acción que no conoce.
+  // Antes de mandar, se comprueba que es la v11 (nacex-leer devuelve version).
+  const v = await llamarScriptSeur(env, "nacex-leer", { threadIds: [] });
+  if (!v.ok || !(Number(v.version) >= 11)) return { ok: false, error: "Falta pegar la versión 11 del script de Google (si no, el informe iría al almacén). No se ha mandado nada." };
+  const r = await llamarScriptSeur(env, "nacex-informe", { asunto, texto, html, fichero: { nombre: "Envios_NACEX_" + mes + ".csv", tipo: "text/csv", base64: btoa(bin) } });
+  if (!r.ok) return { ok: false, error: r.error === "script_sin_actualizar" || r.error === "accion_desconocida" ? "Falta pegar la versión 11 del script de Google." : (r.error || "error") };
+  if (!forzar) await stub.fetch("https://do/nacex/informe-mes", { method: "POST", body: JSON.stringify({ mes }) });
+  return { ok: true, enviado: true, mes, envios: filas.length };
+}
+
+// Solicitud de material a SEUR (Jennifer, 2026-11-11): "un jueves sí y un
+// jueves no" email automático a compras.madrid@seur.net con la plantilla fija
+// adjunta. La primera se mandó a mano el 11/11; la automática empieza el
+// jueves 26/11 y sigue cada 14 días. El destinatario está fijo en el script
+// de Google (v12); aquí solo va el contenido.
+const MATERIAL_SEUR_PRIMER_JUEVES = "2026-11-26";
+const MATERIAL_SEUR_DESTINO = "compras.madrid@seur.net";
+const MATERIAL_SEUR_ASUNTO = "SOLICITUD DE MATERIAL - GLOBAL HAPPY (63235-28)";
+const MATERIAL_SEUR_TEXTO_DEFECTO = "Buenos días.\n\n\nAdjunto solicitud de material, la última vez trajisteis pocos rollos, necesitamos un par de cajas";
+function proximosEnviosMaterialSeur(desdeDia, n = 4) {
+  const dias = (d) => Date.UTC(Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1, Number(d.slice(8, 10))) / 86400000;
+  let t = dias(MATERIAL_SEUR_PRIMER_JUEVES);
+  const desde = dias(desdeDia);
+  if (desde > t) t += Math.ceil((desde - t) / 14) * 14;
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(new Date((t + i * 14) * 86400000).toISOString().slice(0, 10));
+  return out;
+}
+async function enviarSolicitudMaterialSeur(env, { forzar, usuario } = {}) {
+  const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  const ahora = new Date();
+  const hoy = ahora.toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+  const hora = Number(ahora.toLocaleString("en-GB", { timeZone: "Europe/Madrid", hour: "2-digit", hour12: false }));
+  const estado = await (await stub.fetch("https://do/seur/material")).json();
+  if (!forzar) {
+    if (proximosEnviosMaterialSeur(hoy, 1)[0] !== hoy || hora < 9) return { ok: true, enviado: false, motivo: "no_toca" };
+    if (estado.ultimoDia === hoy) return { ok: true, enviado: false, motivo: "ya_enviado" };
+  }
+  const texto = estado.texto || MATERIAL_SEUR_TEXTO_DEFECTO;
+  // OJO: un script viejo manda al ALMACÉN las acciones que no conoce (el
+  // adjunto falso de seguridad lo para, pero se comprueba la versión antes).
+  const v = await llamarScriptSeur(env, "nacex-leer", { threadIds: [] });
+  let r;
+  if (!v.ok || !(Number(v.version) >= 12)) r = { ok: false, error: "Falta pegar la versión 12 del script de Google. No se ha mandado nada." };
+  else {
+    r = await llamarScriptSeur(env, "seur-material", { asunto: MATERIAL_SEUR_ASUNTO, texto, fichero: { nombre: PLANTILLA_MATERIAL_SEUR_NOMBRE, tipo: "application/vnd.ms-excel", base64: PLANTILLA_MATERIAL_SEUR_B64 } });
+    if (!r.ok && (r.error === "script_sin_actualizar" || r.error === "accion_desconocida")) r.error = "Falta pegar la versión 12 del script de Google.";
+  }
+  const envio = { fecha: ahora.toISOString(), dia: hoy, usuario: usuario || null, auto: !forzar, ok: !!r.ok, error: r.ok ? null : (r.error || "error"), para: MATERIAL_SEUR_DESTINO };
+  await stub.fetch("https://do/seur/material", { method: "POST", body: JSON.stringify({ envio }) });
+  return r.ok ? { ok: true, enviado: true, dia: hoy } : { ok: false, error: envio.error };
+}
+
 async function cargarDatosSeurExport(env) {
   const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
   const invStub = inventoryStub(env);
@@ -11901,23 +18792,33 @@ async function buildSeurExport(env, cargaId, opts = {}) {
     if (!itemsPorPedido.has(orderId)) itemsPorPedido.set(orderId, []);
     const lista = itemsPorPedido.get(orderId);
     for (let i = 0; i < b.cantidad; i++) {
-      lista.push({ sku, title: product?.title || b.stockModel, talla: b.talla, tipo: b.tipo, pesoUnidad, refSuffix: b.refSuffix || "", reposicion: !!b.reposicion, gestoComercial: !!b.gestoComercial });
+      lista.push({ sku, stockModel: b.stockModel, title: product?.title || b.stockModel, talla: b.talla, tipo: b.tipo, pesoUnidad, refSuffix: b.refSuffix || "", reposicion: !!b.reposicion, gestoComercial: !!b.gestoComercial });
     }
   }
 
+  const canceladosEnCarga = new Set();
   for (const o of orders) {
     if (o.agencia !== "SEUR" || o.cargaId !== carga.id) continue;
+    if (pedidoCanceladoSrv(o)) { canceladosEnCarga.add(o.id); continue; }
     for (const b of backorders) {
       if (b.orderId === o.id && (b.estado === "cubierto" || (servido(b) && !b.cargaId))) agregarItem(o.id, b);
     }
   }
   for (const b of backorders) {
-    if ((b.estado === "listo-seur" || servido(b)) && b.cargaId === carga.id) agregarItem(b.orderId, b);
+    if ((b.estado === "listo-seur" || servido(b)) && b.cargaId === carga.id) {
+      if (pedidoCanceladoSrv(ordersById.get(b.orderId))) { canceladosEnCarga.add(b.orderId); continue; }
+      agregarItem(b.orderId, b);
+    }
   }
 
   const rows = [];
   const rowOrderIds = []; // orderId de cada fila de rows, mismo orden
+  const rowPiezas = []; // piezas (stockModel/talla) de cada fila, para el coste de envío
   const avisos = [];
+  for (const id of canceladosEnCarga) {
+    const o = ordersById.get(id);
+    avisos.push(`${o ? referenciaPedido(o) : id}: el pedido está CANCELADO${o && o.estado ? " (" + o.estado + ")" : ""} y sigue en esta carga — NO sale en el fichero; sácalo de la carga.`);
+  }
   for (const [orderId, piezas] of itemsPorPedido) {
     const o = ordersById.get(orderId);
     if (!o) continue;
@@ -11966,11 +18867,12 @@ async function buildSeurExport(env, cargaId, opts = {}) {
           "", "", "", o.email || "", servicio, producto,
         ]);
         rowOrderIds.push(o.id);
+        rowPiezas.push(linea.piezas.map((p) => ({ stockModel: p.stockModel, talla: p.talla, sku: p.sku })));
       });
     }
   }
 
-  return { rows, rowOrderIds, carga, avisos };
+  return { rows, rowOrderIds, rowPiezas, carga, avisos };
 }
 
 // Líneas de una carga para la lista "Envíos SEUR": REF (0), NOMBRE (1),
@@ -12003,6 +18905,16 @@ function noLeidosCorreo(correo) {
 // guarda los mensajes nuevos. Los correos de SEUR fuera de esos hilos (si
 // abren un correo nuevo con nº de incidencia) se enganchan a la línea cuya
 // referencia o nº de expedición aparezca en el asunto o el texto.
+// La referencia tiene que aparecer entera: "40451996M-A" no vale dentro de
+// "40451996M-A3" (Jennifer, 2026-10-28: los correos del caso de la -A3
+// se enganchaban también a la -A).
+function contieneRefSeur(texto, ref) {
+  if (!ref) return false;
+  for (let i = texto.indexOf(ref); i !== -1; i = texto.indexOf(ref, i + 1)) {
+    if (!/[0-9]/.test(texto[i + ref.length] || "")) return true;
+  }
+  return false;
+}
 async function actualizarCorreosSeur(env, segundaPasada) {
   const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
   const norm = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -12035,13 +18947,17 @@ async function actualizarCorreosSeur(env, segundaPasada) {
     const ids = new Set(l.correo.threadIds);
     for (const m of r.sueltos || []) {
       const texto = norm((m.asunto || "") + " " + (m.texto || ""));
-      if (texto.includes(norm(l.refBusca || l.ref)) || (l.expedicion.length >= 6 && texto.includes(norm(l.expedicion)))) ids.add(m.threadId);
+      if (contieneRefSeur(texto, norm(l.refBusca || l.ref)) || (l.expedicion.length >= 6 && contieneRefSeur(texto, norm(l.expedicion)))) ids.add(m.threadId);
     }
     const porId = new Map();
     for (const id of ids) for (const m of (r.hilos || {})[id] || []) porId.set(m.id, { ...m, threadId: id });
     for (const m of r.sueltos || []) if (ids.has(m.threadId)) porId.set(m.id, m);
     const mensajes = [...porId.values()].sort((a, b) => (a.fecha || "").localeCompare(b.fecha || ""))
-      .map((m) => ({ id: m.id, threadId: m.threadId, fecha: m.fecha, de: m.de, asunto: m.asunto, texto: String(m.texto || "").slice(0, 6000), deSeur: !!m.deSeur }))
+      // "Adjuntar documentación" reenviado por postventa (Jennifer,
+      // 2026-10-29, caso 39339983): SEUR a veces lo manda a
+      // postventa@colchonesbezen.com y llega reenviado; cuenta como de SEUR.
+      .map((m) => ({ id: m.id, threadId: m.threadId, fecha: m.fecha, de: m.de, asunto: m.asunto, texto: String(m.texto || "").slice(0, 6000),
+        deSeur: !!m.deSeur || (/seur\.my\.site\.com\/adjuntardocumentacion/i.test(m.texto || "") && /@seur\.com/i.test(m.texto || "")) }))
       .slice(-40);
     if (!mensajes.length) continue;
     const antes = new Set((l.correo.mensajes || []).map((m) => m.id));
@@ -12057,7 +18973,142 @@ async function actualizarCorreosSeur(env, segundaPasada) {
   // (también el email que mandamos nosotros).
   const enganchadas = lineas.filter((l) => l.sinConversacion && cambios.some((c) => c.orderId === l.o.id && c.ref === l.ref)).length;
   if (enganchadas && !segundaPasada) await actualizarCorreosSeur(env, true);
+  if (!segundaPasada) await avisarPortesContabilidad(env).catch(() => null);
   return { ok: true, lineas: lineas.length, nuevos, enganchadas };
+}
+
+// Colores de revisión de los pedidos de Shopify (Jennifer, 2026-10-28: "si
+// sabes que hay envíos que se han entregado los puedes poner tú en verde, o
+// si se han enviado en el color que corresponda"). Solo con datos seguros:
+// cancelado → rojo; sin pagar → azul; enviado (seguimiento SEUR/Furniture o
+// carga ya cerrada) → naranja, o verde si todo está entregado; si ha salido
+// una parte y queda otra por salir → morado ("enviado parcialmente"). Sin
+// datos no se toca. Nunca se baja un color que ya va más adelante
+// (azul/amarillo < morado < naranja < verde); un rojo puesto a mano se
+// respeta. Las reposiciones y los gestos comerciales no cuentan como "parte
+// que falta". Corre cada hora.
+const ORDEN_COLOR = { azul: 0, amarillo: 1, morado: 2, naranja: 3, verde: 4 };
+function colorAutomaticoPedido(o, cerradas, backordersPedido) {
+  if (o.cancelado || o.shopifyCancelado) return "rojo";
+  if (o.paymentStatus !== "PAGADO" && !o.pagoConfirmadoManual) return "azul";
+  if (o.entregadoCliente) return "verde";
+  const entregadoSeur = (e) => /ENTREGAD|entrega efectuada|retirado el envío/i.test(e) && !/NO ENTREGAD|SERÁ ENTREGAD|SERA ENTREGAD|NO SE HA ENTREGAD|NO HA PODIDO|NO SE HA PODIDO/i.test(e);
+  const seur = (o.seurTracking || []).filter((t) => !t.anulado && !/se ha anulado|ha sido registrado/i.test(t.estado || ""));
+  const fur = (o.furnitureTracking || []).filter((t) => !/PENDIENTE DE RECEPCION/i.test(t.estado || ""));
+  const envios = seur.map((t) => entregadoSeur(t.estado || "")).concat(fur.map((t) => /^ENTREGADO/i.test(t.estado || "")));
+  const mios = backordersPedido.filter((b) => b.estado !== "cancelado" && !b.paraStock && !b.reposicion && !b.gestoComercial);
+  const salio = (b) => b.estado === "servido" || (b.cargaId && cerradas.has(b.cargaId));
+  const enviado = envios.length || (o.cargaId && cerradas.has(o.cargaId)) || mios.some(salio);
+  if (!enviado) return null;
+  if (mios.some((b) => !salio(b) && ["pendiente", "cubierto", "listo-seur"].includes(b.estado))) return "morado";
+  return envios.length && envios.every(Boolean) ? "verde" : "naranja";
+}
+// Nota "lo quiere todo junto" → FUR (Jennifer, 2026-10-28, caso real
+// BEZEN12297): al decidir FPK/FUR a veces aún no se sabe; si luego se anota
+// en el pedido que el cliente lo quiere todo junto, el colchón que todavía
+// no ha salido pasa solo de FPK (independiente) a FUR (junto con la
+// tapicería). Solo si queda tapicería de ese pedido por salir. Se aplica al
+// guardar la nota y en la pasada de cada hora (por si la decisión FPK llega
+// después de la nota).
+const RE_TODO_JUNTO = /TODO\s+JUNTO|JUNTO\s+TODO|TODO\s+A\s+LA\s+VEZ|(ENVIAR|MANDAR|ENTREGAR|SALGA|VAYA)\s+(TODO\s+)?JUNT/i;
+const RE_NO_JUNTO = /NO\s+(LO\s+)?(QUIERE|HACE\s+FALTA|NECESITA)\s+(TODO\s+)?JUNT/i;
+function notaPideTodoJunto(o) {
+  const t = String((o && o.notas) || "");
+  return RE_TODO_JUNTO.test(t) && !RE_NO_JUNTO.test(t);
+}
+async function aplicarNotasTodoJunto(env, soloOrderId) {
+  let orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
+  orders = orders.filter((o) => notaPideTodoJunto(o) && !o.cancelado && (soloOrderId == null || String(o.id) === String(soloOrderId)));
+  if (!orders.length) return { ok: true, cambios: [] };
+  const inv = inventoryStub(env);
+  const backorders = await inv.fetch("https://do/backorders").then((r) => r.json());
+  const cambios = [];
+  for (const o of orders) {
+    const mios = backorders.filter((b) => String(b.orderId) === String(o.id) && b.estado !== "cancelado" && b.estado !== "servido" && !b.reposicion && !b.paraStock);
+    if (!mios.some((b) => b.tipo === "tapiceria")) continue;
+    for (const b of mios) {
+      if (b.tipo !== "colchon" || b.tipoEnvio === "FUR" || b.cargaId) continue;
+      await inv.fetch("https://do/backorders/" + encodeURIComponent(b.id) + "/plan", { method: "POST", body: JSON.stringify({ tipoEnvio: "FUR" }) });
+      cambios.push({ pedido: o.orderNumber, id: b.id });
+    }
+  }
+  return { ok: true, cambios };
+}
+async function aplicarColoresAutomaticos(env) {
+  const stub = ordersStubSeur(env);
+  const [orders, cargas, backorders] = await Promise.all([
+    stub.fetch("https://do/orders").then((r) => r.json()),
+    stub.fetch("https://do/cargas").then((r) => r.json()),
+    inventoryStub(env).fetch("https://do/backorders").then((r) => r.json()),
+  ]);
+  const cerradas = new Set(cargas.filter((c) => c.estado === "cerrada").map((c) => c.id));
+  const porPedido = new Map();
+  for (const b of backorders) {
+    const k = String(b.orderId);
+    if (!porPedido.has(k)) porPedido.set(k, []);
+    porPedido.get(k).push(b);
+  }
+  const cambios = [];
+  for (const o of orders) {
+    if (o.platform && o.platform !== "Shopify") continue;
+    const nuevo = colorAutomaticoPedido(o, cerradas, porPedido.get(String(o.id)) || []);
+    const actual = o.colorTag || null;
+    if (!nuevo || nuevo === actual || actual === "rojo") continue;
+    if (nuevo !== "rojo" && actual && (ORDEN_COLOR[actual] ?? -1) >= ORDEN_COLOR[nuevo]) continue;
+    cambios.push({ id: o.id, colorTag: nuevo });
+  }
+  if (cambios.length) await stub.fetch("https://do/orders/colores-auto", { method: "POST", body: JSON.stringify({ cambios }) });
+  return { ok: true, cambios: cambios.length };
+}
+
+// Portes que SEUR nos va a abonar (Jennifer, 2026-10-28: "cuando llegue el
+// aviso de que nos van a pagar los portes, que mande solo el email"): cada
+// email de SEUR que lo confirma genera un email a contabilidad (acción
+// "contabilidad-portes" del Apps Script, destino fijo allí), una sola vez por
+// email de SEUR. El importe es lo que SEUR cobró por esa expedición: lo mira
+// contabilidad en su factura. Si el envío falla se reintenta en la próxima pasada.
+
+const RE_PORTES_SEUR = /se tramita la devoluci[oó]n de (los )?portes|abono de (los )?portes|abonaremos (los )?portes|devoluci[oó]n de (los )?portes/i;
+async function avisarPortesContabilidad(env) {
+  const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
+  let enviados = 0;
+  for (const o of orders) {
+    for (const [ref, info] of Object.entries(o.enviosSeurInfo || {})) {
+      const avisados = info.portesContabilidad || {};
+      for (const m of (info.correo && info.correo.mensajes) || []) {
+        if (!m.deSeur || avisados[m.id]) continue;
+        // Solo lo que escribe SEUR, no lo que citan de nuestro email.
+        const propio = String(m.texto || "").split(/\n-{5,}|\nDe: |\nEl .{5,80} escribió:/)[0];
+        if (!RE_PORTES_SEUR.test(propio)) continue;
+        const caso = (/n[ºo°]\.?\s*de caso\s*:?\s*(\d{6,})|caso\s+(\d{6,})/i.exec(propio) || []).slice(1).find(Boolean) || "";
+        const t = estadoSeurDeLinea(o, info.refSeur || ref, 1);
+        const fechaEmail = m.fecha ? new Date(m.fecha).toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" }) : "";
+        const texto = [
+          "Hola,",
+          "",
+          "SEUR nos ha confirmado que va a devolver los portes de este envío. Por favor, controlad que nos hagan el abono.",
+          "",
+          "Caso SEUR: " + (caso || "(sin nº)"),
+          "Pedido: " + ref + (o.platform ? " (" + o.platform + ")" : ""),
+          "Cliente: " + (o.name || ""),
+          "Expedición SEUR: " + (t && t.numeroExpedicion ? t.numeroExpedicion : "(ver en SEUR)") + (info.refSeur && info.refSeur !== ref ? " · referencia en SEUR " + info.refSeur : ""),
+          "Fecha del email de SEUR: " + fechaEmail,
+          "",
+          "Lo que dice SEUR:",
+          "\"" + propio.replace(/\s+/g, " ").trim().slice(0, 600) + "\"",
+          "",
+          "El importe es el que SEUR nos cobró por esta expedición (ver su factura).",
+          "",
+          "Gestión HappyDeal",
+        ].join("\n");
+        const r = await llamarScriptSeur(env, "contabilidad-portes", { asunto: "SEUR abona portes · caso " + (caso || "?") + " · " + ref, texto });
+        if (!r || !r.ok) continue;
+        await ordersStubSeur(env).fetch("https://do/orders/envio-seur-info", { method: "POST", body: JSON.stringify({ orderId: o.id, ref, portesContabilidad: { mensajeId: m.id, caso, fechaEmail: m.fecha || null } }) });
+        enviados++;
+      }
+    }
+  }
+  return { ok: true, enviados };
 }
 
 // Estado en SEUR de una línea: la entrada de seguimiento con la misma
@@ -12139,6 +19190,11 @@ function buildSeurCsv(rows) {
 // respuestas se marcan no-store para evitarlo.
 async function handleFetch(request, env) {
     const url = new URL(request.url);
+
+    // Ventas: presupuestos y WhatsApp en una pestaña aparte (Jennifer, 2026-11-12).
+    if (url.pathname === "/ventas") {
+      return new Response(renderPage("ventas"), { headers: { "content-type": "text/html; charset=utf-8" } });
+    }
 
     if (url.pathname === "/") {
       return new Response(renderPage(), { headers: { "content-type": "text/html; charset=utf-8" } });
@@ -12266,7 +19322,7 @@ async function handleFetch(request, env) {
     // se tratan como PAGADOS (confirmado por Jennifer, 2026-09-17: "en
     // principio sí vamos a tratar todos como pagados") — a diferencia de
     // Shopify, aquí no hay un estado de pago fiable fila a fila.
-    const marketplaceImportMatch = url.pathname.match(/^\/api\/(carrefour|maison-du-monde|worten|conforama|conforama-es|leroy-merlin)\/import$/);
+    const marketplaceImportMatch = url.pathname.match(/^\/api\/(carrefour|maison-du-monde|worten|conforama|conforama-es|leroy-merlin|groupon)\/import$/);
     if (marketplaceImportMatch && request.method === "POST") {
       const platform = MARKETPLACE_PLATFORM_BY_ID[marketplaceImportMatch[1]];
       const { entries, forzar } = await request.json();
@@ -12309,8 +19365,23 @@ async function handleFetch(request, env) {
       // (/orders/import); el resto se guarda sin tocar stock
       // (/orders/import-simple), igual que en la Fase 1.
       const cutoff = PROCESAMIENTO_DESDE[platform];
-      const conMotor = orders.filter((o) => marketplaceFechaDesde(o.orderDate, cutoff) && marketplaceEstadoElegible(o));
-      const sinMotor = orders.filter((o) => !(marketplaceFechaDesde(o.orderDate, cutoff) && marketplaceEstadoElegible(o)));
+      // Groupon con "ECO" en el producto (Jennifer, 2026-10-16): entran con
+      // campana y NO se tramitan (ni stock ni proveedores) hasta que se
+      // conteste; al contestar se tramitan (ver /orders/review-note).
+      const retenerEco = new Set();
+      if (platform === "Groupon") {
+        const previos = new Map((await (await stub.fetch("https://do/orders")).json()).map((o) => [o.id, o]));
+        for (const o of orders) {
+          const prev = previos.get(o.id);
+          if (!/ECO/i.test(o.product || "") || (prev && prev.inventoryProcessed)) continue;
+          retenerEco.add(o.id);
+          o.grouponEco = true;
+          o.needsReview = true;
+          o.reviewReasons = [PREGUNTA_GROUPON_ECO];
+        }
+      }
+      const conMotor = orders.filter((o) => !retenerEco.has(o.id) && marketplaceFechaDesde(o.orderDate, cutoff) && marketplaceEstadoElegible(o));
+      const sinMotor = orders.filter((o) => retenerEco.has(o.id) || !(marketplaceFechaDesde(o.orderDate, cutoff) && marketplaceEstadoElegible(o)));
       let tramitadosAhora = 0;
       if (conMotor.length) {
         const r = await stub.fetch("https://do/orders/import", { method: "POST", body: JSON.stringify(conMotor) }).then((x) => x.json()).catch(() => ({}));
@@ -12318,10 +19389,11 @@ async function handleFetch(request, env) {
       }
       if (sinMotor.length) await stub.fetch("https://do/orders/import-simple", { method: "POST", body: JSON.stringify(sinMotor) });
       const sinMatch = orders.filter((o) => !o.skuMatched).length;
-      return Response.json({ ok: true, actualizados: orders.length, procesados: tramitadosAhora, sinMatch, ignorados });
+      const emailsPenalizacion = platform === "Groupon" ? await enviarEmailsPenalizacionGroupon(env, stub, catalogMap) : null;
+      return Response.json({ ok: true, actualizados: orders.length, procesados: tramitadosAhora, sinMatch, ignorados, emailsPenalizacion });
     }
 
-    const marketplacePedidosMatch = url.pathname.match(/^\/api\/(carrefour|maison-du-monde|worten|conforama|conforama-es|leroy-merlin)\/pedidos$/);
+    const marketplacePedidosMatch = url.pathname.match(/^\/api\/(carrefour|maison-du-monde|worten|conforama|conforama-es|leroy-merlin|groupon)\/pedidos$/);
     if (marketplacePedidosMatch && request.method === "GET") {
       const platform = MARKETPLACE_PLATFORM_BY_ID[marketplacePedidosMatch[1]];
       const id = env.ORDERS_STORE.idFromName("shopify");
@@ -12402,6 +19474,20 @@ async function handleFetch(request, env) {
       return proxyInventory(env, "/backorders", request);
     }
 
+    // Recepción parcial (Jennifer, 2026-11-03, BEZEN12235): parte la línea
+    // y la parte recibida sigue la misma regla de reserva automática.
+    const parcialPendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/recibir-parcial$/);
+    if (parcialPendingMatch && request.method === "POST") {
+      const res = await proxyInventory(env, `/backorders/${parcialPendingMatch[1]}/recibir-parcial`, request);
+      const texto = await res.text();
+      let entry = null;
+      try { entry = JSON.parse(texto); } catch (e) { /* respuesta no JSON */ }
+      if (res.ok && entry && esReservaAutomatica(entry)) {
+        return Response.json(await reservaAutomaticaTrasRecibir(env, entry));
+      }
+      return new Response(texto, { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
     const resolvePendingMatch = url.pathname.match(/^\/api\/inventario\/pendientes\/([^/]+)\/resolver$/);
     if (resolvePendingMatch && request.method === "POST") {
       const res = await proxyInventory(env, `/backorders/${resolvePendingMatch[1]}/resolver`, request);
@@ -12416,19 +19502,22 @@ async function handleFetch(request, env) {
       // También almohadas, toppers y protectores (Jennifer, 2026-10-08,
       // N076FUR de BEZEN12280: "al marcar unas almohadas como recibidas no
       // se envía solo el email de reserva").
-      const reservaAuto = entry && (entry.tipo === "colchon" ? entry.tipoEnvio === "FUR" : ["almohada", "topper", "protector"].includes(entry.tipo));
-      if (res.ok && entry && entry.recibidoFabrica && reservaAuto && !entry.reservaEnviada && !entry.reposicion && !entry.gestoComercial && !entry.envioAparte) {
-        const backorders = await inventoryStub(env).fetch("https://do/backorders").then((r) => r.json());
-        const resto = backorders.filter((b) => String(b.orderId) === String(entry.orderId) && b.id !== entry.id
-          && (b.estado === "pendiente" || b.estado === "cubierto") && !b.reposicion && !b.gestoComercial && !b.envioAparte
-          && !(b.tipo === "colchon" && b.tipoEnvio !== "FUR"));
-        if (resto.some((b) => !b.recibidoFabrica)) {
-          const avisoReserva = await reservarStockManual(env, entry);
-          if (avisoReserva.ok) {
-            await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(entry.id) + "/reserva-enviada", { method: "POST", body: "{}" });
-            entry.reservaEnviada = new Date().toISOString();
-          }
-          entry.avisoReserva = avisoReserva;
+      if (res.ok && entry && esReservaAutomatica(entry)) {
+        return Response.json(await reservaAutomaticaTrasRecibir(env, entry));
+      }
+      // Reposición por Furniture recibida (Jennifer, 2026-10-20,
+      // REPBEZEN11705: "lo he marcado como recibido y no me aparece en la
+      // carga de mañana"): entra sola en la próxima carga de Furniture.
+      const repFurniture = entry && entry.reposicion && entry.recibidoFabrica && !entry.cargaId && entry.estado === "pendiente"
+        && entry.agenciaReposicion !== "NACEX" && !((entry.tipo === "colchon" || entry.piezaManual) && entry.agenciaReposicion === "SEUR")
+        && !(entry.tipo === "colchon" && entry.agenciaReposicion !== "FURNITURE");
+      if (res.ok && repFurniture) {
+        const cargas = await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/cargas").then((r) => r.json());
+        const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+        const proxima = cargas.filter((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta" && c.fecha > hoy).sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
+        if (proxima) {
+          const add = await inventoryStub(env).fetch("https://do/admin/reposicion/carga-add", { method: "POST", body: JSON.stringify({ id: entry.id, cargaId: proxima.id }) });
+          if (add.ok) { entry.cargaId = proxima.id; entry.cargaFurniture = { fecha: proxima.fecha, dia: proxima.dia }; }
         }
         return Response.json(entry);
       }
@@ -12477,6 +19566,11 @@ async function handleFetch(request, env) {
     }
 
     // Colchones abiertos (Jennifer, 2026-09-28) — ver adjustAbiertos/usarAbierto.
+    // Stock de tapicería (Jennifer, 2026-10-20).
+    if (url.pathname === "/api/inventario/stock-tapiceria" && request.method === "GET") return proxyInventory(env, "/stock-tapiceria", request);
+    if (url.pathname === "/api/inventario/stock-tapiceria/alta" && request.method === "POST") return proxyInventory(env, "/stock-tapiceria/alta", request);
+    if (url.pathname === "/api/inventario/stock-tapiceria/baja" && request.method === "POST") return proxyInventory(env, "/stock-tapiceria/baja", request);
+    if (url.pathname === "/api/inventario/stock-tapiceria/asignar" && request.method === "POST") return proxyInventory(env, "/stock-tapiceria/asignar", request);
     if (url.pathname === "/api/inventario/abiertos" && request.method === "GET") {
       return proxyInventory(env, "/abiertos", request);
     }
@@ -12628,10 +19722,52 @@ async function handleFetch(request, env) {
 
     // Apuntar a mano una reserva al almacén que sí salió por email pero no
     // quedó registrada (Jennifer, 2026-10-09): { id, fecha }.
+    // Solo reenvía al almacén el aviso + etiqueta de transformación de un
+    // pendiente (Jennifer, 2026-10-21, BEZEN12242: el stock ya se había
+    // descontado a mano), sin tocar stock ni el pendiente.
+    if (url.pathname === "/api/inventario/admin/aviso-transformacion" && request.method === "POST") {
+      const { id, desde } = await request.json();
+      const entry = (await (await inventoryStub(env).fetch("https://do/backorders")).json()).find((b) => b.id === id);
+      if (!entry || !desde) return Response.json({ ok: false, error: "Pendiente no encontrado o falta la medida de origen." }, { status: 400 });
+      const aviso = await avisarAlmacenTransformacion(env, { ...entry, transformadoDesde: desde });
+      return Response.json({ ok: true, aviso });
+    }
     if (url.pathname === "/api/inventario/admin/reserva-enviada" && request.method === "POST") {
       const { id, fecha } = await request.json();
       const res = await inventoryStub(env).fetch("https://do/backorders/" + encodeURIComponent(id) + "/reserva-enviada", { method: "POST", body: JSON.stringify({ fecha }) });
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    // Prueba del email de Groupon SOLO a Jennifer (acción "recordatorio" del
+    // Apps Script; el texto es el mismo que el real, sin la tabla HTML).
+    if (url.pathname === "/api/admin/groupon-email-prueba" && request.method === "POST") {
+      const { id } = await request.json();
+      const o = (await (await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders")).json()).find((x) => x.id === id);
+      if (!o) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      const e = emailPenalizacionGroupon(o);
+      const r = await llamarScriptSeur(env, "recordatorio", { para: "JENNIFER", asunto: "PRUEBA — " + e.asunto, texto: "(PRUEBA: esto solo te llega a ti. El real va a recoveries@groupon.com y contabilidad@colchonesbezen.com, con la tabla con bordes.)\n\n" + e.texto });
+      return Response.json(r);
+    }
+    if (url.pathname === "/api/inventario/admin/crear-pendiente-polival" && request.method === "POST") {
+      return proxyInventory(env, "/admin/crear-pendiente-polival", request);
+    }
+    // Enviar los emails de penalización de Groupon que falten desde una fecha
+    // (Jennifer, 2026-10-16: "tienes que mandar el email de penalización de todo").
+    if (url.pathname === "/api/admin/groupon-emails-pendientes" && request.method === "POST") {
+      const { desde } = await request.json();
+      const catalogMap = await loadCatalogMap(env);
+      return Response.json(await enviarEmailsPenalizacionGroupon(env, env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")), catalogMap, desde || "2000-01-01"));
+    }
+    if (url.pathname === "/api/admin/campana" && request.method === "POST") {
+      const body = await request.json();
+      const b = await inventoryStub(env).fetch("https://do/admin/bloquear-decision", { method: "POST", body: JSON.stringify({ orderId: body.id }) }).then((r) => r.json());
+      const a = await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders/admin/campana", { method: "POST", body: JSON.stringify(body) }).then((r) => r.json());
+      return Response.json({ pedido: a, inventario: b });
+    }
+    if (url.pathname === "/api/admin/renombrar-pedidos" && request.method === "POST") {
+      const body = await request.text();
+      const a = await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/orders/admin/renombrar", { method: "POST", body }).then((r) => r.json());
+      const b = await inventoryStub(env).fetch("https://do/admin/renombrar-pedido", { method: "POST", body }).then((r) => r.json());
+      return Response.json({ pedidos: a, inventario: b });
     }
     if (url.pathname === "/api/inventario/admin/crear-pendiente-manual" && request.method === "POST") {
       return proxyInventory(env, "/admin/crear-pendiente-manual", request);
@@ -12690,6 +19826,22 @@ async function handleFetch(request, env) {
         const notaNueva = (payload.cambio ? "REPOSICIÓN POR CAMBIO (antes: " + (payload.cambio.de || "?") + "): " : "REPOSICIÓN: ") + (Number(payload.unidades) > 1 ? payload.unidades + "x " : "") + (payload.piezaTexto || "artículo completo");
         const notas = order && order.notas ? order.notas + " · " + notaNueva : notaNueva;
         await stubOrders.fetch("https://do/orders/meta", { method: "POST", body: JSON.stringify({ id: payload.orderId, notas }) });
+        // Reposición por Furniture que sale toda del stock (Jennifer,
+        // 2026-10-23, REP10002247570-A): se crea ya recibida, así que nunca
+        // pasa por "Marcar recibido" — entra sola en la próxima carga.
+        const entry = result.id && (await inventoryStub(env).fetch("https://do/backorders").then((r) => r.json())).find((b) => b.id === result.id);
+        const repFurniture = entry && entry.reposicion && entry.recibidoFabrica && !entry.cargaId && entry.estado === "pendiente"
+          && entry.agenciaReposicion !== "NACEX" && !((entry.tipo === "colchon" || entry.piezaManual) && entry.agenciaReposicion === "SEUR")
+          && !(entry.tipo === "colchon" && entry.agenciaReposicion !== "FURNITURE");
+        if (repFurniture) {
+          const cargas = await stubOrders.fetch("https://do/cargas").then((r) => r.json());
+          const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+          const proxima = cargas.filter((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta" && c.fecha > hoy).sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
+          if (proxima) {
+            const add = await inventoryStub(env).fetch("https://do/admin/reposicion/carga-add", { method: "POST", body: JSON.stringify({ id: entry.id, cargaId: proxima.id }) });
+            if (add.ok) result.cargaFurniture = { fecha: proxima.fecha, dia: proxima.dia };
+          }
+        }
       }
       return Response.json(result, { status: res.status });
     }
@@ -12708,7 +19860,7 @@ async function handleFetch(request, env) {
         const stubOrders = env.ORDERS_STORE.get(idOrders);
         const allOrders = await stubOrders.fetch("https://do/orders").then((r) => r.json());
         const order = allOrders.find((o) => String(o.id) === String(payload.orderId));
-        const notaNueva = "GESTO COMERCIAL: " + payload.cantidad + "x almohada" + (payload.motivo ? " — " + payload.motivo : "");
+        const notaNueva = "GESTO COMERCIAL: " + payload.cantidad + "x almohada" + (payload.agencia === "FURNITURE" ? " (va con Furniture)" : " (por SEUR)") + (payload.motivo ? " — " + payload.motivo : "");
         const notas = order && order.notas ? order.notas + " · " + notaNueva : notaNueva;
         await stubOrders.fetch("https://do/orders/meta", { method: "POST", body: JSON.stringify({ id: payload.orderId, notas }) });
       }
@@ -12720,6 +19872,12 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/tarifas/coste" && request.method === "POST") {
       return proxyInventory(env, "/tarifas/coste", request);
     }
+    if (url.pathname === "/api/tarifas/envio-historial" && request.method === "GET") {
+      return proxyInventory(env, "/tarifas/envio-historial", request);
+    }
+    if (url.pathname === "/api/tarifas/envio-deshacer" && request.method === "POST") {
+      return proxyInventory(env, "/tarifas/envio-deshacer", request);
+    }
     if (url.pathname === "/api/tarifas/envio" && request.method === "POST") {
       return proxyInventory(env, "/tarifas/envio", request);
     }
@@ -12727,12 +19885,233 @@ async function handleFetch(request, env) {
       return proxyInventory(env, "/tarifas/periodo-activo", request);
     }
     // PRECIOS BEZEN (Jennifer, 2026-10-15): histórico de precios de la web.
+    // Margen bruto de pedidos de la web (Jennifer, 2026-10-20): se mandan
+    // los pedidos (líneas pagadas, CP, servicios) al InventoryStore.
+    // Revisión de precio a mano (o de pedidos concretos) — ver revisarPreciosPedidos.
+    if (url.pathname === "/api/pedidos/revisar-precios" && request.method === "POST") {
+      const { ids, reenviar } = await request.json().catch(() => ({}));
+      return Response.json(await revisarPreciosPedidos(env, { ids, reenviar }));
+    }
+    if (url.pathname === "/api/pedidos/alerta-precio/revisado" && request.method === "POST") {
+      const { id, usuario } = await request.json();
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const o = (await (await stub.fetch("https://do/orders")).json()).find((x) => String(x.id) === String(id));
+      if (!o || !o.alertaPrecio) return Response.json({ ok: false }, { status: 404 });
+      await stub.fetch("https://do/orders/meta", { method: "POST", body: JSON.stringify({ id: o.id, alertaPrecio: { ...o.alertaPrecio, revisadoPor: { usuario: usuario || null, fecha: new Date().toISOString() } } }) });
+      return Response.json({ ok: true });
+    }
+    if (url.pathname === "/api/pedidos/margen" && request.method === "POST") {
+      const { ids } = await request.json();
+      const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const orders = await (await ordersStub.fetch("https://do/orders")).json();
+      const quiero = new Set((ids || []).map(String));
+      const pedidos = orders.filter((o) => quiero.has(String(o.id))).map((o) => ({ id: o.id, items: o.items || [], postalCode: o.postalCode || "", services: serviciosEfectivos(o), price: o.price }));
+      return inventoryStub(env).fetch("https://do/margen-pedidos", { method: "POST", body: JSON.stringify({ pedidos }) });
+    }
     if (url.pathname === "/api/precios-bezen/subidas" && request.method === "GET") return proxyInventory(env, "/precios-bezen/subidas", request);
+    if (url.pathname === "/api/publicidad" && (request.method === "GET" || request.method === "POST")) {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/publicidad", request.method === "POST" ? { method: "POST", body: await request.text() } : undefined);
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    // Página pública del presupuesto que se manda por WhatsApp (Jennifer, 2026-11-12).
+    const mPresu = url.pathname.match(/^\/p\/([a-z0-9]{16,40})$/);
+    if (mPresu && request.method === "GET") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const r = await stub.fetch("https://do/presupuesto-publico?token=" + mPresu[1]).then((x) => x.json()).catch(() => null);
+      const cab = { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "referrer-policy": "no-referrer" };
+      if (!r || !r.ok) return new Response(paginaNoDisponible(), { status: 404, headers: cab });
+      // La vista previa de WhatsApp (y otros robots) no cuenta como "visto".
+      const ua = request.headers.get("user-agent") || "";
+      // "Ver como cliente" desde la app tampoco.
+      if (url.searchParams.get("vista") !== "interna" && !/whatsapp|facebookexternalhit|facebot|bot|crawl|spider|preview|slack|telegram|discord|skype/i.test(ua)) {
+        await stub.fetch("https://do/presupuesto-visto", { method: "POST", body: JSON.stringify({ token: mPresu[1] }) }).catch(() => null);
+      }
+      // Por presupuestos.colchonesbezen.com, la vista previa usa esa dirección.
+      const origen = request.headers.get("x-presupuesto-origen") === "https://presupuestos.colchonesbezen.com" ? "https://presupuestos.colchonesbezen.com" : url.origin;
+      // Foto real de quien firma (Jennifer, 2026-11-12): del banco de imágenes,
+      // la que se llama "FOTO <USUARIO>…"; va dentro de la página (miniatura).
+      // Fotos de fábrica (Jennifer, 2026-11-12): las que llevan "FABRIC" en el
+      // nombre, una por producto (lo de antes del primer " - "), hasta 2.
+      let fotoAsesor = null;
+      const fotosFabrica = [];
+      const coloresMadera = [], coloresTela = [], coloresCabecero = [];
+      try {
+        const quien = String(r.presupuesto.creadoPor || "").trim().toUpperCase();
+        if (env.IMAGENES) {
+          let cursor, idFoto = null;
+          const idsFabrica = [], vistos = new Set(), idsPrincipal = new Set();
+          // Carta de colores del canapé de madera (Jennifer, 2026-11-12): banco ›
+          // General › CARTA DE COLORES › CANAPÉ MADERA, una foto por acabado.
+          const textoLineas = (r.presupuesto.lineas || []).map((l) => (l.descripcion || "") + " " + (l.titulo || "") + " " + (l.handle || "")).join(" ");
+          let idCartaMadera = null, idCartaTela = null, idCartaCabecero = null;
+          const muestrasMadera = [], muestrasTela = [], cartasCabecero = [];
+          // Telas (Jennifer, 2026-11-12): canapé de tela, con patas, con ruedas o
+          // Initial, y cabeceros → CARTA DE COLORES › CANAPÉ TELA.
+          const conTela = (r.presupuesto.lineas || []).some((l) => {
+            const t = (l.descripcion || "") + " " + (l.titulo || "") + " " + (l.handle || "");
+            return /cabecero/i.test(t) || (/canap/i.test(t) && /\b(tela|patas|ruedas|initial)/i.test(t) && !/madera/i.test(t));
+          });
+          const conMadera = /canap/i.test(textoLineas) && /madera/i.test(textoLineas);
+          // Cabeceros (Jennifer, 2026-11-13): su propio mosaico, carpeta
+          // CARTA DE COLORES › CABECERO TELA. Sin esa carpeta, siguen con la de canapé.
+          const conCabecero = /cabecero/i.test(textoLineas);
+          const conCanapeTela = (r.presupuesto.lineas || []).some((l) => {
+            const t = (l.descripcion || "") + " " + (l.titulo || "") + " " + (l.handle || "");
+            return /canap/i.test(t) && /\b(tela|patas|ruedas|initial)/i.test(t) && !/madera/i.test(t);
+          });
+          if (conMadera || conTela) {
+            const cs = await imgLeerCarpetas(env.IMAGENES);
+            const carta = cs.find((c) => !c.padre && c.modelo === "__general__" && /^carta de colores$/i.test(c.nombre.trim()));
+            const madera = conMadera && carta && cs.find((c) => c.padre === carta.id && /madera/i.test(c.nombre));
+            // "CANAPÉ TELA" (muestras recortadas); no la carpeta "TELAS" con las fotos del muestrario.
+            const tela = conTela && carta && (cs.find((c) => c.padre === carta.id && /canap/i.test(c.nombre) && /tela/i.test(c.nombre)) || cs.find((c) => c.padre === carta.id && /tela/i.test(c.nombre)));
+            idCartaMadera = madera ? madera.id : null;
+            // Un mosaico POR MODELO (Jennifer, 2026-11-13): carpetas "CABECERO ATENEA",
+            // "CABECERO ARIA"… — sale la del modelo que lleve el presupuesto. Una
+            // carpeta sin modelo (ej. "CABECERO TELA") sirve de general si no hay la suya.
+            const sinTildes = (x) => String(x || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+            const textosCab = (r.presupuesto.lineas || []).map((l) => sinTildes((l.descripcion || "") + " " + (l.titulo || "") + " " + (l.handle || "").replace(/-/g, " "))).filter((t) => /cabecero/.test(t));
+            const carpetasCab = conCabecero && carta ? cs.filter((c) => c.padre === carta.id && /cabecer/i.test(c.nombre)).map((c) => ({ id: c.id, modelo: sinTildes(c.nombre).replace(/cabeceros?|tela|tapizados?|de/g, " ").trim() })) : [];
+            const porModelo = carpetasCab.filter((c) => c.modelo && textosCab.some((t) => new RegExp("\\b" + c.modelo.replace(/[^a-z0-9 ]/g, "") + "\\b").test(t)));
+            const general = carpetasCab.find((c) => !c.modelo);
+            for (const c of porModelo.length ? porModelo : general ? [general] : []) cartasCabecero.push({ id: c.id, modelo: c.modelo ? c.modelo.replace(/\b\w/g, (x) => x.toUpperCase()) : "", muestras: [] });
+            idCartaCabecero = cartasCabecero.length ? cartasCabecero[0].id : null;
+            // Con carpeta de cabecero, la de canapé solo si hay canapé de tela.
+            idCartaTela = tela && (conCanapeTela || !idCartaCabecero) ? tela.id : null;
+          }
+          do {
+            const l = await env.IMAGENES.list({ prefix: "o/", include: ["customMetadata"], cursor, limit: 1000 });
+            for (const o of l.objects) {
+              const nom = decodeURIComponent((o.customMetadata && o.customMetadata.nombre) || "").toUpperCase();
+              const carpetaObj = decodeURIComponent((o.customMetadata && o.customMetadata.carpeta) || "");
+              const muestra = () => ({ id: o.key.slice(2), nombre: decodeURIComponent(o.customMetadata.nombre || "").replace(/\.[a-z0-9]+$/i, "") });
+              if (idCartaMadera && carpetaObj === idCartaMadera) muestrasMadera.push(muestra());
+              if (idCartaTela && carpetaObj === idCartaTela) muestrasTela.push(muestra());
+              for (const cc of cartasCabecero) if (carpetaObj === cc.id) cc.muestras.push(muestra());
+              if (quien && !idFoto && nom.startsWith("FOTO " + quien)) idFoto = o.key.slice(2);
+              const grupo = nom.split(" - ")[0];
+              // "FABRICA BEZEN" siempre la primera (Jennifer, 2026-11-12).
+              if (nom.startsWith("FABRICA BEZEN") && !vistos.has(grupo)) { vistos.add(grupo); idsFabrica.unshift(o.key.slice(2)); idsPrincipal.add(o.key.slice(2)); }
+              else if (nom.includes("FABRIC") && !vistos.has(grupo)) { vistos.add(grupo); idsFabrica.push(o.key.slice(2)); }
+            }
+            cursor = l.truncated ? l.cursor : undefined;
+          } while (cursor);
+          const aDataUri = async (id) => {
+            const mini = id && (await env.IMAGENES.get("t/" + id));
+            if (!mini) return null;
+            const bytes = new Uint8Array(await mini.arrayBuffer());
+            let bin = "";
+            for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+            return "data:image/jpeg;base64," + btoa(bin);
+          };
+          fotoAsesor = await aDataUri(idFoto);
+          // Con "FABRICA BEZEN" (va delante): SOLO esa foto (Jennifer, 2026-11-12).
+          const hayPrincipal = idsFabrica.length && idsPrincipal.has(idsFabrica[0]);
+          const elegidas = hayPrincipal ? [idsFabrica[0]] : idsFabrica.slice(0, 2);
+          for (const id of elegidas) { const d = await aDataUri(id); if (d) fotosFabrica.push(d); }
+          for (const m of muestrasMadera.sort((a, b) => a.nombre.localeCompare(b.nombre, "es")).slice(0, 24)) {
+            const d = await aDataUri(m.id);
+            if (d) coloresMadera.push({ nombre: m.nombre, foto: d });
+          }
+          for (const m of muestrasTela.sort((a, b) => a.nombre.localeCompare(b.nombre, "es")).slice(0, 40)) {
+            const d = await aDataUri(m.id);
+            if (d) coloresTela.push({ nombre: m.nombre, foto: d });
+          }
+          for (const cc of cartasCabecero) {
+            const colores = [];
+            for (const m of cc.muestras.sort((a, b) => a.nombre.localeCompare(b.nombre, "es")).slice(0, 40)) {
+              const d = await aDataUri(m.id);
+              if (d) colores.push({ nombre: m.nombre, foto: d });
+            }
+            if (colores.length) coloresCabecero.push({ modelo: cc.modelo, colores });
+          }
+        }
+      } catch (e) { fotoAsesor = null; }
+      // Fotos de cada producto = las que tenga en la web (Jennifer, 2026-11-12):
+      // se leen de Shopify al abrir el enlace; la de la variante elegida, primero.
+      const fotosWeb = {}, resenasWeb = {}, fichasWeb = {};
+      try {
+        const handles = [...new Set((r.presupuesto.lineas || []).map((l) => l.handle).filter(Boolean))].slice(0, 20);
+        const tam = (src) => src ? src + (src.includes("?") ? "&" : "?") + "width=900" : null;
+        await Promise.all(handles.map(async (h) => {
+          const res = await fetch("https://" + env.SHOPIFY_SHOP_DOMAIN + "/admin/api/2026-07/products.json?handle=" + encodeURIComponent(h) + "&fields=id,handle,title,images,variants", { headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN } });
+          if (!res.ok) return;
+          const prod = ((await res.json()).products || [])[0];
+          if (!prod) return;
+          const imgs = (prod.images || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0));
+          const porVariante = {};
+          for (const v of prod.variants || []) if (v.image_id) porVariante[v.id] = v.image_id;
+          fotosWeb[h] = { imgs: imgs.map((i) => ({ id: i.id, src: tam(i.src) })), porVariante };
+          // Estrellas y reseña destacada de Loox en la web (Jennifer, 2026-11-12).
+          try {
+            const rm = await fetch("https://" + env.SHOPIFY_SHOP_DOMAIN + "/admin/api/2026-07/products/" + prod.id + "/metafields.json?limit=250", { headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN } });
+            if (rm.ok) {
+              const mf = (await rm.json()).metafields || [];
+              const val = (k, ns) => { const x = mf.find((m) => m.key === k && m.namespace === (ns || "loox")); return x ? x.value : null; };
+              // Datos para la tabla comparativa de alternativas (Jennifer, 2026-11-12).
+              fichasWeb[h] = { titulo: prod.title || null, firmeza: Number(val("firmeza", "custom")) || null, adaptabilidad: Number(val("adaptabilidad", "custom")) || null, altura: val("altura_colchon", "custom") || val("altura_canape", "custom") || null, material: val("material_colchon", "custom") || val("material_canape", "custom") || null };
+              let feed = null;
+              try { feed = JSON.parse(val("review_feed") || "null"); } catch (e) { feed = null; }
+              resenasWeb[h] = { media: Number(val("avg_rating")) || 0, num: Number(val("num_reviews")) || 0, destacada: elegirResena(feed && feed.reviews && feed.reviews.length ? feed.reviews : resenasDeHtml(val("reviews"))) };
+            }
+          } catch (e) { /* sin reseñas */ }
+        }));
+      } catch (e) { /* sin fotos de la web: se usa la guardada en la línea */ }
+      return new Response(paginaPresupuesto(r.presupuesto, origen, { fotoAsesor, fotosFabrica, coloresMadera, coloresTela, coloresCabecero, fotosWeb, resenasWeb, fichasWeb }), { headers: cab });
+    }
+    if (url.pathname === "/api/presupuestos/enviado" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/presupuesto-enviado", { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname === "/api/presupuestos" && (request.method === "GET" || request.method === "POST")) {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/presupuestos", request.method === "POST" ? { method: "POST", body: await request.text() } : undefined);
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    // Productos ACTIVOS de la web con su enlace y precio por variante, para
+    // rellenar las líneas y la "Información adicional" de un presupuesto.
+    if (url.pathname === "/api/presupuestos/productos" && request.method === "GET") {
+      const out = [];
+      let next = "https://" + env.SHOPIFY_SHOP_DOMAIN + "/admin/api/2026-07/products.json?limit=250&status=active&fields=id,title,handle,product_type,variants,images,image";
+      while (next) {
+        const res = await fetch(next, { headers: { "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN } });
+        if (!res.ok) return Response.json({ ok: false, error: "Shopify " + res.status }, { status: 502 });
+        const data = await res.json();
+        for (const p of data.products || []) {
+          const fotoDe = (v) => { const im = v.image_id && (p.images || []).find((x) => x.id === v.image_id); return (im && im.src) || (p.image && p.image.src) || null; };
+          out.push({ title: p.title, handle: p.handle, tipo: p.product_type || "", variantes: (p.variants || []).map((v) => ({ id: v.id, imagen: fotoDe(v), title: v.title, sku: v.sku || "", precio: v.price != null ? Number(v.price) : null })) });
+        }
+        const link = res.headers.get("Link");
+        const n = link && link.split(",").find((x) => x.includes('rel="next"'));
+        next = n ? n.match(/<(.+)>/)[1] : null;
+      }
+      return Response.json(out);
+    }
+    if (url.pathname === "/presupuesto-logo.png" && request.method === "GET") {
+      const bin = atob(LOGO_PRESUPUESTO_PNG_BASE64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Response(bytes, { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
+    }
+    if (url.pathname === "/api/liquidacion" && (request.method === "GET" || request.method === "POST")) {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/liquidacion", request.method === "POST" ? { method: "POST", body: await request.text() } : undefined);
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/precios-bezen/ver" && request.method === "GET") return proxyInventory(env, "/precios-bezen/ver?id=" + encodeURIComponent(url.searchParams.get("id") || ""), request);
     if (url.pathname === "/api/precios-bezen/subir" && request.method === "POST") return proxyInventory(env, "/precios-bezen/subir", request);
     if (url.pathname === "/api/precios-bezen/precio-nuevo" && request.method === "POST") return proxyInventory(env, "/precios-bezen/precio-nuevo", request);
     if (url.pathname === "/api/precios-bezen/borrar" && request.method === "POST") return proxyInventory(env, "/precios-bezen/borrar", request);
     if (url.pathname === "/api/precios-bezen/fijar" && request.method === "POST") return proxyInventory(env, "/precios-bezen/fijar", request);
+    if (url.pathname === "/api/precios-bezen/anadir-filas" && request.method === "POST") return proxyInventory(env, "/precios-bezen/anadir-filas", request);
+    if (url.pathname === "/api/tarifas/nombres-fabrica" && request.method === "GET") {
+      return inventoryStub(env).fetch("https://do/tarifas/nombres-fabrica");
+    }
+    if (url.pathname === "/api/tarifas/modelos-extra" && request.method === "GET") {
+      return inventoryStub(env).fetch("https://do/tarifas/modelos-extra");
+    }
     if (url.pathname === "/api/tarifas/tabla" && request.method === "GET") {
       return inventoryStub(env).fetch("https://do/tarifas/tabla?stockModel=" + encodeURIComponent(url.searchParams.get("stockModel") || ""));
     }
@@ -12746,6 +20125,19 @@ async function handleFetch(request, env) {
     // cualquier fichero) — se reenvía tal cual, cabeceras y body incluidos.
     if (url.pathname === "/api/tarifas/plataforma/cargar" && request.method === "POST") {
       return proxyInventory(env, "/tarifas/plataforma/cargar", request);
+    }
+    // Ficheros plataformas COMPLETOS por cliente (Jennifer, 2026-11-04).
+    const ficheroCompletoMatch = url.pathname.match(/^\/api\/fichero-completo\/([A-Z_]+)(\/cargar|\/csv)?$/);
+    if (ficheroCompletoMatch) {
+      const res = await inventoryStub(env).fetch("https://do/fichero-completo/" + ficheroCompletoMatch[1] + (ficheroCompletoMatch[2] || "") + url.search,
+        request.method === "GET" ? undefined : { method: request.method, body: await request.text() });
+      return new Response(res.body, { status: res.status, headers: res.headers });
+    }
+    // Tarifa REFORMAN (Jennifer, 2026-11-17).
+    if ((url.pathname === "/api/reforman" && request.method === "GET") || ((url.pathname === "/api/reforman/cargar" || url.pathname === "/api/reforman/descargado") && request.method === "POST")) {
+      const res = await inventoryStub(env).fetch("https://do" + url.pathname.replace(/^\/api/, ""),
+        request.method === "GET" ? undefined : { method: "POST", body: await request.text() });
+      return new Response(res.body, { status: res.status, headers: res.headers });
     }
     if (url.pathname === "/api/tarifas/plataforma/listar" && request.method === "GET") {
       return proxyInventory(env, "/tarifas/plataforma/listar", request);
@@ -12900,6 +20292,25 @@ async function handleFetch(request, env) {
       }
       return Response.json({ ok: true, cambios: inv.cambios, avisos: inv.avisos, a, sinTramitar: !order.inventoryProcessed });
     }
+    // Cambiar el color de la tapicería (Jennifer, 2026-10-20).
+    if (url.pathname === "/api/pedidos/cambiar-color" && request.method === "POST") {
+      const { orderId, ids, colorFurniture, colorFabrica, porArticulo, usuario } = await request.json();
+      const ordersStub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const orders = await (await ordersStub.fetch("https://do/orders")).json();
+      const order = orders.find((o) => String(o.id) === String(orderId));
+      if (!order) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      // Sin tramitar: se apunta en el pedido y se aplica al tramitarlo.
+      if (!order.inventoryProcessed) {
+        const lista = Array.isArray(porArticulo) ? porArticulo.filter((x) => x && (String(x.a || "").trim() || String(x.fabrica || "").trim())) : null;
+        if (lista ? !lista.length : (!String(colorFurniture || "").trim() && !String(colorFabrica || "").trim())) return Response.json({ ok: false, error: "Escribe el color nuevo." }, { status: 400 });
+        await ordersStub.fetch("https://do/orders/cambio-color", { method: "POST", body: JSON.stringify({ orderId: order.id, a: String(colorFurniture || "").trim(), fabrica: String(colorFabrica || "").trim(), porArticulo: lista, usuario }) });
+        return Response.json({ ok: true, sinTramitar: true, cambios: [], avisos: [] });
+      }
+      const inv = await (await inventoryStub(env).fetch("https://do/backorders/cambiar-color", {
+        method: "POST", body: JSON.stringify({ orderId: order.id, ids: ids || [], colorFurniture, colorFabrica, porArticulo: Array.isArray(porArticulo) ? porArticulo : null, services: order.services || "", usuario }),
+      })).json();
+      return Response.json(inv, { status: inv.ok ? 200 : 400 });
+    }
 
     if (url.pathname === "/api/pedidos/cancelar-linea" && request.method === "POST") {
       const { orderId, itemIndex, unidades, texto, usuario } = await request.json();
@@ -12930,6 +20341,32 @@ async function handleFetch(request, env) {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/orders/admin/" + adminPedidosMatch[1], { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/pedidos/colores-auto" && request.method === "POST") {
+      return Response.json(await aplicarColoresAutomaticos(env));
+    }
+    if (url.pathname === "/api/pedidos/todo-junto" && request.method === "POST") {
+      return Response.json(await aplicarNotasTodoJunto(env));
+    }
+
+    // Contactos de interés (Jennifer, 2026-11-12).
+    if (url.pathname === "/api/contactos" || url.pathname === "/api/contactos/guardar") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do" + url.pathname.slice(4), request.method === "POST" ? { method: "POST", body: await request.text() } : {});
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/devoluciones-fabrica" || url.pathname === "/api/devoluciones-fabrica/guardar") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do" + url.pathname.slice(4), request.method === "POST" ? { method: "POST", body: await request.text() } : {});
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname === "/api/pedidos/tiktok-decision" && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/orders/tiktok-decision", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
     }
 
@@ -13092,6 +20529,17 @@ async function handleFetch(request, env) {
     // carga de SEUR/Furniture. Además del pedido, saca de las cargas
     // ABIERTAS los artículos que estuvieran ya preparados en ellas por su
     // cuenta (colchón "listo-seur", reposición o envío aparte).
+    // Facturas de SEUR (Logística › SEUR › Revisión de facturas).
+    if (url.pathname === "/api/seur/facturas" && request.method === "GET") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/seur-facturas" + url.search);
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    if (["/api/seur/facturas/guardar", "/api/seur/facturas/revision", "/api/seur/facturas/borrar"].includes(url.pathname) && request.method === "POST") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/seur-facturas/" + url.pathname.split("/").pop(), { method: "POST", body: await request.text() });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/pedidos/recoge-cliente" && request.method === "POST") {
       const bodyText = await request.text();
       const { id, activo } = JSON.parse(bodyText);
@@ -13166,6 +20614,136 @@ async function handleFetch(request, env) {
       return proxyInventory(env, "/admin/reposicion/carga-remove", request);
     }
 
+    // NACEX (Jennifer, 2026-10-28): email "DOCUMENTAR ENVÍO" a la operativa de
+    // NACEX con la plantilla de siempre; solo cambia la dirección de envío,
+    // que es la del pedido salvo que el cliente pida otra (se puede editar).
+    // { id, probar:true } devuelve la dirección del pedido sin mandar nada.
+    if (url.pathname === "/api/nacex/documentar" && request.method === "POST") {
+      const { id, direccion, probar, retorno, retornoQue: retornoQuePedido, bultos: bultosPedidos } = await request.json();
+      const retornoQue = retorno ? String(retornoQuePedido || "").trim().slice(0, 300) : "";
+      if (retorno && !retornoQue && !probar) return Response.json({ ok: false, error: "Indica qué se recoge en casa del cliente." }, { status: 400 });
+      const bultos = Math.min(20, Math.max(1, Math.floor(Number(bultosPedidos)) || 1));
+      const backorders = await inventoryStub(env).fetch("https://do/backorders").then((x) => x.json());
+      const b = backorders.find((x) => x.id === id);
+      if (!b) return Response.json({ ok: false, error: "Artículo no encontrado." }, { status: 404 });
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const orders = await stub.fetch("https://do/orders").then((x) => x.json());
+      const o = orders.find((x) => String(x.id) === String(b.orderId)) || {};
+      const direccionPedido = lineasDireccionNacex(o).join("\n\n");
+      if (probar) return Response.json({ ok: true, direccion: (b.nacex && b.nacex.direccion) || direccionPedido });
+      const texto = String(direccion || direccionPedido).trim();
+      if (!texto) return Response.json({ ok: false, error: "Falta la dirección de envío." }, { status: 400 });
+      const r = await llamarScriptSeur(env, "nacex-documentar", { direccion: texto + "\n\nNº DE BULTOS: " + bultos, retorno: !!retorno });
+      if (!r.ok) {
+        return Response.json({ ok: false, error: r.error === "script_sin_actualizar" ? "Falta pegar la versión 7 del script de Google (NACEX)." : "No se ha podido mandar el email a NACEX (" + (r.error || "error") + ")." }, { status: 502 });
+      }
+      const res = await inventoryStub(env).fetch("https://do/backorders/set-campo", {
+        method: "POST",
+        body: JSON.stringify({ id, nacex: { documentado: new Date().toISOString(), threadId: r.threadId, direccion: texto, retorno: !!retorno, retornoQue: retornoQue || null, bultos } }),
+      });
+      // El script de Google anterior a la v10 no sabe poner la línea de retorno.
+      const avisoRetorno = retorno && !r.retornoIncluido ? "OJO: el email a NACEX ha salido SIN la línea «OJO ENVÍO CON RETORNO» porque falta pegar la versión 10 del script de Google. Avisa a NACEX de que es un envío con retorno." : null;
+      const guardado = await res.json().catch(() => ({}));
+      return Response.json({ ...guardado, avisoRetorno }, { status: res.status });
+    }
+    // Etiqueta para pegar en el paquete (Jennifer, 2026-10-28): la misma
+    // dirección que se mandó a NACEX (o la del pedido si aún no se mandó).
+    if (url.pathname === "/api/nacex/etiqueta" && request.method === "GET") {
+      const id = url.searchParams.get("id");
+      const backorders = await inventoryStub(env).fetch("https://do/backorders").then((x) => x.json());
+      const b = backorders.find((x) => x.id === id);
+      if (!b) return new Response("Artículo no encontrado.", { status: 404 });
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const orders = await stub.fetch("https://do/orders").then((x) => x.json());
+      const o = orders.find((x) => String(x.id) === String(b.orderId)) || {};
+      const destino = b.nacex && b.nacex.direccion
+        ? b.nacex.direccion.split(/\n+/).map((l) => l.trim()).filter(Boolean)
+        : lineasDireccionNacex(o);
+      const pedido = (b.reposicion ? "REP" : "") + referenciaPedido(o.id ? o : b) + (b.referencia ? "  ·  " + b.referencia : "");
+      const fecha = new Date().toLocaleDateString("es-ES", { timeZone: "Europe/Madrid" });
+      const pdf = etiquetaNacexPdf({ destino, pedido, fecha });
+      return new Response(pdf, { headers: { "content-type": "application/pdf", "content-disposition": `inline; filename="NACEX-${String(o.orderNumber || b.orderNumber || "")}.pdf"` } });
+    }
+    // Lee la respuesta de NACEX ("Recogida 2822-384093 y exp 2822-11477379").
+    // Solicitud de material a SEUR (Jennifer, 2026-11-11).
+    if (url.pathname === "/api/seur/material" && request.method === "GET") {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const estado = await (await stub.fetch("https://do/seur/material")).json();
+      const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
+      // Si hoy toca y ya se mandó, el próximo es dentro de 14 días.
+      let proximos = proximosEnviosMaterialSeur(hoy, 5);
+      if (proximos[0] === hoy && estado.ultimoDia === hoy) proximos = proximos.slice(1);
+      return Response.json({ ...estado, texto: estado.texto || MATERIAL_SEUR_TEXTO_DEFECTO, asunto: MATERIAL_SEUR_ASUNTO, para: MATERIAL_SEUR_DESTINO, plantilla: PLANTILLA_MATERIAL_SEUR_NOMBRE, proximos: proximos.slice(0, 4) });
+    }
+    if (url.pathname === "/api/seur/material/texto" && request.method === "POST") {
+      const { texto } = await request.json();
+      if (typeof texto !== "string" || !texto.trim()) return Response.json({ ok: false, error: "El texto no puede ir vacío." }, { status: 400 });
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      return new Response(await (await stub.fetch("https://do/seur/material", { method: "POST", body: JSON.stringify({ texto }) })).text(), { headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname === "/api/seur/material/enviar" && request.method === "POST") {
+      const { usuario } = await request.json().catch(() => ({}));
+      return Response.json(await enviarSolicitudMaterialSeur(env, { forzar: true, usuario }));
+    }
+    if (url.pathname === "/api/seur/material/plantilla" && request.method === "GET") {
+      const bin = atob(PLANTILLA_MATERIAL_SEUR_B64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Response(bytes, { headers: { "content-type": "application/vnd.ms-excel", "content-disposition": "attachment; filename=\"" + PLANTILLA_MATERIAL_SEUR_NOMBRE + "\"" } });
+    }
+    if (url.pathname === "/api/nacex/informe-mensual" && request.method === "POST") {
+      const { mes, probar } = await request.json();
+      if (mes && !/^[0-9]{4}-[0-9]{2}$/.test(mes)) return Response.json({ ok: false, error: "Mes no válido." }, { status: 400 });
+      return Response.json(await enviarInformeNacexMensual(env, { mes, forzar: true, probar: !!probar }));
+    }
+    if (url.pathname === "/api/nacex/respuestas" && request.method === "POST") {
+      const backorders = await inventoryStub(env).fetch("https://do/backorders").then((x) => x.json());
+      const conHilo = backorders.filter((b) => b.nacex && b.nacex.threadId && b.estado === "pendiente");
+      if (!conHilo.length) return Response.json({ ok: true, respuestas: {} });
+      const r = await llamarScriptSeur(env, "nacex-leer", { threadIds: conHilo.map((b) => b.nacex.threadId) });
+      if (!r.ok) return Response.json({ ok: false, error: r.error || "error" }, { status: 502 });
+      const respuestas = {};
+      for (const b of conHilo) {
+        const msgs = (r.hilos || {})[b.nacex.threadId] || [];
+        if (!msgs.length) continue;
+        const texto = msgs.map((m) => m.texto).join("\n");
+        const { recogida, expedicion } = leerNumerosNacex(texto);
+        respuestas[b.id] = { recogida, expedicion, texto: msgs[msgs.length - 1].texto.split(/\n\s*\n/).slice(0, 3).join("\n").slice(0, 400) };
+        // Con nº de recogida Y de expedición ya está documentado: pasa a
+        // enviado y sale de Polival / pendientes de NACEX (Jennifer,
+        // 2026-11-06: "para que no se vaya acumulando").
+        if (recogida && expedicion) {
+          const norm = (x) => /^[0-9]/.test(x) ? x.replace("-", "/") : x;
+          await inventoryStub(env).fetch("https://do/backorders/set-campo", {
+            method: "POST",
+            body: JSON.stringify({ id: b.id, estado: "servido", nacex: { recogida: norm(recogida), expedicion: norm(expedicion), enviado: new Date().toISOString(), enviadoAuto: true } }),
+          });
+          respuestas[b.id].enviadoAuto = true;
+        }
+      }
+      return Response.json({ ok: true, respuestas, enviadosAuto: Object.values(respuestas).filter((x) => x.enviadoAuto).length });
+    }
+    // Para cargas de Furniture cerradas antes del arreglo del 27/10: pasa a
+    // servido lo que iba dentro de sus pedidos. Con ?probar=1 solo lo lista.
+    if (url.pathname === "/api/cargas/furniture/servir-cerrada" && request.method === "POST") {
+      const { cargaId } = await request.json();
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const [cargas, orders, backorders] = await Promise.all([
+        stub.fetch("https://do/cargas").then((x) => x.json()),
+        stub.fetch("https://do/orders").then((x) => x.json()),
+        inventoryStub(env).fetch("https://do/backorders").then((x) => x.json()),
+      ]);
+      const carga = cargas.find((c) => c.id === cargaId);
+      if (!carga || (carga.tipo || "furniture") !== "furniture" || carga.estado !== "cerrada") {
+        return Response.json({ ok: false, error: "Esa carga de Furniture no está cerrada." }, { status: 400 });
+      }
+      const articulos = articulosFurnitureDeCarga(orders, backorders, cargaId);
+      if (url.searchParams.get("probar")) {
+        return Response.json({ ok: true, articulos: articulos.map((b) => ({ id: b.id, orderNumber: b.orderNumber, orderRef: b.orderRef, tipo: b.tipo, stockModel: b.stockModel, talla: b.talla, referencia: b.referencia, estado: b.estado, recibidoFabrica: b.recibidoFabrica })) });
+      }
+      const res = await inventoryStub(env).fetch("https://do/backorders/cerrar-carga", { method: "POST", body: JSON.stringify({ cargaId, idsPedidos: articulos.map((b) => b.id) }) });
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/cargas/close" && request.method === "POST") {
       const id = env.ORDERS_STORE.idFromName("shopify");
       const stub = env.ORDERS_STORE.get(id);
@@ -13175,7 +20753,10 @@ async function handleFetch(request, env) {
       // igual y la lista la rehace con los artículos servidos.
       try {
         const { cargaId } = JSON.parse(cuerpo);
-        const ex = await buildSeurExport(env, cargaId);
+        // Con lo ya servido (Jennifer, 2026-10-20, BEZEN12312): al subir la
+        // etiqueta el artículo pasa a servido, y sin esto quedaba fuera de la
+        // foto aunque saliera en esta carga.
+        const ex = await buildSeurExport(env, cargaId, { incluirServidos: true });
         if (!ex.error) {
           await stub.fetch("https://do/cargas/seur/envios-guardar", { method: "POST", body: JSON.stringify({ cargaId, envios: enviosDeExportSeur(ex) }) });
         }
@@ -13187,7 +20768,15 @@ async function handleFetch(request, env) {
       try {
         const r = JSON.parse(texto);
         if (r && r.ok && r.carga && (r.carga.tipo || "furniture") === "furniture") {
-          await inventoryStub(env).fetch("https://do/backorders/cerrar-carga", { method: "POST", body: JSON.stringify({ cargaId: r.carga.id }) });
+          // Y lo que iba dentro de cada pedido de la carga (Jennifer,
+          // 2026-10-27: "tiene que quedar como servido aquello que se haya
+          // marcado para enviar"; lo que quedó fuera sigue pendiente).
+          const [orders, backorders] = await Promise.all([
+            stub.fetch("https://do/orders").then((x) => x.json()),
+            inventoryStub(env).fetch("https://do/backorders").then((x) => x.json()),
+          ]);
+          const idsPedidos = articulosFurnitureDeCarga(orders, backorders, r.carga.id).map((b) => b.id);
+          await inventoryStub(env).fetch("https://do/backorders/cerrar-carga", { method: "POST", body: JSON.stringify({ cargaId: r.carga.id, idsPedidos }) });
         }
       } catch (e) { /* no bloquea el cierre */ }
       return new Response(texto, { headers: { "content-type": "application/json" } });
@@ -13196,6 +20785,123 @@ async function handleFetch(request, env) {
     // "Envíos SEUR" (Jennifer, 2026-10-01): sustituye a "Casos a revisar".
     // Todas las líneas de todas las cargas de SEUR cerradas, con su estado
     // en SEUR, notas y "Reclamado a SEUR".
+    // Revisión de facturas de SEUR (Jennifer, 2026-11-06): histórico
+    // completo, una línea por expedición. (1) Cada línea del fichero de cada
+    // carga de SEUR cerrada (bultos y kilos tal como se declaran), cruzada con
+    // su etiqueta del seguimiento. (2) Toda etiqueta del seguimiento que no
+    // case con ninguna carga (envíos de antes de las cargas, sueltos a
+    // mano...), con bultos/kilos estimados por el SKU de "Información
+    // adicional" y la tabla de Pesos SEUR.
+    if (url.pathname === "/api/seur/revision-facturas" && request.method === "GET") {
+      const datos = await cargarDatosSeurExport(env);
+      const ordersById = new Map(datos.orders.map((o) => [String(o.id), o]));
+      const pesos = Object.fromEntries(datos.pesosList.map((p) => [String(p.sku).toUpperCase(), p.peso]));
+      // Prefijo del catálogo + sus prefijos antiguos (altSkuPrefixes) + SKUs
+      // viejos de SEUR que no están en el catálogo (Jennifer, 2026-11-06:
+      // "COLBEL es el Bellagio Deluxe").
+      const SKU_ANTIGUO_SEUR = { COLBEL: "COLBELD", COLSUPREME: "COLZSUPREME", PHARMA: "PHARM", NORDIC: "ALMNOR", NOR: "ALMNOR" };
+      const activos = datos.catalog.filter((p) => p.skuPrefix && p.stockModel && !p.excluido && !/LIQUIDACI/i.test(p.stockModel));
+      const prefijos = [];
+      for (const p of activos) {
+        for (const pre of [p.skuPrefix].concat(p.altSkuPrefixes || [])) if (pre) prefijos.push({ pre: String(pre).toUpperCase(), stockModel: p.stockModel });
+      }
+      for (const [viejo, actual] of Object.entries(SKU_ANTIGUO_SEUR)) {
+        const p = activos.find((x) => String(x.skuPrefix).toUpperCase() === actual);
+        if (p && !prefijos.some((x) => x.pre === viejo)) prefijos.push({ pre: viejo, stockModel: p.stockModel });
+      }
+      prefijos.sort((a, b) => b.pre.length - a.pre.length);
+      const productoDeSkuSeur = (sku) => {
+        for (const p of prefijos) {
+          if (!sku.startsWith(p.pre)) continue;
+          const resto = sku.slice(p.pre.length).replace(",", ".");
+          if (/^\d+(\.\d+)?(X\d+)?$/.test(resto)) return { stockModel: p.stockModel, talla: resto };
+        }
+        return null;
+      };
+      const lineas = [];
+      const usados = new Set();
+      const fechaIso = (f) => { const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(String(f || "").trim()); return m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : ""; };
+      const cerradas = datos.cargas.filter((c) => c.tipo === "seur" && c.estado === "cerrada").sort((a, b) => a.fecha.localeCompare(b.fecha));
+      for (const c of cerradas) {
+        const ex = await buildSeurExport(env, c.id, { datos, incluirServidos: true });
+        if (ex.error) continue;
+        const porPedido = {};
+        ex.rowOrderIds.forEach((id) => { porPedido[id] = (porPedido[id] || 0) + 1; });
+        ex.rows.forEach((r, i) => {
+          const o = ordersById.get(String(ex.rowOrderIds[i]));
+          const info = (o && o.enviosSeurInfo && o.enviosSeurInfo[r[0]]) || {};
+          const t = estadoSeurDeLinea(o, info.refSeur || r[0], porPedido[ex.rowOrderIds[i]]);
+          if (t) usados.add(t);
+          lineas.push({
+            origen: "carga", fecha: c.fecha, cargaFecha: c.fecha, ref: info.refSeur || r[0], pedido: o ? referenciaPedido(o) : "", plataforma: o ? o.platform || "Shopify" : "",
+            nombre: r[1], cp: r[3], ciudad: r[4], pais: r[10], bultos: Number(r[7]) || 0, kilos: Number(r[8]) || 0, contenido: r[11] || "",
+            servicio: r[16] === "31" ? "Nacional" : "Internacional",
+            expedicion: t ? String(t.numeroExpedicion || "") : "", fechaSeur: t ? t.fechaCreacion || "" : "", estado: t ? t.estado || "" : "",
+            orderId: o ? o.id : ex.rowOrderIds[i], piezas: (ex.rowPiezas && ex.rowPiezas[i]) || [],
+          });
+        });
+      }
+      for (const o of datos.orders) {
+        for (const t of o.seurTracking || []) {
+          if (usados.has(t)) continue;
+          let bultos = 0, kilos = 0, sinPeso = false;
+          const piezas = [];
+          for (const trozo0 of String(t.infoAdicional || "").split("+")) {
+            // Etiquetas escritas a mano (Jennifer, 2026-11-06): "PHARMA SLIM90X190",
+            // "NORDIC 150 (2UN)", "2 SEA FOAM 67,5".
+            let trozo = trozo0.toUpperCase().replace(/PHARMA\s*SLIM\s*/, "COLPHARS").replace(/(^|[^A-Z])NORDIC\s+/, "$1ALMNOR").replace(/(^|[^A-Z])SEA\s*FOAM\s*/, "$1ALMSEAFOAM").replace(/(\d),(\d)/, "$1.$2");
+            let delante = 0;
+            const q = /^\s*(\d{1,2})\s+(?=[A-Z])/.exec(trozo);
+            if (q) { delante = Number(q[1]); trozo = trozo.slice(q[0].length); }
+            const m = /^\s*([^\s(]+)\s*(?:\((\d+)\s*(?:UDS?|UN|UNIDADES)\))?/i.exec(trozo);
+            if (!m || !m[1]) continue;
+            const n = Number(m[2]) || delante || 1;
+            const sku = m[1].toUpperCase().replace(/-+$/, "");
+            const peso = pesos[sku];
+            bultos += n;
+            if (peso == null) sinPeso = true; else kilos += peso * n;
+            const prod = productoDeSkuSeur(sku);
+            for (let u = 0; u < n; u++) piezas.push(prod ? { stockModel: prod.stockModel, talla: prod.talla, sku } : { sku });
+          }
+          const cc = String(o.countryCode || "").toUpperCase();
+          lineas.push({
+            origen: t.anulado ? "anulada" : "fuera-carga", fecha: fechaIso(t.fechaCreacion), cargaFecha: "", ref: t.referencia || "", pedido: referenciaPedido(o), plataforma: o.platform || "Shopify",
+            nombre: o.name || "", cp: o.postalCode || "", ciudad: o.city || "", pais: cc, bultos: bultos || null, kilos: kilos ? Math.round(kilos * 10) / 10 : null, kilosEstimados: true, sinPeso,
+            contenido: t.infoAdicional || "", servicio: cc === "ES" || cc === "PT" ? "Nacional" : "Internacional",
+            expedicion: String(t.numeroExpedicion || ""), fechaSeur: t.fechaCreacion || "", estado: t.estado || "", orderId: o.id, piezas,
+          });
+        }
+      }
+      // Lo que SEUR nos tiene que cobrar: envío de Tarifas de cada pieza
+      // según el país, × unidades (Jennifer, 2026-11-06).
+      const piezasUnicas = [];
+      const vistas = new Set();
+      for (const l of lineas) for (const p of l.piezas) {
+        if (!p.stockModel) continue;
+        const k = p.stockModel + "|" + p.talla;
+        if (!vistas.has(k)) { vistas.add(k); piezasUnicas.push({ stockModel: p.stockModel, talla: p.talla }); }
+      }
+      const tarEnv = await inventoryStub(env).fetch("https://do/tarifas/envios-piezas", { method: "POST", body: JSON.stringify({ piezas: piezasUnicas }) }).then((r) => r.json()).catch(() => ({ envios: {} }));
+      for (const l of lineas) {
+        let coste = 0;
+        const faltan = [];
+        for (const p of l.piezas) {
+          const e = p.stockModel ? (tarEnv.envios || {})[p.stockModel + "|" + p.talla] : null;
+          // Portugal = mismo precio que España (Jennifer, 2026-11-06).
+          const v = e ? (e[l.pais] != null ? e[l.pais] : (l.pais === "PT" ? e.ES : null)) : null;
+          if (v == null) faltan.push((p.sku || p.stockModel || "?") + (p.talla && !p.sku ? " " + p.talla : ""));
+          else coste += v;
+        }
+        l.costeTarifa = l.piezas.length && faltan.length < l.piezas.length ? Math.round(coste * 100) / 100 : null;
+        l.costeFaltan = [...new Set(faltan)];
+        // Modelo y medida si es un solo artículo (para "Aplicar" la subida de porte en Tarifas).
+        if (l.piezas.length === 1 && l.piezas[0].stockModel) l.pieza = { stockModel: l.piezas[0].stockModel, talla: l.piezas[0].talla };
+        delete l.piezas;
+      }
+      lineas.sort((a, b) => (b.fecha || "").localeCompare(a.fecha || "") || String(a.ref).localeCompare(String(b.ref)));
+      return Response.json({ ok: true, lineas });
+    }
+
     if (url.pathname === "/api/seur/envios" && request.method === "GET") {
       const datos = await cargarDatosSeurExport(env);
       const ordersById = new Map(datos.orders.map((o) => [o.id, o]));
@@ -13204,9 +20910,15 @@ async function handleFetch(request, env) {
       const cerradas = datos.cargas.filter((c) => c.tipo === "seur" && c.estado === "cerrada");
       for (const c of cerradas) {
         let envios = c.envios;
-        if (!envios) {
-          const ex = await buildSeurExport(env, c.id, { datos, incluirServidos: true });
-          envios = ex.error ? [] : enviosDeExportSeur(ex);
+        // Las fotos guardadas antes del 2026-10-20 se dejaban fuera lo ya
+        // servido al subir la etiqueta (BEZEN12312): se completan con lo que
+        // sale ahora con los servidos, sin quitar nada de la foto.
+        const ex = await buildSeurExport(env, c.id, { datos, incluirServidos: true });
+        const rehecho = ex.error ? [] : enviosDeExportSeur(ex);
+        if (!envios) envios = rehecho;
+        else {
+          const enFoto = new Set(envios.map((e) => String(e.orderId) + "|" + e.ref));
+          envios = envios.concat(rehecho.filter((e) => !enFoto.has(String(e.orderId) + "|" + e.ref)));
         }
         const porPedido = {};
         for (const e of envios) porPedido[e.orderId] = (porPedido[e.orderId] || 0) + 1;
@@ -13216,7 +20928,7 @@ async function handleFetch(request, env) {
           const t = estadoSeurDeLinea(o, info.refSeur || e.ref, porPedido[e.orderId]);
           if (t) usados.add(t);
           lista.push({
-            ...e, refSeur: info.refSeur || "", cargaId: c.id, fechaCarga: c.fecha, diaCarga: c.dia, fechaCierre: c.fechaCierre || null,
+            ...e, plataforma: o ? o.platform || "" : "", refSeur: info.refSeur || "", cargaId: c.id, fechaCarga: c.fecha, diaCarga: c.dia, fechaCierre: c.fechaCierre || null,
             estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
             nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
             archivado: !!info.archivado, fechaArchivado: info.fechaArchivado || null,
@@ -13236,7 +20948,7 @@ async function handleFetch(request, env) {
           const t = estadoSeurDeLinea(o, info.refSeur || ref, 1);
           const m = t ? /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(t.fechaCreacion || "").trim()) : null;
           lista.push({
-            orderId: o.id, ref, refSeur: info.refSeur || "", nombre: o.name || "", pais: o.countryCode || "", observaciones: "",
+            orderId: o.id, plataforma: o.platform || "", ref, refSeur: info.refSeur || "", nombre: o.name || "", pais: o.countryCode || "", observaciones: "",
             cargaId: null, fechaCarga: m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : "", diaCarga: "", sinCarga: true,
             estadoSeur: t ? t.estado || "" : "", fechaSituacion: t ? t.fechaSituacion || "" : "", seguimiento: t ? t.seguimiento || "" : "",
             nota: info.nota || "", reclamado: !!info.reclamado, fechaReclamado: info.fechaReclamado || null,
@@ -13261,6 +20973,11 @@ async function handleFetch(request, env) {
         // recoger en el punto SEUR Pickup". Retirado ya no avisa.
         e.enPunto = /podrás recoger tu envío|disponible para recoger/i.test(e.estadoSeur || "");
       }
+      // Ya en Devoluciones (Jennifer, 2026-10-19): el botón "Va a volver
+      // devuelto" pasa a mostrar que ya está ahí.
+      const devs = await env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify")).fetch("https://do/devoluciones").then((r) => r.json()).catch(() => []);
+      const conDevolucion = new Set(devs.map((d) => String(d.orderId)));
+      for (const e of lista) e.enDevoluciones = conDevolucion.has(String(e.orderId));
       lista.sort((a, b) => (b.fechaCarga || "").localeCompare(a.fechaCarga || "") || a.ref.localeCompare(b.ref));
       return Response.json(lista);
     }
@@ -13268,11 +20985,12 @@ async function handleFetch(request, env) {
     // Escribir a SEUR por un envío (Jennifer, 2026-10-02). El asunto lleva
     // la referencia y el nº de expedición para que SEUR lo localice.
     if (url.pathname === "/api/seur/envios/escribir" && request.method === "POST") {
-      const { orderId, ref, texto } = await request.json();
+      const { orderId, ref, texto, adjuntos } = await request.json();
       if (!String(texto || "").trim()) return Response.json({ ok: false, error: "Escribe el mensaje." }, { status: 400 });
       const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
       const o = orders.find((x) => String(x.id) === String(orderId));
       if (!o) return Response.json({ ok: false, error: "Pedido no encontrado." }, { status: 404 });
+      const fotos = await adjuntosSeur(env, adjuntos);
       const refReal = (o.enviosSeurInfo && o.enviosSeurInfo[ref] && o.enviosSeurInfo[ref].refSeur) || ref;
       const t = estadoSeurDeLinea(o, refReal, 1);
       const exp = t && t.numeroExpedicion ? String(t.numeroExpedicion) : "";
@@ -13288,7 +21006,7 @@ async function handleFetch(request, env) {
         "Un saludo,",
         "Global Happy Deal",
       ].filter((x) => x !== null).join("\n");
-      const r = await llamarScriptSeur(env, "seur-enviar", { destino, asunto, texto: cuerpo });
+      const r = await llamarScriptSeur(env, fotos.length ? "seur-enviar-fotos" : "seur-enviar", { destino, asunto, texto: cuerpo, ...(fotos.length ? { adjuntos: fotos } : {}) });
       if (!r.ok) return Response.json({ ok: false, error: r.error || "No se pudo enviar." }, { status: 502 });
       const ahora = new Date().toISOString();
       const info = (o.enviosSeurInfo && o.enviosSeurInfo[ref]) || {};
@@ -13298,6 +21016,7 @@ async function handleFetch(request, env) {
         destino, asunto,
         mensajes: [...(previo.mensajes || []), { id: "local-" + Date.now(), threadId: r.threadId, fecha: ahora, de: "Happy Deal", asunto, texto: cuerpo, deSeur: false }],
         vistoHasta: ahora,
+        adjuntos: [...(previo.adjuntos || []), ...fotos.map((x) => ({ id: x.id, nombre: x.nombre, fecha: ahora }))],
       };
       await ordersStubSeur(env).fetch("https://do/orders/envio-seur-info", { method: "POST", body: JSON.stringify({ orderId: o.id, ref, correo, ...(info.reclamado ? {} : { reclamado: true }) }) });
       return Response.json({ ok: true, correo });
@@ -13305,21 +21024,47 @@ async function handleFetch(request, env) {
 
     // Contestar en la misma conversación.
     if (url.pathname === "/api/seur/envios/responder" && request.method === "POST") {
-      const { orderId, ref, texto } = await request.json();
+      const { orderId, ref, texto, adjuntos } = await request.json();
       if (!String(texto || "").trim()) return Response.json({ ok: false, error: "Escribe el mensaje." }, { status: 400 });
       const orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
       const o = orders.find((x) => String(x.id) === String(orderId));
+      const fotos = await adjuntosSeur(env, adjuntos);
       const correo = o && o.enviosSeurInfo && o.enviosSeurInfo[ref] && o.enviosSeurInfo[ref].correo;
       if (!correo || !(correo.threadIds || []).length) return Response.json({ ok: false, error: "Este envío no tiene conversación con SEUR." }, { status: 400 });
       // En el hilo del último mensaje de SEUR (o en el primero si aún no han escrito).
-      const ultimoSeur = [...(correo.mensajes || [])].reverse().find((m) => m.deSeur && m.threadId);
+      // Mejor el hilo de una persona de SEUR que el de los avisos automáticos
+      // (noreply / reenviados por postventa), que no admiten respuesta
+      // (Jennifer, 2026-10-29). Si solo hay avisos, el script escribe al
+      // buzón de SEUR del envío y devuelve el hilo nuevo.
+      const deSeurConHilo = [...(correo.mensajes || [])].reverse().filter((m) => m.deSeur && m.threadId);
+      const ultimoSeur = deSeurConHilo.find((m) => /@seur\.(com|es)/i.test(m.de || "") && !/no-?reply/i.test(m.de || "")) || deSeurConHilo[0];
       const threadId = ultimoSeur ? ultimoSeur.threadId : correo.threadIds[0];
-      const r = await llamarScriptSeur(env, "seur-responder", { threadId, texto: String(texto).trim(), destino: correo.destino || destinoSeurDePedido(o) });
+      // Email del caso (noreply o reenviado por postventa) citado al final de
+      // la respuesta (Jennifer, 2026-10-29: "que supieran el caso de que
+      // estamos hablando"). Si se contesta a una persona, también va arriba
+      // el nº de caso y la referencia (si no, ya los pone el script).
+      const aviso = [...(correo.mensajes || [])].reverse().find((m) => m.deSeur && (/no-?reply/i.test(m.de || "") || !/@seur\.(com|es)/i.test(m.de || "")));
+      let textoEnvio = String(texto).trim();
+      if (aviso) {
+        const original = String(aviso.texto || "").replace(/^[\s\S]*?-{5,}\s*Forwarded message\s*-{5,}\s*/i, "")
+          .split(/\*?También puede acceder|"Los datos personales/i)[0].trim();
+        const caso = (/n[uú]mero de caso(?: asignado)?(?: es)?\s*:?\s*(\d{6,})/i.exec(original) || [])[1] || "";
+        const refCaso = (/con referencia\s+([A-Za-z0-9-]+)/i.exec(original) || [])[1] || o.enviosSeurInfo[ref].refSeur || ref;
+        const esPersona = ultimoSeur && /@seur\.(com|es)/i.test(ultimoSeur.de || "") && !/no-?reply/i.test(ultimoSeur.de || "");
+        const cabecera = esPersona ? (caso ? "Nº de caso: " + caso + "\n" : "") + (refCaso ? "Referencia: " + refCaso + "\n" : "") : "";
+        textoEnvio = (cabecera ? cabecera + "\n" : "") + textoEnvio
+          + "\n\n---------- Email de SEUR del caso" + (caso ? " " + caso : "") + " (" + new Date(aviso.fecha).toLocaleString("es-ES", { timeZone: "Europe/Madrid" }) + ") ----------\n"
+          + (aviso.asunto && !/^De:/i.test(original) ? "Asunto: " + String(aviso.asunto).replace(/^(fwd?|rv):\s*/i, "") + "\n\n" : "") + original;
+      }
+      const r = await llamarScriptSeur(env, fotos.length ? "seur-responder-fotos" : "seur-responder", { threadId, texto: textoEnvio, destino: correo.destino || destinoSeurDePedido(o), ...(fotos.length ? { adjuntos: fotos } : {}) });
       if (!r.ok) return Response.json({ ok: false, error: r.error || "No se pudo enviar." }, { status: 502 });
       const ahora = new Date().toISOString();
+      const hiloEnviado = r.threadId || threadId;
       await ordersStubSeur(env).fetch("https://do/orders/envio-seur-info", { method: "POST", body: JSON.stringify({ orderId: o.id, ref, correo: {
-        mensajes: [...(correo.mensajes || []), { id: "local-" + Date.now(), threadId, fecha: ahora, de: "Happy Deal", asunto: correo.asunto || "", texto: String(texto).trim(), deSeur: false }],
+        ...(r.threadId ? { threadIds: [...new Set([...(correo.threadIds || []), r.threadId])] } : {}),
+        mensajes: [...(correo.mensajes || []), { id: "local-" + Date.now(), threadId: hiloEnviado, fecha: ahora, de: "Happy Deal" + (r.para ? " → " + r.para : ""), asunto: correo.asunto || "", texto: String(texto).trim(), deSeur: false }],
         vistoHasta: ahora,
+        adjuntos: [...(correo.adjuntos || []), ...fotos.map((x) => ({ id: x.id, nombre: x.nombre, fecha: ahora }))],
       } }) });
       return Response.json({ ok: true });
     }
@@ -13345,6 +21090,17 @@ async function handleFetch(request, env) {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do/orders/direccion", { method: "POST", body: await request.text() });
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    // Banco de imágenes (2026-11-10): fotos en R2 (binding IMAGENES), en su
+    // tamaño original. o/<id> = original, t/<id> = miniatura para la cuadrícula.
+    if (url.pathname.startsWith("/api/imagenes/")) {
+      return imagenesRoute(url, request, env);
+    }
+    // Directorio de contraseñas cifrado (2026-11-10): todo lo valida OrdersStore.
+    if (url.pathname.startsWith("/api/boveda/")) {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do" + url.pathname.slice(4), request.method === "POST" ? { method: "POST", body: await request.text() } : {});
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
     }
     if (url.pathname === "/api/tareas/recordatorio" && request.method === "POST") {
       return Response.json(await enviarRecordatorioTareas(env, { forzar: true }));
@@ -13383,6 +21139,14 @@ async function handleFetch(request, env) {
       return Response.json({ ok: true, cantidad: row.cantidad });
     }
 
+    if (url.pathname === "/api/seur/factura" && (request.method === "POST" || request.method === "GET")) {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = request.method === "POST"
+        ? await stub.fetch("https://do/orders/factura", { method: "POST", body: await request.text() })
+        : await stub.fetch("https://do/orders/factura?id=" + encodeURIComponent(url.searchParams.get("id") || ""));
+      return new Response(res.body, { status: res.status, headers: res.headers });
+    }
+
     if (url.pathname === "/api/seur/envios/info" && request.method === "POST") {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do/orders/envio-seur-info", { method: "POST", body: await request.text() });
@@ -13403,7 +21167,7 @@ async function handleFetch(request, env) {
       // Solo modelo y medida, sumando las unidades iguales.
       const lineas = [];
       for (const f of result.filas) {
-        const producto = String(f.producto || "").replace(/^COLCHÓN\s+/i, "") + (/^YA APARTADO/.test(f.origen) ? " (YA APARTADO)" : "");
+        const producto = String(f.producto || "").replace(/^COLCHÓN\s+/i, "") + (/^YA APARTADO/.test(f.origen) ? " (YA APARTADO)" : /^ES UNA DEVOLUCIÓN/.test(f.origen) ? " (ES UNA DEVOLUCIÓN)" : "");
         const l = lineas.find((x) => x.producto === producto);
         if (l) l.cantidad += f.cantidad || 1;
         else lineas.push({ producto, cantidad: f.cantidad || 1 });
@@ -13435,6 +21199,12 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/cargas/almacen" && request.method === "GET") {
       const result = await buildListadoAlmacen(env, url.searchParams.get("cargaId") || null);
       if (result.error) return new Response(result.error, { status: 400 });
+      const sel = (url.searchParams.get("sel") || "").split(",").filter(Boolean);
+      if (sel.length) {
+        result.filas = result.filas.filter((f) => sel.includes(f.clave));
+        result.seleccion = true;
+        if (!result.filas.length) return new Response("Ninguno de los envíos marcados tiene artículos en el listado.", { status: 400 });
+      }
       return new Response(JSON.stringify(result), { headers: { "content-type": "application/json; charset=utf-8" } });
     }
 
@@ -13540,6 +21310,20 @@ async function handleFetch(request, env) {
       return Response.json({ ok: true, cargaId, reservas });
     }
 
+    // A Retenidos sin fecha desde una carga + etiqueta de reserva al almacén
+    // (Jennifer, 2026-10-28).
+    if (url.pathname === "/api/cargas/seur/retener" && request.method === "POST") {
+      const { backorderId } = await request.json();
+      const inv = inventoryStub(env);
+      const r1 = await inv.fetch("https://do/backorders/set-carga", { method: "POST", body: JSON.stringify({ id: backorderId, cargaId: null, retenido: true }) });
+      const d1 = await r1.json().catch(() => ({}));
+      if (!r1.ok || !d1.ok) return Response.json({ ok: false, error: d1.error || "No se ha podido sacar de la carga." }, { status: r1.status || 500 });
+      if (!d1.backorder || !d1.backorder.retenidoCliente) return Response.json({ ok: false, error: "El servidor todavía no tiene esta función: cerrad todas las pestañas de la app y volved a intentarlo." }, { status: 409 });
+      const avisoReserva = await reservarStockManual(env, d1.backorder, { agencia: "SEUR", fechaSalida: null }).catch(() => ({ ok: false }));
+      if (avisoReserva.ok) await inv.fetch("https://do/backorders/" + encodeURIComponent(backorderId) + "/reserva-enviada", { method: "POST", body: "{}" });
+      return Response.json({ ok: true, emailOk: !!avisoReserva.ok });
+    }
+
     if (url.pathname === "/api/cargas/seur/mover" && request.method === "POST") {
       const { orderId, backorderId, fecha } = await request.json();
       const error = errorFechaCargaSeur(fecha);
@@ -13608,6 +21392,205 @@ async function handleFetch(request, env) {
     return new Response("not found", { status: 404 });
 }
 
+// ===== Banco de imágenes (Jennifer, 2026-11-10) =====
+// Fotos por modelo del catálogo, en Cloudflare R2 (binding IMAGENES), sin
+// recomprimir: se guarda el archivo tal cual llega. Los datos (modelo, nombre,
+// quién y cuándo) van en el customMetadata del propio objeto, codificados con
+// encodeURIComponent para que los acentos no den problemas.
+const IMG_ID_OK = /^[a-z0-9]{6,40}$/;
+function imgMetaDe(obj) {
+  const m = obj.customMetadata || {};
+  const dec = (v) => { try { return v ? decodeURIComponent(v) : ""; } catch { return v || ""; } };
+  return {
+    id: obj.key.slice(2),
+    modelo: dec(m.modelo) || "__general__",
+    nombre: dec(m.nombre) || obj.key.slice(2),
+    usuario: dec(m.usuario),
+    fecha: dec(m.fecha) || (obj.uploaded ? new Date(obj.uploaded).toISOString() : ""),
+    editadoPor: dec(m.editadoPor),
+    carpeta: dec(m.carpeta),
+    tipo: (obj.httpMetadata && obj.httpMetadata.contentType) || "",
+    tam: obj.size || 0,
+  };
+}
+function imgMetaA(f) {
+  const enc = (v) => encodeURIComponent(String(v == null ? "" : v).slice(0, 300));
+  return { modelo: enc(f.modelo), nombre: enc(f.nombre), usuario: enc(f.usuario), fecha: enc(f.fecha), editadoPor: enc(f.editadoPor), carpeta: enc(f.carpeta) };
+}
+// Carpetas y subcarpetas (Jennifer, 2026-11-12): dentro de cada modelo (las
+// libres van en General). Lista [{ id, nombre, padre, modelo }] en un JSON
+// del mismo R2; cada foto lleva en sus metadatos el id de su carpeta.
+const IMG_CARPETAS_KEY = "meta/carpetas.json";
+async function imgLeerCarpetas(B) {
+  const o = await B.get(IMG_CARPETAS_KEY);
+  if (!o) return [];
+  try { const l = await o.json(); return Array.isArray(l) ? l : []; } catch { return []; }
+}
+async function imgGuardarCarpetas(B, lista) {
+  await B.put(IMG_CARPETAS_KEY, JSON.stringify(lista), { httpMetadata: { contentType: "application/json" } });
+}
+function imgNuevoId() {
+  return Date.now().toString(36) + crypto.getRandomValues(new Uint32Array(2)).reduce((s, n) => s + n.toString(36), "");
+}
+// Reescribe la foto con otros datos (R2 no deja cambiar solo los metadatos).
+async function imgReescribir(B, id, cambiar) {
+  const obj = await B.get("o/" + id);
+  if (!obj) return null;
+  const f = imgMetaDe(obj);
+  cambiar(f);
+  return imgMetaDe(await B.put("o/" + id, await obj.arrayBuffer(), { httpMetadata: obj.httpMetadata, customMetadata: imgMetaA(f) }));
+}
+async function imagenesRoute(url, request, env) {
+  const json = (d, status = 200) => new Response(JSON.stringify(d), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+  const B = env.IMAGENES;
+  if (!B) return json({ error: "El almacén de imágenes (Cloudflare R2) todavía no está activado." }, 503);
+  const ruta = url.pathname.slice("/api/imagenes/".length);
+  const method = request.method;
+  if (ruta === "lista" && method === "GET") {
+    const fotos = [];
+    let cursor;
+    do {
+      const r = await B.list({ prefix: "o/", include: ["customMetadata", "httpMetadata"], cursor, limit: 1000 });
+      r.objects.forEach((o) => fotos.push(imgMetaDe(o)));
+      cursor = r.truncated ? r.cursor : undefined;
+    } while (cursor);
+    // Espacio ocupado (originales + miniaturas) para no pasar de lo gratuito.
+    let usado = fotos.reduce((t, f) => t + (f.tam || 0), 0);
+    cursor = undefined;
+    do {
+      const r = await B.list({ prefix: "t/", cursor, limit: 1000 });
+      r.objects.forEach((o) => { usado += o.size || 0; });
+      cursor = r.truncated ? r.cursor : undefined;
+    } while (cursor);
+    const ajustes = await B.get("meta/ajustes.json").then((o) => (o ? o.json() : {})).catch(() => ({}));
+    return json({ fotos, usado, carpetas: await imgLeerCarpetas(B), nombreGeneral: ajustes.nombreGeneral || "" });
+  }
+  // Nombre del apartado General (Jennifer, 2026-11-12).
+  if (ruta === "general/renombrar" && method === "POST") {
+    const d = await request.json().catch(() => ({}));
+    const nombre = String(d.nombre || "").trim().slice(0, 80);
+    if (!nombre) return json({ error: "Ponle un nombre." }, 400);
+    const ajustes = await B.get("meta/ajustes.json").then((o) => (o ? o.json() : {})).catch(() => ({}));
+    ajustes.nombreGeneral = nombre;
+    await B.put("meta/ajustes.json", JSON.stringify(ajustes), { httpMetadata: { contentType: "application/json" } });
+    return json({ ok: true, nombreGeneral: nombre });
+  }
+  if (ruta.startsWith("carpetas/") && method === "POST") {
+    const d = await request.json().catch(() => ({}));
+    const lista = await imgLeerCarpetas(B);
+    const nombre = String(d.nombre || "").trim().slice(0, 80);
+    const accion = ruta.slice("carpetas/".length);
+    if (accion === "crear") {
+      if (!nombre) return json({ error: "Ponle un nombre a la carpeta." }, 400);
+      const modelo = String(d.modelo || "__general__");
+      const padre = d.padre ? lista.find((c) => c.id === d.padre && c.modelo === modelo) : null;
+      if (d.padre && !padre) return json({ error: "La carpeta de arriba ya no existe." }, 404);
+      if (lista.some((c) => c.modelo === modelo && (c.padre || null) === (d.padre || null) && c.nombre.toLowerCase() === nombre.toLowerCase())) return json({ error: "Ya hay una carpeta con ese nombre aquí." }, 400);
+      const c = { id: imgNuevoId(), nombre, padre: d.padre || null, modelo, usuario: String(d.usuario || ""), fecha: new Date().toISOString() };
+      lista.push(c);
+      await imgGuardarCarpetas(B, lista);
+      return json({ ok: true, carpeta: c, carpetas: lista });
+    }
+    const c = lista.find((x) => x.id === d.id);
+    if (!c) return json({ error: "La carpeta ya no existe." }, 404);
+    if (accion === "renombrar") {
+      if (!nombre) return json({ error: "Ponle un nombre a la carpeta." }, 400);
+      if (lista.some((x) => x.id !== c.id && x.modelo === c.modelo && (x.padre || null) === (c.padre || null) && x.nombre.toLowerCase() === nombre.toLowerCase())) return json({ error: "Ya hay una carpeta con ese nombre aquí." }, 400);
+      c.nombre = nombre;
+      await imgGuardarCarpetas(B, lista);
+      return json({ ok: true, carpetas: lista });
+    }
+    if (accion === "borrar") {
+      // Nada se pierde: subcarpetas y fotos suben a la carpeta de arriba.
+      lista.forEach((x) => { if (x.padre === c.id) x.padre = c.padre || null; });
+      const resto = lista.filter((x) => x.id !== c.id);
+      await imgGuardarCarpetas(B, resto);
+      const movidas = [];
+      let cursor;
+      do {
+        const r = await B.list({ prefix: "o/", include: ["customMetadata"], cursor, limit: 1000 });
+        r.objects.forEach((o) => { if (imgMetaDe(o).carpeta === c.id) movidas.push(o.key.slice(2)); });
+        cursor = r.truncated ? r.cursor : undefined;
+      } while (cursor);
+      const fotos = [];
+      for (const id of movidas) { const f = await imgReescribir(B, id, (f) => { f.carpeta = c.padre || ""; }); if (f) fotos.push(f); }
+      return json({ ok: true, carpetas: resto, fotos });
+    }
+    return json({ error: "Ruta no encontrada" }, 404);
+  }
+  // Mover varias fotos a la vez a un modelo/carpeta.
+  if (ruta === "mover" && method === "POST") {
+    const d = await request.json().catch(() => ({}));
+    const ids = (Array.isArray(d.ids) ? d.ids : []).filter((id) => IMG_ID_OK.test(String(id))).slice(0, 500);
+    const modelo = String(d.modelo || "__general__");
+    if (d.carpeta && !(await imgLeerCarpetas(B)).some((c) => c.id === d.carpeta && c.modelo === modelo)) return json({ error: "La carpeta ya no existe." }, 404);
+    const fotos = [];
+    for (const id of ids) {
+      const f = await imgReescribir(B, id, (f) => { f.modelo = modelo; f.carpeta = d.carpeta || ""; f.editadoPor = (d.usuario || "") + " " + new Date().toISOString().slice(0, 10); });
+      if (f) fotos.push(f);
+    }
+    return json({ ok: true, fotos });
+  }
+  if (ruta === "subir" && method === "POST") {
+    if (!request.body) return json({ error: "Archivo vacío" }, 400);
+    const tipo = request.headers.get("content-type") || "application/octet-stream";
+    const id = Date.now().toString(36) + crypto.getRandomValues(new Uint32Array(2)).reduce((s, n) => s + n.toString(36), "");
+    const f = {
+      modelo: url.searchParams.get("modelo") || "__general__",
+      nombre: url.searchParams.get("nombre") || "foto",
+      usuario: url.searchParams.get("usuario") || "",
+      fecha: new Date().toISOString(),
+      carpeta: url.searchParams.get("carpeta") || "",
+    };
+    const obj = await B.put("o/" + id, request.body, { httpMetadata: { contentType: tipo }, customMetadata: imgMetaA(f) });
+    return json({ ok: true, foto: imgMetaDe(obj) });
+  }
+  if (ruta === "miniatura" && method === "POST") {
+    const id = url.searchParams.get("id") || "";
+    if (!IMG_ID_OK.test(id) || !(await B.head("o/" + id))) return json({ error: "No existe" }, 404);
+    await B.put("t/" + id, request.body, { httpMetadata: { contentType: "image/jpeg" } });
+    return json({ ok: true });
+  }
+  const mArch = ruta.match(/^(archivo|mini)\/([a-z0-9]+)$/);
+  if (mArch && method === "GET") {
+    const id = mArch[2];
+    if (!IMG_ID_OK.test(id)) return json({ error: "No existe" }, 404);
+    let obj = mArch[1] === "mini" ? await B.get("t/" + id) : null;
+    if (!obj) obj = await B.get("o/" + id);
+    if (!obj) return new Response("No existe", { status: 404 });
+    const h = new Headers();
+    h.set("content-type", (obj.httpMetadata && obj.httpMetadata.contentType) || "application/octet-stream");
+    h.set("cache-control", "private, max-age=86400");
+    h.set("x-content-type-options", "nosniff");
+    if (url.searchParams.get("descargar")) {
+      const nombre = imgMetaDe(obj.key.startsWith("o/") ? obj : await B.head("o/" + id)).nombre || id;
+      h.set("content-disposition", "attachment; filename*=UTF-8''" + encodeURIComponent(nombre));
+    }
+    return new Response(obj.body, { headers: h });
+  }
+  if (ruta === "editar" && method === "POST") {
+    const d = await request.json().catch(() => ({}));
+    if (!IMG_ID_OK.test(d.id || "")) return json({ error: "No existe" }, 404);
+    const obj = await B.get("o/" + d.id);
+    if (!obj) return json({ error: "No existe" }, 404);
+    const f = imgMetaDe(obj);
+    if (d.nombre) f.nombre = String(d.nombre).trim();
+    if (d.modelo && String(d.modelo) !== f.modelo) { f.modelo = String(d.modelo); f.carpeta = ""; }
+    if (d.carpeta !== undefined) f.carpeta = String(d.carpeta || "");
+    f.editadoPor = (d.usuario || "") + " " + new Date().toISOString().slice(0, 10);
+    // R2 no deja cambiar solo los metadatos: se reescribe el mismo archivo.
+    const nuevo = await B.put("o/" + d.id, await obj.arrayBuffer(), { httpMetadata: obj.httpMetadata, customMetadata: imgMetaA(f) });
+    return json({ ok: true, foto: imgMetaDe(nuevo) });
+  }
+  if (ruta === "borrar" && method === "POST") {
+    const d = await request.json().catch(() => ({}));
+    if (!IMG_ID_OK.test(d.id || "")) return json({ error: "No existe" }, 404);
+    await B.delete(["o/" + d.id, "t/" + d.id]);
+    return json({ ok: true });
+  }
+  return json({ error: "Ruta no encontrada" }, 404);
+}
+
 export default {
   async fetch(request, env) {
     const res = await handleFetch(request, env);
@@ -13623,11 +21606,65 @@ export default {
     ctx.waitUntil(handleSync(env));
     // Respuestas de SEUR por email (Jennifer, 2026-10-02): cada hora.
     ctx.waitUntil(actualizarCorreosSeur(env).catch(() => null));
+    // Colores de revisión según el seguimiento (Jennifer, 2026-10-28).
+    ctx.waitUntil(aplicarColoresAutomaticos(env).catch(() => null));
+    // Nota "lo quiere todo junto" → colchón FUR (Jennifer, 2026-10-28).
+    ctx.waitUntil(aplicarNotasTodoJunto(env).catch(() => null));
     // Recordatorio de tareas por email (Jennifer, 2026-10-05): una vez al
     // día, en la primera pasada desde las 8:00 de Madrid.
     ctx.waitUntil(enviarRecordatorioTareas(env).catch(() => null));
+    // Informe mensual de NACEX a contabilidad y Jonathan Estrada (día 1, 9:00).
+    ctx.waitUntil(enviarInformeNacexMensual(env).catch(() => null));
+    // Solicitud de material a SEUR, un jueves sí y otro no desde las 9:00 (Jennifer, 2026-11-11).
+    ctx.waitUntil(enviarSolicitudMaterialSeur(env).catch(() => null));
+    // Pedidos nuevos con el precio muy por debajo de tarifa (Jennifer, 2026-10-21).
+    ctx.waitUntil(revisarPreciosPedidos(env).catch(() => null));
   },
 };
+
+// Aviso de precio (Jennifer, 2026-10-21): "cuando entre un pedido en Shopify
+// y el precio no te cuadre con el precio de tarifa… avísame… cosas que sean
+// un tanto llamativas… y siempre por abajo". Pedidos de Shopify desde el
+// 21/10, una vez cada uno: llamativo si lo pagado (sin montaje) queda un
+// 20 % o más por debajo de la tarifa BEZEN de sus piezas, o si da margen
+// negativo. Se guarda en order.alertaPrecio y, si es llamativo, email a Jennifer.
+const ALERTA_PRECIO_DESDE = new Date("2026-10-21T00:00:00+02:00").getTime();
+const ALERTA_PRECIO_PCT = 20;
+async function revisarPreciosPedidos(env, { ids, reenviar } = {}) {
+  const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  const orders = await (await stub.fetch("https://do/orders")).json();
+  const quiero = ids ? new Set(ids.map(String)) : null;
+  const candidatos = orders.filter((o) => (quiero ? quiero.has(String(o.id)) : (o.platform === "Shopify" && !o.alertaPrecio && !o.cancelado
+    && new Date(o.orderDate).getTime() >= ALERTA_PRECIO_DESDE && (o.items || []).length)));
+  if (!candidatos.length) return { ok: true, revisados: 0 };
+  const pedidos = candidatos.map((o) => ({ id: o.id, items: o.items || [], postalCode: o.postalCode || "", services: serviciosEfectivos(o), price: o.price }));
+  const m = await (await inventoryStub(env).fetch("https://do/margen-pedidos", { method: "POST", body: JSON.stringify({ pedidos }) })).json();
+  const llamativos = [];
+  for (const o of candidatos) {
+    const r = m[o.id];
+    if (!r) continue;
+    const pagado = r.ingresos;
+    const tarifa = r.tarifa;
+    const pct = tarifa ? Math.round((pagado - tarifa) / tarifa * 1000) / 10 : null;
+    const motivos = [];
+    if (pct != null && pct <= -ALERTA_PRECIO_PCT) motivos.push("pagado " + pct + " % respecto a tarifa");
+    if (r.ok && r.margen < 0) motivos.push("margen negativo (" + r.margen + " €)");
+    const alerta = { fecha: new Date().toISOString(), llamativo: motivos.length > 0, pagado, tarifa, pct, margen: r.ok ? r.margen : null, motivos, faltan: r.faltan || [] };
+    if (o.alertaPrecio && o.alertaPrecio.revisadoPor) alerta.revisadoPor = o.alertaPrecio.revisadoPor;
+    await stub.fetch("https://do/orders/meta", { method: "POST", body: JSON.stringify({ id: o.id, alertaPrecio: alerta }) });
+    if (alerta.llamativo && (!o.alertaPrecio || reenviar)) llamativos.push({ o, alerta });
+  }
+  if (llamativos.length) {
+    const eur = (n) => n == null ? "?" : Number(n).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+    const texto = "Pedidos de la web con el precio muy por debajo de tarifa. Revísalos:\n\n"
+      + llamativos.map(({ o, alerta }) => "- BEZEN" + o.orderNumber + " (" + (o.name || "") + "): " + (o.product || "")
+        + "\n  Pagado " + eur(alerta.pagado) + " · Tarifa " + eur(alerta.tarifa) + (alerta.pct != null ? " (" + alerta.pct + " %)" : "")
+        + (alerta.margen != null ? " · Margen " + eur(alerta.margen) : "") + "\n  " + alerta.motivos.join("; ")).join("\n\n")
+      + "\n\nEn la app sale en rojo en el pedido: ⚠ PRECIO MUY POR DEBAJO DE TARIFA.";
+    await llamarScriptSeur(env, "recordatorio", { para: "JENNIFER", asunto: "⚠ Precio por debajo de tarifa — " + llamativos.map(({ o }) => "BEZEN" + o.orderNumber).join(", "), texto });
+  }
+  return { ok: true, revisados: candidatos.length, llamativos: llamativos.map(({ o }) => o.orderNumber) };
+}
 
 // Email con las tareas de hoy y atrasadas sin hacer, a cada persona las
 // suyas (y las de "los dos"). Lo manda el Apps Script (accion
@@ -13650,8 +21687,12 @@ async function enviarRecordatorioTareas(env, { forzar } = {}) {
   for (const persona of ["JENNIFER", "SERGIO"]) {
     const lista = pendientes.filter((t) => t.para === persona || !t.para || t.para === "AMBOS");
     if (!lista.length && !(forzar && persona === "JENNIFER")) continue;
-    const lineas = lista.map((t) => "- " + (t.fecha < hoy ? "[ATRASADA, era el " + fechaEs(t.fecha) + "] " : "") + (t.pedidoRef ? t.pedidoRef + ": " : "") + t.texto);
-    const texto = (lista.length ? "Tareas para hoy (" + fechaEs(hoy) + "):\n\n" + lineas.join("\n") : "No tienes tareas pendientes para hoy.")
+    const linea = (t) => "- " + (t.fecha < hoy ? "[ATRASADA, era el " + fechaEs(t.fecha) + "] " : "") + (t.pedidoRef ? t.pedidoRef + ": " : "") + t.texto;
+    // Por grupos (Jennifer, 2026-11-04), en el mismo orden que en la app.
+    const GRUPOS = ["FURNITURE", "POLIVAL", "LUSO", "FERNANDO", "SERGIO", "JENNIFER", "CONTABILIDAD", "SEUR", "WORTEN", "TRABAJO PERSONAL"];
+    const bloques = [...GRUPOS, ""].map((g) => ({ g, ts: lista.filter((t) => (GRUPOS.includes(t.grupo) ? t.grupo : "") === g) })).filter((b) => b.ts.length)
+      .map((b) => (b.g || "SIN GRUPO") + " (" + b.ts.length + ")\n" + b.ts.map(linea).join("\n"));
+    const texto = (lista.length ? "Tareas para hoy (" + fechaEs(hoy) + "):\n\n" + bloques.join("\n\n") : "No tienes tareas pendientes para hoy.")
       + "\n\nMárcalas como hechas en la app: Agenda de casos > Tareas.";
     resultados[persona] = await llamarScriptSeur(env, "recordatorio", {
       para: persona,

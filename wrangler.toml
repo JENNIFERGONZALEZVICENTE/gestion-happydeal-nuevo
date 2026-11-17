@@ -20,3 +20,8 @@ new_sqlite_classes = ["InventoryStore"]
 
 [triggers]
 crons = ["0 * * * *"]
+
+# Banco de imágenes (2026-11-10): fotos en tamaño original.
+[[r2_buckets]]
+binding = "IMAGENES"
+bucket_name = "happydeal-imagenes"

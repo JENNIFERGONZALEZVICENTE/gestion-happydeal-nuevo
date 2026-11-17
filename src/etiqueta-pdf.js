@@ -196,6 +196,23 @@ export function etiquetaTransformacionPdf(datos) {
   return pdfDePaginas([paginaTransformacion(datos)]);
 }
 
+// Etiqueta del paquete de NACEX (Jennifer, 2026-10-28): la pega ella en el
+// paquete, con los datos de envío.
+// datos: { destino: [nombre, dirección, CP, población, teléfono], pedido, fecha }
+export function etiquetaNacexPdf(datos) {
+  const c = lienzo();
+  c.linea("NACEX", 26);
+  c.linea("Remitente: BEZEN  ·  Código de cliente 00020", 11, false);
+  c.separador();
+  c.linea("DESTINATARIO", 12, false);
+  const [nombre, ...resto] = datos.destino || [];
+  if (nombre) c.linea(nombre, 22);
+  c.y -= 2;
+  for (const l of resto) c.linea(l, 15);
+  c.pie(`${datos.pedido || ""}   ·   ${datos.fecha || ""}`);
+  return pdfDePaginas([c.ops.join("\n")]);
+}
+
 // etiquetas: [{ pedido, cliente, articulo, parte, bulto, totalBultos, fecha }]
 export function etiquetasReservaPdf(etiquetas) {
   return pdfDePaginas(etiquetas.map(paginaReserva));

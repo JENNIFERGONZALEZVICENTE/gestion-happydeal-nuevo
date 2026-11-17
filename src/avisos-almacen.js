@@ -30,8 +30,18 @@ export async function llamarScriptSeur(env, accion, datos) {
     // El script antiguo (sin SEUR) no conoce "accion" y manda un email al
     // almacén: se detecta porque no devuelve nada propio de SEUR.
     if (r.ok && accion === "seur-enviar" && !r.threadId) return { ok: false, error: "script_sin_actualizar" };
+    // Con fotos (v6, 2026-10-23): un script antiguo no conoce la acción.
+    if (r.ok && /-fotos$/.test(accion) && !r.fotos) return { ok: false, error: "script_sin_actualizar" };
     if (r.ok && accion === "seur-leer" && !r.hilos) return { ok: false, error: "script_sin_actualizar" };
     if (r.ok && accion === "recordatorio" && !r.recordatorio) return { ok: false, error: "script_sin_actualizar" };
+    if (r.ok && accion === "groupon-penalizacion" && !r.groupon) return { ok: false, error: "script_sin_actualizar" };
+    // NACEX (v7, 2026-10-28).
+    if (r.ok && accion === "nacex-documentar" && !r.threadId) return { ok: false, error: "script_sin_actualizar" };
+    if (r.ok && accion === "nacex-leer" && !r.hilos) return { ok: false, error: "script_sin_actualizar" };
+    // Informe mensual NACEX (v11, 2026-11-06).
+    if (r.ok && accion === "nacex-informe" && !r.informe) return { ok: false, error: "script_sin_actualizar" };
+    // Solicitud de material a SEUR (v12, 2026-11-11).
+    if (r.ok && accion === "seur-material" && !r.material) return { ok: false, error: "script_sin_actualizar" };
     return r;
   } catch (e) {
     return { ok: false, error: "error_red" };
