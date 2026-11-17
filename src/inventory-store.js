@@ -3577,6 +3577,13 @@ export class InventoryStore {
       // Pedido para stock ya hecho a Luso/New (Jennifer, 2026-10-02): si hay
       // unidades pedidas para stock de este modelo y medida sin reservar, el
       // cliente se queda con una de esas en vez de pedirse otra vez a fábrica.
+      // Colchón FUR (va con Furniture) en vez de FPK (independiente por SEUR):
+      // excepción Furniture del modelo, o pedido de Furniture SIN tapicería
+      // (Jennifer, 2026-11-17, BEZEN12417: colchón solo con subida a
+      // domicilio pagada → "ese colchón no es FPK, sería FUR"). Aquí esPack =
+      // el pedido lleva tapicería; con tapicería se sigue decidiendo FPK/FUR
+      // por la fecha de llegada.
+      const colchonFur = item.tipo === "colchon" && (item.product.exceptionFurniture || (agencia === "FURNITURE" && !esPack));
       let restante = falta;
       if (item.tipo === "colchon") {
         const pedidosStock = backorders
@@ -3593,7 +3600,7 @@ export class InventoryStore {
           pushBackorder(backorders, {
             id, orderId, orderNumber, stockModel: item.product.stockModel, talla: item.talla, color: item.color, tipo: item.tipo,
             cantidad: tomar, orderDate, esPack, proveedor: ps.proveedor, needsDecision, refSuffix, platform, orderRef,
-            tipoEnvio: item.product.exceptionFurniture ? "FUR" : undefined,
+            tipoEnvio: colchonFur ? "FUR" : undefined,
           });
           const nuevo = backorders.find((b) => b.id === id);
           nuevo.stockPedidoId = ps.id;
@@ -3623,7 +3630,7 @@ export class InventoryStore {
           refSuffix,
           platform,
           orderRef,
-          tipoEnvio: item.tipo === "colchon" && item.product.exceptionFurniture ? "FUR" : undefined,
+          tipoEnvio: colchonFur ? "FUR" : undefined,
         });
       }
     }

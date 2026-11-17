@@ -19034,6 +19034,32 @@ async function aplicarNotasTodoJunto(env, soloOrderId) {
   }
   return { ok: true, cambios };
 }
+// Colchón de un pedido de Furniture SIN tapicería = FUR, nunca FPK
+// (Jennifer, 2026-11-17, BEZEN12417: colchón solo con subida a domicilio
+// pagada; "lo que está mal es que ese colchón aparezca como FPK"). Corrige
+// los que ya estaban mal y los pedidos que pasan a Furniture después. Solo
+// colchones pendientes de salir, de pedidos desde el 01/10/2026.
+async function aplicarColchonFurSinTapiceria(env, soloOrderId) {
+  let orders = await ordersStubSeur(env).fetch("https://do/orders").then((r) => r.json());
+  // Fecha ISO (Shopify) o dd/mm/aaaa (marketplaces).
+  const fechaIso = (f) => { const t = String(f || ""); const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(t); return m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : t; };
+  orders = orders.filter((o) => o.agencia === "FURNITURE" && !o.cancelado && !o.gestionadoExterno && fechaIso(o.orderDate) >= "2026-10-01"
+    && (soloOrderId == null || String(o.id) === String(soloOrderId)));
+  if (!orders.length) return { ok: true, cambios: [] };
+  const inv = inventoryStub(env);
+  const backorders = await inv.fetch("https://do/backorders").then((r) => r.json());
+  const cambios = [];
+  for (const o of orders) {
+    const mios = backorders.filter((b) => String(b.orderId) === String(o.id) && b.estado !== "cancelado" && !b.reposicion && !b.paraStock);
+    if (mios.some((b) => b.tipo === "tapiceria")) continue;
+    for (const b of mios) {
+      if (b.tipo !== "colchon" || b.tipoEnvio !== "FPK" || b.cargaId || b.estado !== "pendiente") continue;
+      await inv.fetch("https://do/backorders/" + encodeURIComponent(b.id) + "/plan", { method: "POST", body: JSON.stringify({ tipoEnvio: "FUR" }) });
+      cambios.push({ pedido: o.orderNumber, id: b.id });
+    }
+  }
+  return { ok: true, cambios };
+}
 async function aplicarColoresAutomaticos(env) {
   const stub = ordersStubSeur(env);
   const [orders, cargas, backorders] = await Promise.all([
@@ -20347,6 +20373,9 @@ async function handleFetch(request, env) {
     if (url.pathname === "/api/pedidos/colores-auto" && request.method === "POST") {
       return Response.json(await aplicarColoresAutomaticos(env));
     }
+    if (url.pathname === "/api/pedidos/colchon-fur" && request.method === "POST") {
+      return Response.json(await aplicarColchonFurSinTapiceria(env));
+    }
     if (url.pathname === "/api/pedidos/todo-junto" && request.method === "POST") {
       return Response.json(await aplicarNotasTodoJunto(env));
     }
@@ -21610,6 +21639,8 @@ export default {
     ctx.waitUntil(aplicarColoresAutomaticos(env).catch(() => null));
     // Nota "lo quiere todo junto" → colchón FUR (Jennifer, 2026-10-28).
     ctx.waitUntil(aplicarNotasTodoJunto(env).catch(() => null));
+    // Colchón de pedido de Furniture sin tapicería → FUR (Jennifer, 2026-11-17).
+    ctx.waitUntil(aplicarColchonFurSinTapiceria(env).catch(() => null));
     // Recordatorio de tareas por email (Jennifer, 2026-10-05): una vez al
     // día, en la primera pasada desde las 8:00 de Madrid.
     ctx.waitUntil(enviarRecordatorioTareas(env).catch(() => null));
