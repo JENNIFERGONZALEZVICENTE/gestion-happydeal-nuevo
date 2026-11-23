@@ -6489,14 +6489,19 @@ export class InventoryStore {
       // (internal-description en Worten; si va vacía, el propio sku).
       const skuNuestro = cfg.colSkuNuestro ? (String(val(fila, cfg.colSkuNuestro) || "").trim().toUpperCase() || String(skuFichero).toUpperCase())
         : cfg.skuDesdeNombre ? skuDesdeNombreWorten(skuFichero, val(fila, cfg.colDescripcion || "description")) : null;
-      const sku = skuNuestro || skuFichero;
+      // Alias a nuestro SKU (cfg.skuTarifa, ej. S14633 → COLLOU160X200).
+      const alias = cfg.skuTarifa ? cfg.skuTarifa[String(skuFichero).trim().toUpperCase()] || null : null;
+      const sku = alias || skuNuestro || skuFichero;
       const canales = {};
       const out = {};
       // Artículo que gestiona Jennifer a mano: se deja tal cual.
       if ((cfg.noTocar || []).includes(sku)) { salida.push({ sku: skuFichero, canales: {}, general: null, salida: {}, cambios: [], noTocar: true, stockGuardado: num(val(fila, colCantidad)) }); continue; }
       for (const c of cfg.canales) {
         // Solo los países donde la oferta ya está (Portugal sin tapicería…).
-        if (cfg.canales.length > 1 && val(fila, c.colOferta) === "") continue;
+        // Con alias se calcula el canal de la oferta general aunque la fila
+        // no tenga precio en ese canal (solo se escribe el general).
+        const aliasSinCanal = alias && val(fila, c.colOferta) === "";
+        if (cfg.canales.length > 1 && val(fila, c.colOferta) === "" && !(alias && cfg.general && c.id === cfg.general.canalOferta)) continue;
         const k = sku + "|" + c.columna + "|" + claveColch(c);
         if (!resCache.has(k)) {
           let r;
@@ -6539,7 +6544,8 @@ export class InventoryStore {
         }
         if (skuNuestro && skuNuestro !== String(skuFichero).toUpperCase() && r.pasos.length) r.pasos = [{ label: "EAN " + skuFichero + " = " + skuNuestro + (cfg.colSkuNuestro ? " (columna " + cfg.colSkuNuestro + ")" : " (por el nombre del producto)"), valor: null }, ...r.pasos];
         canales[c.id] = { ...r, ofertaGuardada: num(val(fila, c.colOferta)), tachadoGuardado };
-        if (r.oferta != null) {
+        if (alias && r.pasos.length) r.pasos = [{ label: "SKU " + skuFichero + " = " + alias + " (enlazado a mano a Tarifas)", valor: null }, ...r.pasos];
+        if (r.oferta != null && !aliasSinCanal) {
           out[c.colTachado] = fmt(r.tachado); out[c.colOferta] = fmt(r.oferta);
           // Worten: precio por canal y de descuento = la oferta.
           for (const col of c.colIguales || []) out[col] = fmt(r.oferta);
@@ -6566,15 +6572,6 @@ export class InventoryStore {
           general.tachado = cc.oferta != null ? cc.tachado : cc.tachadoGuardado;
           general.igualAlCanal = true;
         }
-        // Precio fijo por SKU (cfg.preciosFijos): oferta general fija; el
-        // tachado se mantiene si deja al menos un 30 % de descuento.
-        const fijo = cfg.preciosFijos && cfg.preciosFijos[String(sku).toUpperCase()];
-        if (fijo != null) {
-          const minFijo = Math.ceil(fijo / 0.7 - 1e-6);
-          general.oferta = fijo;
-          general.tachado = tachadoGuardado != null && tachadoGuardado >= minFijo ? tachadoGuardado : minFijo;
-          general.precioFijo = true;
-        }
         if (general.tachado != null) out[g.colTachado] = fmt(general.tachado);
         // Maison: sin oferta general (la columna va vacía en su fichero).
         if (g.sinOferta) general.oferta = null;
@@ -6594,7 +6591,7 @@ export class InventoryStore {
       const descatalogado = esDescatalogado(sku) || (cfg.stockCero || []).some((p) => String(sku).toUpperCase().startsWith(p));
       if (ix.has(colCantidad.toLowerCase())) out[colCantidad] = String(descatalogado ? 0 : STOCK_VIVO);
       const cambios = Object.entries(out).filter(([col, v]) => num(val(fila, col)) !== num(v)).map(([col]) => (col === colCantidad ? "quantity" : col));
-      salida.push({ sku: skuFichero, skuNuestro: skuNuestro && skuNuestro !== String(skuFichero).toUpperCase() ? skuNuestro : null, canales, general, salida: out, cambios, descatalogado, stockGuardado: num(val(fila, colCantidad)) });
+      salida.push({ sku: skuFichero, skuNuestro: alias || (skuNuestro && skuNuestro !== String(skuFichero).toUpperCase() ? skuNuestro : null), canales, general, salida: out, cambios, descatalogado, stockGuardado: num(val(fila, colCantidad)) });
     }
     return salida;
   }

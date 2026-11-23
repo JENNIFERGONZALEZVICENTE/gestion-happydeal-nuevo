@@ -53,9 +53,11 @@ export const CLIENTES_FICHERO_COMPLETO = {
       { id: "PT", pais: "Portugal", columna: "RESTO_ES", plataformaColchones: "CONFORAMA_ES", colTachado: "price[channel=PT]", colOferta: "discount-price[channel=PT]", tachadoModo: "mantener" },
     ],
     general: { colTachado: "price", colOferta: "discount-price", canalOferta: "ES", igualAlCanal: "ES" },
-    // Precio de oferta fijo para SKU que no casan con Tarifas (Jennifer,
-    // 2026-11-23: S14633 "no es el sku correcto, por defecto 250 €").
-    preciosFijos: { S14633: 250 },
+    // SKU del fichero que no son nuestros → nuestro SKU para Tarifas
+    // (Jennifer, 2026-11-23: S14633 = Ergo-Relax Plus 160X200, "que vaya
+    // variando" con la tarifa). Solo se rellenan las columnas que ya tienen
+    // precio en la fila (S14633 solo tiene el precio general).
+    skuTarifa: { S14633: "COLLOU160X200" },
   },
   // Maison du Monde (Jennifer, 2026-11-04): ES/FR/IT con las columnas MAISON
   // de Tarifas y Alemania con RESTO_AL ("a Alemania el RESTO AL de tarifas").

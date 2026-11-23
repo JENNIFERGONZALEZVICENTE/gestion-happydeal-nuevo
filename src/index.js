@@ -6035,7 +6035,6 @@ function pasosFicheroCompletoHtml(c) {
 // quede a menos de un 30 % por debajo (entonces sube a oferta ÷ 0,70).
 function generalFicheroCompletoHtml(f) {
   const g = f.general;
-  if (g.precioFijo) return '<div style="margin:6px 0 4px;padding:6px 10px;border-top:1px dashed var(--border, #d1d5db);font-size:13px"><strong>Precio fijo</strong> (SKU sin tarifa): oferta <strong>' + fcEur(g.oferta) + '</strong> (antes ' + fcEur(g.ofertaGuardada) + '), tachado <strong>' + fcEur(g.tachado) + '</strong>.</div>';
   if (g.igualAlCanal) return '<div style="margin:6px 0 4px;padding:6px 10px;border-top:1px dashed var(--border, #d1d5db);font-size:13px"><strong>Precio general</strong> = el tachado de España: <strong>' + fcEur(g.tachado) + '</strong> (antes ' + fcEur(g.tachadoGuardado) + ').' + (g.oferta !== null && g.oferta !== undefined ? ' Oferta general = la de España: <strong>' + fcEur(g.oferta) + '</strong>.' : ' Sin oferta general (va vacía).') + '</div>';
   const sube = g.tachadoGuardado === null || g.tachado !== g.tachadoGuardado;
   return '<div style="margin:6px 0 4px;padding:6px 10px;border-top:1px dashed var(--border, #d1d5db);font-size:13px"><strong>Precio general</strong>: '
