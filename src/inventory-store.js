@@ -1761,8 +1761,17 @@ const TARIFA_GROUPON_MODELOS = [
   // Cabecero Marsella (Jennifer, 2026-11-23): "solo está en Groupon".
   // Misma fórmula con el envío fijo de cabecero (41 €).
   "Cabecero Marsella Polipiel",
+  // Colchones del deal Groupon (Jennifer, 2026-11-23): también en su propia
+  // tarifa de Colchones, al 30 % (ver TARIFA_GROUPON_DIVISOR).
+  "Colchón Viscoelástico | 20cm | Látex Gel",
+  "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
 ];
 const TARIFA_GROUPON_EXTRA = 9;
+// Margen Groupon por modelo; el resto, 25 % (÷0,75).
+const TARIFA_GROUPON_DIVISOR = {
+  "Colchón Viscoelástico | 20cm | Látex Gel": { divisor: 0.70, label: "30%" },
+  "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja": { divisor: 0.70, label: "30%" },
+};
 // Packs de Groupon (Jennifer, 2026-11-23): canapé + colchón + cabecero todo
 // junto. Canapé + colchón = precio de pack de Furniture (un solo envío, el del
 // canapé: 45 / 60 en gemelos); el cabecero suma su envío aparte (41). 9 € de
@@ -5966,8 +5975,9 @@ export class InventoryStore {
       pasos.push({ label: "Gastos Groupon", valor: TARIFA_GROUPON_EXTRA });
       const suma = coste6 + envioG + TARIFA_GROUPON_EXTRA;
       pasos.push({ label: "Coste + envío + gastos", valor: round2(suma) });
-      const conMargen = suma / 0.75;
-      pasos.push({ label: "÷ 0,75 (25% margen)", valor: round2(conMargen) });
+      const mg = TARIFA_GROUPON_DIVISOR[stockModel] || { divisor: 0.75, label: "25%" };
+      const conMargen = suma / mg.divisor;
+      pasos.push({ label: "÷ " + String(mg.divisor).replace(".", ",") + " (" + mg.label + " margen)", valor: round2(conMargen) });
       // Sin IVA: así va en las tarifas de Groupon (Jennifer).
       const precio = round2(conMargen);
       pasos.push({ label: "Precio GROUPON (sin IVA)", valor: precio });
