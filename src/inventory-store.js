@@ -1774,6 +1774,11 @@ const TARIFA_GROUPON_PACKS = {
     colchon: "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
     divisor: 0.70, margenLabel: "30%",
   },
+  // Látex Gel suelto (Jennifer, 2026-11-23): al 30 % para entrar en Black Friday.
+  "Groupon Colchón Látex Gel suelto": {
+    colchon: "Colchón Viscoelástico | 20cm | Látex Gel",
+    divisor: 0.70, margenLabel: "30%",
+  },
   "Pack Groupon Canapé Space + Pharma-Therapy": {
     canape: "Canape Abatible tapizado alta capacidad y resistencia",
     colchon: "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
@@ -1815,7 +1820,12 @@ const TARIFA_PRODUCTOS_SOLO_TARIFAS = [
     tallas: ["80X180", "80X190", "80X200", "90X180", "90X190", "90X200", "105X180", "105X190", "105X200", "120X180", "120X190", "120X200", "135X180", "135X190", "135X200", "140X190", "140X200", "150X180", "150X190", "150X200", "160X190", "160X200", "180X190", "180X200", "200X200"],
   },
   {
-    productId: "tarifa-pack-groupon-space-pharma", stockModel: "Pack Groupon Canapé Space + Pharma-Therapy", title: "Pack Groupon Canapé Space + Pharma-Therapy", product_type: "Pack Groupon",
+    productId: "tarifa-groupon-latex-gel-suelto", stockModel: "Groupon Colchón Látex Gel suelto", title: "Groupon Colchón Látex Gel suelto", product_type: "Pack Groupon",
+    proveedor: "VARIOS", skuPrefix: "", nombreFabrica: "",
+    tallas: ["80X180", "80X190", "80X200", "90X180", "90X190", "90X200", "105X180", "105X190", "105X200", "120X180", "120X190", "120X200", "135X180", "135X190", "135X200", "140X180", "140X190", "140X200", "150X180", "150X190", "150X200", "160X180", "160X190", "160X200", "180X190", "180X200"],
+  },
+  {
+    productId: "tarifa-pack-groupon-space-pharma",stockModel: "Pack Groupon Canapé Space + Pharma-Therapy", title: "Pack Groupon Canapé Space + Pharma-Therapy", product_type: "Pack Groupon",
     proveedor: "VARIOS", skuPrefix: "", nombreFabrica: "",
     tallas: ["80X180", "80X190", "80X200", "90X180", "90X190", "90X200", "105X180", "105X190", "105X200", "135X180", "135X190", "135X200", "140X190", "140X200", "150X180", "150X190", "150X200", "160X190", "160X200", "160X190 GEMELOS", "160X200 GEMELOS", "180X190", "180X200", "200X200"],
   },
