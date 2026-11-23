@@ -3753,8 +3753,19 @@ export class InventoryStore {
   // no hay riesgo de desperdiciar números del correlativo).
   addNoStockBackorder(backorders, item, orderId, orderNumber, esPack, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica, platform, orderRef) {
     const key = stockKey(item.product.stockModel, item.talla);
+    // Mismo modelo y medida en distinto color dentro del pedido (Jennifer,
+    // 2026-11-23, BEZEN12454: dos MAGNUM 105X190 Beige + Marrón): cada uno
+    // su pendiente (-u2, -u3...). Antes el segundo se descartaba por id
+    // repetido. Mismo color = mismo artículo ya creado (reprocesar no duplica).
+    const base = `${orderId}-${key}`;
+    let id = base;
+    for (let n = 2; ; n++) {
+      const ya = backorders.find((b) => b.id === id);
+      if (!ya || String(ya.color || "").toLowerCase() === String(item.color || "").toLowerCase()) break;
+      id = base + "-u" + n;
+    }
     pushBackorder(backorders, {
-      id: `${orderId}-${key}`,
+      id,
       orderId,
       orderNumber,
       stockModel: item.product.stockModel,
@@ -3772,6 +3783,7 @@ export class InventoryStore {
       orderRef,
       tipoEnvio: item.tipo === "colchon" && item.product.exceptionFurniture ? "FUR" : undefined,
     });
+    return id;
   }
 
   // Cuando Shopify marca un pedido como enviado, las unidades que se habían
@@ -6964,8 +6976,8 @@ export class InventoryStore {
         const deStockTap = item.tipo === "tapiceria" && item.qty === 1
           ? buscarStockTapiceria(stockTapiceria, backorders, item.product.stockModel, item.talla, item.color) : null;
         if (deStockTap) {
-          this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, deStockTap.referencia || null, "DEL STOCK DE TAPICERÍA" + (deStockTap.referencia ? " (" + deStockTap.referencia + ")" : "") + " — ya en el almacén, no pedir a fábrica" + (deStockTap.nota ? " · " + deStockTap.nota : ""), platform, orderRef);
-          const bo = backorders.find((b) => b.id === `${orderId}-${stockKey(item.product.stockModel, item.talla)}`);
+          const idTap = this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, deStockTap.referencia || null, "DEL STOCK DE TAPICERÍA" + (deStockTap.referencia ? " (" + deStockTap.referencia + ")" : "") + " — ya en el almacén, no pedir a fábrica" + (deStockTap.nota ? " · " + deStockTap.nota : ""), platform, orderRef);
+          const bo = backorders.find((b) => b.id === idTap);
           if (bo) {
             bo.estado = "cubierto";
             bo.recibidoFabrica = true;
@@ -7022,7 +7034,7 @@ export class InventoryStore {
         } else if (proveedor === "POLIVAL" && item.product.product_type === "Base" && platform === "Groupon") {
           mercanciaFabrica = buildBaseGrouponMercancia(item.product.stockModel, item.talla).texto;
         }
-        this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica, platform, orderRef);
+        const idBo = this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, referencia, mercanciaFabrica, platform, orderRef);
         // Canapé de 160 que no es de madera: Polival necesita saber si va en
         // GEMELOS o PARTIDO (Jennifer, 2026-09-28). Si el cliente NO lo ha
         // comprado en gemelos, va PARTIDO directamente. Si lo ha comprado en
@@ -7030,7 +7042,7 @@ export class InventoryStore {
         // de idea al llamarle): pregunta en la campana y el pendiente queda
         // "falta elegir" hasta que lo elige en Polival.
         if (necesitaFormato160(item)) {
-          const bo = backorders.find((b) => b.id === `${orderId}-${stockKey(item.product.stockModel, item.talla)}`);
+          const bo = backorders.find((b) => b.id === idBo);
           if (bo && !bo.formato160) {
             if (/gemelo/i.test((item.variantTitle || "") + " " + (item.variantPack || ""))) {
               bo.necesitaFormato160 = true;
@@ -7046,7 +7058,7 @@ export class InventoryStore {
         // en el pedido y en el pedido a Polival va la nota para revisarla.
         if (item.tipo === "tapiceria" && item.qty === 1) {
           const piezas = buscarPiezasStockTapiceria(stockTapiceria, backorders, item.product.stockModel, item.talla, item.color);
-          const bo = piezas.length ? backorders.find((b) => b.id === `${orderId}-${stockKey(item.product.stockModel, item.talla)}`) : null;
+          const bo = piezas.length ? backorders.find((b) => b.id === idBo) : null;
           if (bo) {
             usarPiezasStock(bo, piezas);
             needsReview = true;
