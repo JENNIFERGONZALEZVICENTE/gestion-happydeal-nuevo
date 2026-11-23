@@ -8760,6 +8760,8 @@ const TARIFAS_COLUMNAS = [
   { key: "RESTO_AL", label: "RESTO AL" },
   // Solo la Base Silver por ahora (Jennifer, 2026-10-27).
   { key: "GROUPON", label: "GROUPON" },
+  // Groupon Alemania (Jennifer, 2026-11-23): de momento solo Látex Gel.
+  { key: "GROUPON_DE", label: "GROUPON DE" },
 ];
 let tarifasFilasActuales = [];
 // Categorías de Tarifas (Jennifer, 2026-10-20): primero la categoría y luego
@@ -8779,9 +8781,10 @@ function tarifasModelosCategoria() {
 // Columnas que tiene el modelo/categoría (antes de ocultar ninguna).
 function tarifasColumnasDisponibles() {
   const conGroupon = tarifasFilasActuales.some(f => f.columnas && f.columnas.GROUPON);
+  const conGrouponDe = tarifasFilasActuales.some(f => f.columnas && f.columnas.GROUPON_DE);
   return tarifasCategoria() === "tapiceria"
     ? TARIFAS_COLUMNAS.filter(c => ["BEZEN", "MAISON_ES", "RESTO_ES"].includes(c.key) || (c.key === "GROUPON" && conGroupon))
-    : TARIFAS_COLUMNAS.filter(c => c.key !== "GROUPON" || conGroupon);
+    : TARIFAS_COLUMNAS.filter(c => (c.key !== "GROUPON" || conGroupon) && (c.key !== "GROUPON_DE" || conGrouponDe));
 }
 // Ocultar columnas de precios (Jennifer, 2026-11-03: "la de Groupon me
 // aparece la última y tengo que seguir mucho con la vista"). Se recuerda en

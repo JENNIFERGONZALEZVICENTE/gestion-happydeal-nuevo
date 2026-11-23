@@ -1767,6 +1767,8 @@ const TARIFA_GROUPON_MODELOS = [
   "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
 ];
 const TARIFA_GROUPON_EXTRA = 9;
+// Modelos con columna GROUPON DE (Alemania, envío SEUR a DE).
+const TARIFA_GROUPON_DE = ["Colchón Viscoelástico | 20cm | Látex Gel"];
 // Margen Groupon por modelo; el resto, 25 % (÷0,75).
 const TARIFA_GROUPON_DIVISOR = {
   "Colchón Viscoelástico | 20cm | Látex Gel": { divisor: 0.70, label: "30%" },
@@ -5982,6 +5984,20 @@ export class InventoryStore {
       const precio = round2(conMargen);
       pasos.push({ label: "Precio GROUPON (sin IVA)", valor: precio });
       columnas.GROUPON = { precio, pasos };
+    }
+    // Groupon Alemania (Jennifer, 2026-11-23): misma fórmula con el envío a DE.
+    if (TARIFA_GROUPON_DE.includes(stockModel) && coste != null && envios.DE != null) {
+      const mg = TARIFA_GROUPON_DIVISOR[stockModel] || { divisor: 0.75, label: "25%" };
+      const suma = coste + envios.DE + TARIFA_GROUPON_EXTRA;
+      const precio = round2(suma / mg.divisor);
+      columnas.GROUPON_DE = { precio, pasos: [
+        { label: "Precio de coste", valor: round2(coste) },
+        { label: "Precio de envío Alemania", valor: round2(envios.DE) },
+        { label: "Gastos Groupon", valor: TARIFA_GROUPON_EXTRA },
+        { label: "Coste + envío + gastos", valor: round2(suma) },
+        { label: "÷ " + String(mg.divisor).replace(".", ",") + " (" + mg.label + " margen)", valor: precio },
+        { label: "Precio GROUPON DE (sin IVA)", valor: precio },
+      ] };
     }
     // Los colchones de NEW sí siguen con ,99 en plataformas (Jennifer,
     // 2026-10-21); el resto, en euros justos.
