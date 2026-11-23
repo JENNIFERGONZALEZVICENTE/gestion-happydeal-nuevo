@@ -6566,6 +6566,15 @@ export class InventoryStore {
           general.tachado = cc.oferta != null ? cc.tachado : cc.tachadoGuardado;
           general.igualAlCanal = true;
         }
+        // Precio fijo por SKU (cfg.preciosFijos): oferta general fija; el
+        // tachado se mantiene si deja al menos un 30 % de descuento.
+        const fijo = cfg.preciosFijos && cfg.preciosFijos[String(sku).toUpperCase()];
+        if (fijo != null) {
+          const minFijo = Math.ceil(fijo / 0.7 - 1e-6);
+          general.oferta = fijo;
+          general.tachado = tachadoGuardado != null && tachadoGuardado >= minFijo ? tachadoGuardado : minFijo;
+          general.precioFijo = true;
+        }
         if (general.tachado != null) out[g.colTachado] = fmt(general.tachado);
         // Maison: sin oferta general (la columna va vacía en su fichero).
         if (g.sinOferta) general.oferta = null;
