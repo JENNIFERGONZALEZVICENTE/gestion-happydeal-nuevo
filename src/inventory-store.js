@@ -1763,6 +1763,29 @@ const TARIFA_GROUPON_MODELOS = [
   "Cabecero Marsella Polipiel",
 ];
 const TARIFA_GROUPON_EXTRA = 9;
+// Packs de Groupon (Jennifer, 2026-11-23): canapé + colchón + cabecero todo
+// junto. Canapé + colchón = precio de pack de Furniture (un solo envío, el del
+// canapé: 45 / 60 en gemelos); el cabecero suma su envío aparte (41). 9 € de
+// gastos Groupon una vez y 30 % de margen. Sin IVA. Cama 140 → cabecero 150.
+// Colchón suelto: su envío SEUR. Sin cabecero: solo el envío del canapé.
+const TARIFA_GROUPON_PACKS = {
+  "Groupon Colchón Pharma-Therapy suelto": {
+    colchon: "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
+    divisor: 0.70, margenLabel: "30%",
+  },
+  "Pack Groupon Canapé Space + Pharma-Therapy": {
+    canape: "Canape Abatible tapizado alta capacidad y resistencia",
+    colchon: "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
+    divisor: 0.70, margenLabel: "30%",
+  },
+  "Pack Groupon Canapé Space + Pharma-Therapy + Cabecero Marsella": {
+    canape: "Canape Abatible tapizado alta capacidad y resistencia",
+    colchon: "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
+    cabecero: "Cabecero Marsella Polipiel",
+    cabeceroPorAncho: { "105": "105", "135": "135", "140": "150", "150": "150", "160": "160", "180": "180" },
+    divisor: 0.70, margenLabel: "30%",
+  },
+};
 // Groupon Bélgica (Jennifer, 2026-11-10): no hay tarifa de envío a BE, así que
 // se usa el envío más caro de los guardados para esa talla del modelo.
 const TARIFA_GROUPON_ENVIO_BE = ["Colchón Viscoelástico | 21cm | Bellagio Deluxe"];
@@ -1783,6 +1806,22 @@ const TARIFA_PRODUCTOS_SOLO_TARIFAS = [
     productId: "tarifa-somier-singapur", stockModel: "Somier Articulado Eléctrico Singapur | Montaje incluído", title: "Somier Articulado Eléctrico Singapur | Montaje incluído", product_type: "Somier",
     proveedor: "POLIVAL", skuPrefix: "SOMARTICULADOSINGAPUR", nombreFabrica: "ARTIC. MOTOR SICILIA Y PATAS",
     tallas: ["90X180", "90X190", "105X180", "105X190", "135X180", "135X190", "150X180", "150X190"],
+  },
+  // Packs de Groupon (ver TARIFA_GROUPON_PACKS): solo columna GROUPON.
+  {
+    productId: "tarifa-groupon-pharma-suelto", stockModel: "Groupon Colchón Pharma-Therapy suelto", title: "Groupon Colchón Pharma-Therapy suelto", product_type: "Pack Groupon",
+    proveedor: "VARIOS", skuPrefix: "", nombreFabrica: "",
+    tallas: ["80X180", "80X190", "80X200", "90X180", "90X190", "90X200", "105X180", "105X190", "105X200", "120X180", "120X190", "120X200", "135X180", "135X190", "135X200", "140X190", "140X200", "150X180", "150X190", "150X200", "160X190", "160X200", "180X190", "180X200", "200X200"],
+  },
+  {
+    productId: "tarifa-pack-groupon-space-pharma", stockModel: "Pack Groupon Canapé Space + Pharma-Therapy", title: "Pack Groupon Canapé Space + Pharma-Therapy", product_type: "Pack Groupon",
+    proveedor: "VARIOS", skuPrefix: "", nombreFabrica: "",
+    tallas: ["80X180", "80X190", "80X200", "90X180", "90X190", "90X200", "105X180", "105X190", "105X200", "135X180", "135X190", "135X200", "140X190", "140X200", "150X180", "150X190", "150X200", "160X190", "160X200", "160X190 GEMELOS", "160X200 GEMELOS", "180X190", "180X200", "200X200"],
+  },
+  {
+    productId: "tarifa-pack-groupon-space-pharma-marsella", stockModel: "Pack Groupon Canapé Space + Pharma-Therapy + Cabecero Marsella", title: "Pack Groupon Canapé Space + Pharma-Therapy + Cabecero Marsella", product_type: "Pack Groupon",
+    proveedor: "VARIOS", skuPrefix: "", nombreFabrica: "",
+    tallas: ["105X180", "105X190", "105X200", "135X180", "135X190", "135X200", "140X190", "140X200", "150X180", "150X190", "150X200", "160X190", "160X200", "160X190 GEMELOS", "160X200 GEMELOS", "180X190", "180X200"],
   },
   // Cabecero MARSELLA polipiel de Polival (Jennifer, 2026-11-23): aún no está
   // en la web/Catálogo. Colores: Blanca, Marrón, Negra, Wengué (160 solo
@@ -5671,6 +5710,45 @@ export class InventoryStore {
     return Response.json({ ok: true, envios: salida });
   }
 
+  // Pack de Groupon: suma de piezas con sus costes vigentes (ver TARIFA_GROUPON_PACKS).
+  async calcularTarifaPackGroupon(stockModel, talla) {
+    const cfg = TARIFA_GROUPON_PACKS[stockModel];
+    const tallaCama = String(talla).replace(" GEMELOS", "");
+    const ancho = tallaCama.split("X")[0];
+    const can = cfg.canape ? await this.calcularTarifaModelo(cfg.canape, talla) : null;
+    const col = await this.calcularTarifaModelo(cfg.colchon, tallaCama);
+    const tallaCab = cfg.cabecero ? cfg.cabeceroPorAncho[ancho] : null;
+    const cab = tallaCab ? await this.calcularTarifaModelo(cfg.cabecero, tallaCab) : null;
+    const pasoEnvioCan = can && can.columnas && can.columnas.GROUPON ? (can.columnas.GROUPON.pasos || []).find((p) => /^Precio de env/i.test(p.label)) : null;
+    // Con canapé: envío de pack de Furniture (el del canapé). Colchón suelto: su envío SEUR.
+    const envCan = cfg.canape ? (pasoEnvioCan ? pasoEnvioCan.valor : null) : (col && col.envios ? col.envios.ES : null);
+    const envCab = cfg.cabecero ? (cab && cab.envios ? cab.envios.ES : null) : 0;
+    const falta = [];
+    if (cfg.canape && (!can || can.coste == null)) falta.push("coste canapé");
+    if (!col || col.coste == null) falta.push("coste colchón");
+    if (cfg.cabecero && (!cab || cab.coste == null)) falta.push("coste cabecero" + (tallaCab ? "" : " (no hay cabecero para cama " + ancho + ")"));
+    if (envCan == null) falta.push(cfg.canape ? "envío canapé" : "envío colchón");
+    if (envCab == null) falta.push("envío cabecero");
+    const base = { stockModel, talla, costeProveedor: "VARIOS", costePeriodo: "suma de piezas", envios: { ES: envCan != null && envCab != null ? round2(envCan + envCab) : null } };
+    if (falta.length) return { ...base, coste: null, columnas: { GROUPON: { precio: null, pasos: [{ label: "Falta: " + falta.join(", "), valor: null }] } } };
+    const coste = (can ? can.coste : 0) + col.coste + (cab ? cab.coste : 0);
+    const suma = coste + envCan + envCab + TARIFA_GROUPON_EXTRA;
+    const pasos = [];
+    if (can) pasos.push({ label: "Canapé " + talla + " (coste)", valor: round2(can.coste) });
+    pasos.push({ label: "Colchón " + tallaCama + " (coste)", valor: round2(col.coste) });
+    if (cab) pasos.push({ label: "Cabecero " + tallaCab + (tallaCab !== ancho ? " (cama " + ancho + ")" : "") + " (coste)", valor: round2(cab.coste) });
+    pasos.push({ label: can ? "Envío Furniture canapé + colchón (precio de pack)" : "Envío SEUR del colchón", valor: round2(envCan) });
+    if (cab) pasos.push({ label: "Envío cabecero (aparte)", valor: round2(envCab) });
+    pasos.push(
+      { label: "Gastos Groupon", valor: TARIFA_GROUPON_EXTRA },
+      { label: "Coste + envíos + gastos", valor: round2(suma) },
+      { label: "÷ " + String(cfg.divisor).replace(".", ",") + " (" + cfg.margenLabel + " margen)", valor: round2(suma / cfg.divisor) },
+    );
+    const precio = round2(suma / cfg.divisor);
+    pasos.push({ label: "Precio GROUPON (sin IVA)", valor: precio });
+    return { ...base, coste: round2(coste), columnas: { GROUPON: { precio, pasos } } };
+  }
+
   async calcularTarifaModelo(stockModel, talla) {
     // Modelo descatalogado que usa el precio de OTRO modelo mientras sigue
     // apareciendo en algún fichero de plataforma (Jennifer, 2026-09-23,
@@ -5692,6 +5770,7 @@ export class InventoryStore {
       return { ...base, stockModel, columnas, precioIgualAModelo: sustitutoCompleto.modelo };
     }
 
+    if (TARIFA_GROUPON_PACKS[stockModel]) return this.calcularTarifaPackGroupon(stockModel, talla);
     const products = await this.load("products", {});
     const product = productoDeTarifa(products, stockModel);
     if (!product) return { error: "Modelo no encontrado en el Catálogo." };

@@ -8766,7 +8766,7 @@ let tarifasFilasActuales = [];
 // el producto. La tapicería solo se envía a España: solo columnas ES.
 const TARIFAS_CATEGORIAS = {
   colchones: ["Colchones"],
-  tapiceria: ["Canapé", "Canapé fijo", "Base", "Cabecero", "Somier"],
+  tapiceria: ["Canapé", "Canapé fijo", "Base", "Cabecero", "Somier", "Pack Groupon"],
   complementos: ["Almohada", "Topper", "Protector de colchón"],
 };
 function tarifasCategoria() {
