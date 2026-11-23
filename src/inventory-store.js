@@ -1701,6 +1701,8 @@ const TARIFA_TALLAS_EXTRA_MODELO = {
   // Aura (Jennifer, 2026-10-27): tarifa ARGOS, cama 80 a 180 (+30 cm).
   "Cabecero Aura": ["80", "90", "105", "120", "135", "140", "150", "160", "180", "200"],
   "Cabecero Gaia de Tela": ["90", "105", "135", "150", "160", "180", "200"],
+  // Marsella polipiel (Jennifer, 2026-11-23): tarifa Polival 105/135/150/160/180.
+  "Cabecero Marsella Polipiel": ["105", "135", "150", "160", "180"],
   // Canapé ZENIT (Mónaco), madera esquinas curvas (Jennifer, 2026-10-22): tallas de la tarifa que no están en la web.
   "Canape abatible de madera alta capacidad y resistencia - esquinas curvas": ["105X180", "150X180", "160X180", "180X180", "180X190", "200X180", "200X190"],
   // Space Deluxe de tela (Jennifer, 2026-10-21): la misma tarifa ARGOS que la polipiel.
@@ -1756,6 +1758,9 @@ const TARIFA_GROUPON_MODELOS = [
   "Canape Abatible tapizado alta capacidad y resistencia",
   // Colchón Bellagio Deluxe (Jennifer, 2026-11-10): misma fórmula.
   "Colchón Viscoelástico | 21cm | Bellagio Deluxe",
+  // Cabecero Marsella (Jennifer, 2026-11-23): "solo está en Groupon".
+  // Misma fórmula con el envío fijo de cabecero (41 €).
+  "Cabecero Marsella Polipiel",
 ];
 const TARIFA_GROUPON_EXTRA = 9;
 // Groupon Bélgica (Jennifer, 2026-11-10): no hay tarifa de envío a BE, así que
@@ -1778,6 +1783,14 @@ const TARIFA_PRODUCTOS_SOLO_TARIFAS = [
     productId: "tarifa-somier-singapur", stockModel: "Somier Articulado Eléctrico Singapur | Montaje incluído", title: "Somier Articulado Eléctrico Singapur | Montaje incluído", product_type: "Somier",
     proveedor: "POLIVAL", skuPrefix: "SOMARTICULADOSINGAPUR", nombreFabrica: "ARTIC. MOTOR SICILIA Y PATAS",
     tallas: ["90X180", "90X190", "105X180", "105X190", "135X180", "135X190", "150X180", "150X190"],
+  },
+  // Cabecero MARSELLA polipiel de Polival (Jennifer, 2026-11-23): aún no está
+  // en la web/Catálogo. Colores: Blanca, Marrón, Negra, Wengué (160 solo
+  // Negra; 180 Blanca y Marrón). Mismo coste para todos los colores.
+  {
+    productId: "tarifa-cabecero-marsella", stockModel: "Cabecero Marsella Polipiel", title: "Cabecero Marsella Polipiel", product_type: "Cabecero",
+    proveedor: "POLIVAL", skuPrefix: "CABMARSELLA", nombreFabrica: "CABECERO MARSELLA",
+    tallas: [],
   },
 ];
 // Conjuntos somier + colchón de la web (Jennifer, 2026-10-27): van como los
@@ -1813,6 +1826,7 @@ const TARIFA_ENVIO_FIJO_MODELO = {
   // Singapur: montaje incluido → envío de base + montaje de Furniture (41 + 19).
   "Somier Articulado Eléctrico Singapur | Montaje incluído": 60,
   "Cabecero Gaia de Tela": 41,
+  "Cabecero Marsella Polipiel": 41,
   // Canapé Fijo = BASE ALPHA (Jennifer, 2026-10-29): envío como una base.
   "Canapé Fijo gama colores vivos": 41,
   "Canapé Fijo gama colores natural": 41,
@@ -1907,6 +1921,7 @@ const TARIFA_PLATAFORMAS_MARGEN_MODELO = {
   "Base tapizada con rejilla 3D y respiraderos | BLANCO": { divisor: 0.70, label: "30%" },
   "Base tapizada con rejilla 3D y respiraderos | NEGRO": { divisor: 0.70, label: "30%" },
   "Cabecero Gaia de Tela": { divisor: 0.70, label: "30%" },
+  "Cabecero Marsella Polipiel": { divisor: 0.70, label: "30%" },
   // Canapé Fijo (2026-10-29): como la base.
   "Canapé Fijo gama colores vivos": { divisor: 0.70, label: "30%" },
   "Canapé Fijo gama colores natural": { divisor: 0.70, label: "30%" },
