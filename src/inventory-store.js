@@ -1766,7 +1766,8 @@ const TARIFA_GROUPON_EXTRA = 9;
 // Packs de Groupon (Jennifer, 2026-11-23): canapé + colchón + cabecero todo
 // junto. Canapé + colchón = precio de pack de Furniture (un solo envío, el del
 // canapé: 45 / 60 en gemelos); el cabecero suma su envío aparte (41). 9 € de
-// gastos Groupon una vez y 30 % de margen. Sin IVA. Cama 140 → cabecero 150.
+// gastos Groupon una vez y 30 % de margen. Sin IVA. Cama 140 → cabecero 150;
+// camas de 80 y 90 → cabecero 105, el más pequeño (Jennifer, 2026-11-23).
 // Colchón suelto: su envío SEUR. Sin cabecero: solo el envío del canapé.
 const TARIFA_GROUPON_PACKS = {
   "Groupon Colchón Pharma-Therapy suelto": {
@@ -1782,7 +1783,7 @@ const TARIFA_GROUPON_PACKS = {
     canape: "Canape Abatible tapizado alta capacidad y resistencia",
     colchon: "Colchón Viscoelástico | 20cm | Pharma-Therapy Soja",
     cabecero: "Cabecero Marsella Polipiel",
-    cabeceroPorAncho: { "105": "105", "135": "135", "140": "150", "150": "150", "160": "160", "180": "180" },
+    cabeceroPorAncho: { "80": "105", "90": "105", "105": "105", "135": "135", "140": "150", "150": "150", "160": "160", "180": "180" },
     divisor: 0.70, margenLabel: "30%",
   },
 };
@@ -1821,7 +1822,7 @@ const TARIFA_PRODUCTOS_SOLO_TARIFAS = [
   {
     productId: "tarifa-pack-groupon-space-pharma-marsella", stockModel: "Pack Groupon Canapé Space + Pharma-Therapy + Cabecero Marsella", title: "Pack Groupon Canapé Space + Pharma-Therapy + Cabecero Marsella", product_type: "Pack Groupon",
     proveedor: "VARIOS", skuPrefix: "", nombreFabrica: "",
-    tallas: ["105X180", "105X190", "105X200", "135X180", "135X190", "135X200", "140X190", "140X200", "150X180", "150X190", "150X200", "160X190", "160X200", "160X190 GEMELOS", "160X200 GEMELOS", "180X190", "180X200"],
+    tallas: ["80X180", "80X190", "80X200", "90X180", "90X190", "90X200", "105X180", "105X190", "105X200", "135X180", "135X190", "135X200", "140X190", "140X200", "150X180", "150X190", "150X200", "160X190", "160X200", "160X190 GEMELOS", "160X200 GEMELOS", "180X190", "180X200"],
   },
   // Cabecero MARSELLA polipiel de Polival (Jennifer, 2026-11-23): aún no está
   // en la web/Catálogo. Colores: Blanca, Marrón, Negra, Wengué (160 solo
