@@ -2256,6 +2256,7 @@ ${ventas ? "<script>window.MODO_VENTAS = true;</script>" : ""}
     <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas">Historial de cargas</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="casos-revisar">Casos a revisar</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="devoluciones-fabrica">Pendiente de devolución a fábrica</a></li>
+    <li><a href="#" class="nav-link sublink" data-logistica="recogidas-furniture">🔄 Solo recogidas</a></li>
     <li class="sublista-header">SEUR</li>
     <li><a href="#" class="nav-link sublink" data-logistica="seur">Pedidos pendientes</a></li>
     <li><a href="#" class="nav-link sublink" data-logistica="historial-cargas-seur">Historial de cargas</a></li>
@@ -2826,6 +2827,42 @@ ${ventas ? "<script>window.MODO_VENTAS = true;</script>" : ""}
   <div class="table-wrap">
     <table id="devfab-table">
       <thead><tr><th>Pedido</th><th>Cliente</th><th>Pieza dañada</th><th>Fábrica</th><th>Reposición</th><th>Devolución</th><th>Nota</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-recogidas-furniture" style="display:none">
+  <p style="font-size:13px;color:var(--muted);margin:0 0 8px">Recogidas por Furniture (desistimiento o devolución). No van en ninguna carga: cada una tiene su fichero suelto para subirlo a Furniture. Referencia REC + pedido. Cada recogida sale también en «Pendiente de devolución a fábrica».</p>
+  <div class="toolbar">
+    <button type="button" id="recfur-nueva">➕ Nueva recogida</button>
+    <select id="recfur-estado">
+      <option value="activas">Activas (sin recibir)</option>
+      <option value="todas">Todas</option>
+    </select>
+    <input id="recfur-search" type="search" placeholder="Buscar pedido, cliente o artículo..." style="min-width:260px" autocomplete="off" />
+  </div>
+  <div id="recfur-form" style="display:none;border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin:8px 0;max-width:720px">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+      <label style="font-size:12.5px">Nº de pedido<br><input id="recfur-pedido" type="text" placeholder="BEZEN12306 o 12306 o ref. marketplace" style="min-width:240px"></label>
+      <label style="font-size:12.5px">Motivo<br><select id="recfur-motivo"><option value="desistimiento">Desistimiento</option><option value="devolucion">Devolución</option></select></label>
+      <label style="font-size:12.5px">Fábrica (para la lista de devoluciones)<br><select id="recfur-proveedor"><option value="">Sin fábrica / tienda</option><option>POLIVAL</option><option>LUSO</option><option>NEW</option></select></label>
+    </div>
+    <div id="recfur-cliente" style="font-size:12.5px;color:var(--muted);margin:6px 0"></div>
+    <div style="font-size:12.5px;margin-top:8px">Qué se recoge (una línea por artículo o pieza; delante se pone siempre RECOGIDA):</div>
+    <div id="recfur-lineas"></div>
+    <button type="button" id="recfur-mas" class="secondary" style="margin-top:4px">➕ Añadir otra línea</button>
+    <div style="font-size:12.5px;margin-top:10px">Observaciones para Furniture:<br><input id="recfur-obs" type="text" style="width:100%;box-sizing:border-box" value="RECOGIDA DE COLCHÓN PARA DEVOLVER A TIENDA"></div>
+    <div style="margin-top:10px;display:flex;gap:8px">
+      <button type="button" id="recfur-guardar">Guardar y descargar fichero</button>
+      <button type="button" id="recfur-cancelar" class="secondary">Cancelar</button>
+      <span id="recfur-msg" style="font-size:12.5px;color:#b91c1c;align-self:center"></span>
+    </div>
+  </div>
+  <div id="recfur-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="recfur-table">
+      <thead><tr><th>Referencia</th><th>Cliente</th><th>Qué se recoge</th><th>Motivo</th><th>Estado</th><th>Fichero</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -5685,7 +5722,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-contactos", "view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-groupon", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-stock-tapiceria", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-devoluciones-fabrica", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-nacex", "view-casos-revisar-seur", "view-devoluciones-seur", "view-reclamaciones-seur", "view-nacex-historico", "view-pendiente-recibir", "view-material-seur", "view-revision-facturas-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-tarifas-completos", "view-tarifas-reforman","view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas", "view-publicidad", "view-liquidacion", "view-presupuestos", "view-boveda", "view-imagenes"];
+const ALL_VIEWS = ["view-contactos", "view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-groupon", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-stock-tapiceria", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-devoluciones-fabrica", "view-recogidas-furniture", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-nacex", "view-casos-revisar-seur", "view-devoluciones-seur", "view-reclamaciones-seur", "view-nacex-historico", "view-pendiente-recibir", "view-material-seur", "view-revision-facturas-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-tarifas-completos", "view-tarifas-reforman","view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas", "view-publicidad", "view-liquidacion", "view-presupuestos", "view-boveda", "view-imagenes"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -5807,7 +5844,7 @@ function selectProveedores(id) {
   loadPendientes();
 }
 
-const LOGISTICA_LABELS = { "material-seur": "SEUR · Solicitud de material", "pendiente-recibir": "Mercancía pendiente de recibir", "nacex-historico": "NACEX · Histórico", "revision-facturas-seur": "SEUR · Revisión de facturas", "buscar-logistica": "Buscar pedido en cargas", nacex: "NACEX · Envíos",furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", "devoluciones-fabrica": "Furniture · Pendiente de devolución a fábrica", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR", "devoluciones-seur": "SEUR · Devueltos", "reclamaciones-seur": "SEUR · Casos abiertos de reclamación" };
+const LOGISTICA_LABELS = { "material-seur": "SEUR · Solicitud de material", "pendiente-recibir": "Mercancía pendiente de recibir", "nacex-historico": "NACEX · Histórico", "revision-facturas-seur": "SEUR · Revisión de facturas", "buscar-logistica": "Buscar pedido en cargas", nacex: "NACEX · Envíos",furniture: "Furniture · Pedidos pendientes", "historial-cargas": "Furniture · Historial de cargas", "casos-revisar": "Furniture · Casos a revisar", "devoluciones-fabrica": "Furniture · Pendiente de devolución a fábrica", "recogidas-furniture": "Furniture · Solo recogidas", seur: "SEUR · Pedidos pendientes", "historial-cargas-seur": "SEUR · Historial de cargas", "casos-revisar-seur": "SEUR · Envíos SEUR", "devoluciones-seur": "SEUR · Devueltos", "reclamaciones-seur": "SEUR · Casos abiertos de reclamación" };
 function selectLogistica(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.logistica === id));
   document.getElementById("view-title").textContent = "Logística · " + LOGISTICA_LABELS[id];
@@ -5817,6 +5854,7 @@ function selectLogistica(id) {
   if (id === "historial-cargas") return loadHistorialCargas();
   if (id === "casos-revisar") return loadCasosRevisar();
   if (id === "devoluciones-fabrica") return loadDevolucionesFabrica();
+  if (id === "recogidas-furniture") return loadRecogidasFurniture();
   if (id === "seur") return loadSeur();
   if (id === "historial-cargas-seur") return loadHistorialCargasSeur();
   if (id === "casos-revisar-seur") return loadCasosRevisarSeur();
@@ -14711,7 +14749,7 @@ document.getElementById("reclamaciones-seur-actualizar").addEventListener("click
 // "Devuelto al almacén" es lo mismo que devuelto a fábrica (Jennifer,
 // 2026-10-28): un solo estado; el antiguo "almacen" cuenta como devuelto.
 const DEVFAB_ESTADOS = { recoger: "🚚 Furniture tiene que recogerla", devuelta: "📦 Devuelto al almacén", "no-devolver": "✖ No hay que devolver" };
-const DEVFAB_MOTIVOS = { incidencia: "Incidencia", rechazo: "Rechazo del cliente", otro: "Otro" };
+const DEVFAB_MOTIVOS = { incidencia: "Incidencia", rechazo: "Rechazo del cliente", otro: "Otro", desistimiento: "Desistimiento", devolucion: "Devolución" };
 let devolucionesFabricaManual = [];
 function esDevolucionFabrica(b) {
   if (!b.reposicion || b.revisionMontaje || b.estado === "cancelado" || b.tipo === "servicio") return false;
@@ -14738,7 +14776,7 @@ function filasDevolucionFabrica() {
   const aMano = devolucionesFabricaManual.filter(m => !m.borrado).map(m => {
     const o = allOrders.find(x => refLabel(x).toUpperCase() === String(m.ref || "").toUpperCase() || String(x.orderRef || "").toUpperCase() === String(m.ref || "").toUpperCase()) || {};
     return { key: "m:" + m.id, ref: m.ref || "", fecha: m.creado, cliente: m.cliente || o.name || "", ciudad: o.city || "", pieza: m.que || "", proveedor: m.proveedor || "",
-      df: m, motivo: DEVFAB_MOTIVOS[m.motivo] || m.motivo || "", repo: "✍ Añadida a mano" + (m.creadoPor ? " (" + m.creadoPor + ")" : ""), manual: true };
+      df: m, motivo: DEVFAB_MOTIVOS[m.motivo] || m.motivo || "", repo: (m.recogidaId ? "🔄 Recogida Furniture" : "✍ Añadida a mano") + (m.creadoPor ? " (" + m.creadoPor + ")" : ""), manual: !m.recogidaId };
   });
   return deReposicion.concat(aMano).sort((a, b) => String(b.fecha || "").localeCompare(String(a.fecha || "")));
 }
@@ -14813,6 +14851,132 @@ async function guardarDevolucionFabrica(key, cambios) {
   Object.assign(actual, d.entrada);
   return true;
 }
+// Solo recogidas por Furniture (Jennifer, 2026-11-25): desistimiento o
+// devolución. Fichero suelto por recogida, referencia REC + pedido, una
+// línea "RECOGIDA ..." por cada cosa; también sale en «Pendiente de
+// devolución a fábrica».
+const RECFUR_ESTADOS = { pendiente: "⏳ Fichero sin descargar", descargado: "⬆ Fichero descargado", recogido: "🚚 Recogido por Furniture", recibido: "📦 Recibido en instalaciones" };
+const RECFUR_MOTIVOS = { desistimiento: "Desistimiento", devolucion: "Devolución" };
+let recogidasFurniture = [];
+function recfurBuscarPedido(txt) {
+  const t = String(txt || "").trim().toUpperCase().replace(/^REC/, "");
+  if (!t) return null;
+  return allOrders.find(o => ("BEZEN" + o.orderNumber) === t || String(o.orderNumber) === t || (o.orderRef && String(o.orderRef).toUpperCase() === t)) || null;
+}
+function recfurRefPedido(o) {
+  return "REC" + (o.platform && o.platform !== "Shopify" && o.orderRef ? o.orderRef : "BEZEN" + o.orderNumber);
+}
+function recfurAnadirLinea(valor) {
+  const div = document.createElement("div");
+  div.style.cssText = "display:flex;gap:6px;align-items:center;margin-top:4px";
+  div.innerHTML = '<strong style="font-size:12.5px">RECOGIDA</strong><input type="text" class="recfur-linea" style="flex:1" placeholder="COLCHÓN ZEN NIRVANA 150X190"><button type="button" class="secondary recfur-quitar" style="padding:2px 8px">✖</button>';
+  div.querySelector("input").value = valor || "";
+  div.querySelector(".recfur-quitar").addEventListener("click", () => div.remove());
+  document.getElementById("recfur-lineas").appendChild(div);
+}
+async function loadRecogidasFurniture() {
+  try { const d = await fetch("/api/recogidas-furniture").then(r => r.json()); recogidasFurniture = Array.isArray(d) ? d : []; } catch (e) { recogidasFurniture = []; }
+  if (!allOrders.length) await loadOrders();
+  renderRecogidasFurniture();
+}
+function renderRecogidasFurniture() {
+  const filtro = document.getElementById("recfur-estado").value;
+  const q = document.getElementById("recfur-search").value.trim().toLowerCase();
+  const fecha = iso => iso ? new Date(iso).toLocaleDateString("es-ES") : "";
+  const vivas = recogidasFurniture.filter(r => !r.borrado);
+  const lista = vivas.filter(r => (filtro === "todas" || r.estado !== "recibido")
+    && (!q || [r.ref, r.cliente, r.ciudad, (r.lineas || []).join(" ")].join(" ").toLowerCase().includes(q)))
+    .sort((a, b) => String(b.creado || "").localeCompare(String(a.creado || "")));
+  document.getElementById("recfur-count").textContent = lista.length + " recogida(s) en la lista · " + vivas.filter(r => r.estado !== "recibido").length + " sin recibir";
+  document.querySelector("#recfur-table tbody").innerHTML = lista.length ? lista.map(r => {
+    const color = r.estado === "recibido" ? "#dcfce7;color:#166534" : r.estado === "recogido" ? "#dbeafe;color:#1e40af" : "#fef3c7;color:#92400e";
+    const botones = Object.keys(RECFUR_ESTADOS).filter(k => k !== r.estado).map(k => '<button type="button" class="secondary recfur-estado-btn" data-id="' + escapeAttr(r.id) + '" data-estado="' + k + '" style="padding:2px 6px;font-size:11px;margin:2px 2px 0 0">' + RECFUR_ESTADOS[k] + "</button>").join("");
+    return "<tr>"
+      + "<td><strong>" + escapeAttr(r.ref) + "</strong><br><small>" + fecha(r.creado) + (r.creadoPor ? " · " + escapeAttr(r.creadoPor) : "") + "</small></td>"
+      + "<td>" + escapeAttr(r.cliente || "") + (r.ciudad ? "<br><small>" + escapeAttr(r.ciudad) + "</small>" : "") + "</td>"
+      + '<td style="max-width:300px">' + (r.lineas || []).map(escapeAttr).join("<br>") + (r.observaciones ? '<br><small style="color:var(--muted)">Obs.: ' + escapeAttr(r.observaciones) + "</small>" : "") + "</td>"
+      + "<td>" + escapeAttr(RECFUR_MOTIVOS[r.motivo] || r.motivo || "") + (r.proveedor ? "<br><small>" + escapeAttr(r.proveedor) + "</small>" : "") + "</td>"
+      + '<td><span class="badge" style="background:' + color + '">' + (RECFUR_ESTADOS[r.estado] || r.estado) + "</span>"
+      + (r.fecha ? '<br><small style="color:var(--muted)">' + fecha(r.fecha) + (r.usuario ? " · " + escapeAttr(r.usuario) : "") + "</small>" : "") + "<br>" + botones + "</td>"
+      + '<td><button type="button" class="recfur-descargar-btn" data-id="' + escapeAttr(r.id) + '" style="padding:4px 8px;font-size:12px">⬇ Descargar fichero</button></td>'
+      + '<td><button type="button" class="secondary recfur-borrar-btn" data-id="' + escapeAttr(r.id) + '" style="padding:2px 6px;font-size:11px">Quitar</button></td></tr>';
+  }).join("") : '<tr><td colspan="7" style="color:var(--muted)">No hay recogidas con este filtro.</td></tr>';
+}
+async function recfurCambiarEstado(id, estado) {
+  const res = await fetch("/api/recogidas-furniture", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, estado, usuario: currentUser || null }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { alert(d.error || "No se ha podido guardar."); return false; }
+  const r = recogidasFurniture.find(x => x.id === id);
+  if (r) Object.assign(r, d.entrada);
+  return true;
+}
+async function recfurDescargar(id) {
+  const a = document.createElement("a");
+  a.href = "/api/recogidas-furniture/export?id=" + encodeURIComponent(id);
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  const r = recogidasFurniture.find(x => x.id === id);
+  if (r && r.estado === "pendiente") await recfurCambiarEstado(id, "descargado");
+  renderRecogidasFurniture();
+}
+document.getElementById("recfur-estado").addEventListener("change", renderRecogidasFurniture);
+document.getElementById("recfur-search").addEventListener("input", renderRecogidasFurniture);
+document.getElementById("recfur-nueva").addEventListener("click", async () => {
+  if (!allOrders.length) await loadOrders();
+  document.getElementById("recfur-form").style.display = "";
+  document.getElementById("recfur-pedido").value = "";
+  document.getElementById("recfur-cliente").textContent = "";
+  document.getElementById("recfur-msg").textContent = "";
+  document.getElementById("recfur-obs").value = "RECOGIDA DE COLCHÓN PARA DEVOLVER A TIENDA";
+  document.getElementById("recfur-lineas").innerHTML = "";
+  recfurAnadirLinea("");
+  document.getElementById("recfur-pedido").focus();
+});
+document.getElementById("recfur-cancelar").addEventListener("click", () => { document.getElementById("recfur-form").style.display = "none"; });
+document.getElementById("recfur-mas").addEventListener("click", () => recfurAnadirLinea(""));
+document.getElementById("recfur-pedido").addEventListener("input", (e) => {
+  const o = recfurBuscarPedido(e.target.value);
+  document.getElementById("recfur-cliente").innerHTML = o
+    ? "<strong>" + escapeAttr(recfurRefPedido(o)) + "</strong> · " + escapeAttr(o.name || "") + " · " + escapeAttr([o.furnitureAddress || o.address, o.postalCode, o.city].filter(Boolean).join(", ")) + "<br>" + escapeAttr(o.product || "")
+    : (e.target.value.trim() ? "No encuentro ese pedido." : "");
+});
+document.getElementById("recfur-guardar").addEventListener("click", async () => {
+  const msg = document.getElementById("recfur-msg");
+  msg.textContent = "";
+  const o = recfurBuscarPedido(document.getElementById("recfur-pedido").value);
+  if (!o) { msg.textContent = "No encuentro ese pedido."; return; }
+  const lineas = [...document.querySelectorAll(".recfur-linea")].map(i => i.value.trim()).filter(Boolean);
+  if (!lineas.length) { msg.textContent = "Escribe qué hay que recoger."; return; }
+  const res = await fetch("/api/recogidas-furniture", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ usuario: currentUser || null, crear: {
+    orderId: o.id, ref: recfurRefPedido(o), cliente: o.name || "", ciudad: o.city || "",
+    motivo: document.getElementById("recfur-motivo").value, proveedor: document.getElementById("recfur-proveedor").value,
+    lineas, observaciones: document.getElementById("recfur-obs").value.trim() } }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { msg.textContent = d.error || "No se ha podido guardar."; return; }
+  document.getElementById("recfur-form").style.display = "none";
+  recogidasFurniture.push(d.entrada);
+  await recfurDescargar(d.entrada.id);
+});
+document.querySelector("#recfur-table tbody").addEventListener("click", async (e) => {
+  const desc = e.target.closest(".recfur-descargar-btn");
+  if (desc) return recfurDescargar(desc.dataset.id);
+  const borrar = e.target.closest(".recfur-borrar-btn");
+  if (borrar) {
+    if (!confirm("¿Quitar esta recogida? También se quita de «Pendiente de devolución a fábrica».")) return;
+    const res = await fetch("/api/recogidas-furniture", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ borrar: borrar.dataset.id, usuario: currentUser || null }) });
+    if (!res.ok) { alert("No se ha podido quitar."); return; }
+    const r = recogidasFurniture.find(x => x.id === borrar.dataset.id);
+    if (r) r.borrado = true;
+    return renderRecogidasFurniture();
+  }
+  const btn = e.target.closest(".recfur-estado-btn");
+  if (!btn) return;
+  btn.disabled = true;
+  if (await recfurCambiarEstado(btn.dataset.id, btn.dataset.estado)) renderRecogidasFurniture();
+  else btn.disabled = false;
+});
 document.getElementById("devfab-estado").addEventListener("change", renderDevolucionesFabrica);
 document.getElementById("devfab-proveedor").addEventListener("change", renderDevolucionesFabrica);
 document.getElementById("devfab-search").addEventListener("input", renderDevolucionesFabrica);
@@ -18458,6 +18622,32 @@ function truncarReferenciaSeur(ref) {
 // (Carrefour, Maison Du Monde...) usan su propia referencia real (orderRef),
 // sin ese prefijo (Jennifer, 2026-09-17, Fase 2 de Carrefour; generalizado
 // 2026-09-19 al añadir Maison Du Monde como segunda tienda).
+// Fichero suelto de una recogida (Jennifer, 2026-11-25): los mismos datos
+// que la entrega del pedido, referencia REC + pedido, una fila por cada cosa
+// que se recoge ("RECOGIDA COLCHÓN ZEN NIRVANA 150X190") y la observación
+// que se rellena al crearla.
+async function buildRecogidaFurnitureCsv(env, id) {
+  const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+  const [orders, lista] = await Promise.all([
+    stub.fetch("https://do/orders").then((r) => r.json()),
+    stub.fetch("https://do/recogidas-furniture").then((r) => r.json()),
+  ]);
+  const r = (lista || []).find((x) => x.id === id);
+  if (!r) return null;
+  const o = orders.find((x) => String(x.id) === String(r.orderId)) || {};
+  const fechaTexto = new Date().toLocaleDateString("es-ES", { timeZone: "Europe/Madrid", day: "2-digit", month: "2-digit", year: "numeric" });
+  const montaje = tieneMontajeFurniture(serviciosEfectivos(o));
+  const telefono = limpiarTelefonoFurniture(o.phone);
+  const rows = (r.lineas || []).map((linea) => [
+    fechaTexto, "", r.ref, o.name || r.cliente || "", o.furnitureAddress || o.address || "",
+    o.postalCode || "", o.city || "", linea, "1", "1229", telefono, telefono, r.observaciones || "",
+    "", "", "", "", "", "", "", "", "", "", "",
+    montaje ? "SUBIDA Y MONTAJE" : "SUBIDA A PISO", "1", "", "", "",
+    o.email || "", provinciaPorCp(o.postalCode), "",
+  ]);
+  return { csv: buildFurnitureCsv(rows), filename: "Furniture_" + r.ref + ".csv" };
+}
+
 function referenciaPedido(o) {
   return o.platform && o.platform !== "Shopify" && o.orderRef ? o.orderRef : "BEZEN" + o.orderNumber;
 }
@@ -21260,6 +21450,24 @@ async function handleFetch(request, env) {
         id: p.id, titulo: p.title, estado: p.status, tipo: p.product_type, marca: p.vendor, handle: p.handle,
         variantes: (p.variants || []).map((v) => ({ id: v.id, titulo: v.title, sku: v.sku, precio: v.price, precioAntes: v.compare_at_price, inventario: v.inventory_quantity })),
       })));
+    }
+
+    // Solo recogidas por Furniture (Jennifer, 2026-11-25): desistimiento o
+    // devolución, fichero suelto por recogida (no va en ninguna carga).
+    if (url.pathname === "/api/recogidas-furniture" && (request.method === "GET" || request.method === "POST")) {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do/recogidas-furniture", request.method === "POST" ? { method: "POST", body: await request.text() } : undefined);
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname === "/api/recogidas-furniture/export" && request.method === "GET") {
+      const result = await buildRecogidaFurnitureCsv(env, url.searchParams.get("id") || "");
+      if (!result) return new Response("Recogida no encontrada.", { status: 404 });
+      return new Response(result.csv, {
+        headers: {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": `attachment; filename="${result.filename}"`,
+        },
+      });
     }
 
     if (url.pathname === "/api/cargas/export" && request.method === "GET") {

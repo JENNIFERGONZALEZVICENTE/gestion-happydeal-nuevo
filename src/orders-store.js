@@ -1791,6 +1791,65 @@ export class OrdersStore {
     if (url.pathname === "/devoluciones-fabrica" && request.method === "GET") {
       return Response.json((await this.state.storage.get("devolucionesFabrica")) || []);
     }
+    // Solo recogidas por Furniture (Jennifer, 2026-11-25). Cada recogida
+    // crea también su línea en «Pendiente de devolución a fábrica»
+    // (devolucionesFabrica, recogidaId) y, al marcarla recibida, esa línea
+    // pasa a «Devuelto al almacén».
+    if (url.pathname === "/recogidas-furniture" && request.method === "GET") {
+      return Response.json((await this.state.storage.get("recogidasFurniture")) || []);
+    }
+    if (url.pathname === "/recogidas-furniture" && request.method === "POST") {
+      const { crear, id, estado, borrar, usuario } = await request.json();
+      const lista = (await this.state.storage.get("recogidasFurniture")) || [];
+      const devs = (await this.state.storage.get("devolucionesFabrica")) || [];
+      const ahora = new Date().toISOString();
+      const u = usuario || null;
+      let entrada;
+      if (crear) {
+        const lineas = (crear.lineas || []).map((l) => String(l || "").trim().toUpperCase()).filter(Boolean)
+          .map((l) => (/^RECOGIDA(\s|$)/.test(l) ? l : "RECOGIDA " + l));
+        if (!crear.orderId || !crear.ref || !lineas.length) return Response.json({ ok: false, error: "Faltan el pedido o lo que hay que recoger." }, { status: 400 });
+        entrada = {
+          id: crypto.randomUUID(), creado: ahora, orderId: crear.orderId, ref: String(crear.ref).trim().toUpperCase(),
+          cliente: String(crear.cliente || ""), ciudad: String(crear.ciudad || ""),
+          motivo: crear.motivo === "devolucion" ? "devolucion" : "desistimiento",
+          proveedor: String(crear.proveedor || "").trim().toUpperCase(), lineas,
+          observaciones: String(crear.observaciones || "").trim(),
+          estado: "pendiente", fecha: ahora, usuario: u, creadoPor: u, historial: [{ estado: "pendiente", fecha: ahora, usuario: u }],
+        };
+        const dev = {
+          id: crypto.randomUUID(), creado: ahora, ref: entrada.ref, que: lineas.join(" + "), proveedor: entrada.proveedor,
+          motivo: entrada.motivo, cliente: entrada.cliente, estado: "recoger", fecha: ahora, usuario: u, creadoPor: u,
+          historial: [{ estado: "recoger", fecha: ahora, usuario: u }], recogidaId: entrada.id,
+        };
+        devs.push(dev);
+        entrada.devfabId = dev.id;
+        lista.push(entrada);
+      } else {
+        entrada = lista.find((x) => x.id === (id || borrar));
+        if (!entrada) return Response.json({ ok: false, error: "Recogida no encontrada." }, { status: 404 });
+        const dev = entrada.devfabId && devs.find((x) => x.id === entrada.devfabId);
+        if (borrar) {
+          entrada.borrado = true;
+          if (dev) dev.borrado = true;
+        } else if (["pendiente", "descargado", "recogido", "recibido"].includes(estado) && estado !== entrada.estado) {
+          entrada.estado = estado;
+          entrada.fecha = ahora;
+          entrada.usuario = u;
+          entrada.historial = [...(entrada.historial || []), { estado, fecha: ahora, usuario: u }];
+          if (dev && estado === "recibido" && dev.estado !== "devuelta") {
+            dev.estado = "devuelta";
+            dev.fecha = ahora;
+            dev.usuario = u;
+            dev.historial = [...(dev.historial || []), { estado: "devuelta", fecha: ahora, usuario: u }];
+          }
+        }
+      }
+      await this.state.storage.put("recogidasFurniture", lista);
+      await this.state.storage.put("devolucionesFabrica", devs);
+      return Response.json({ ok: true, entrada });
+    }
+
     if (url.pathname === "/devoluciones-fabrica/guardar" && request.method === "POST") {
       const datos = await request.json();
       const lista = (await this.state.storage.get("devolucionesFabrica")) || [];
