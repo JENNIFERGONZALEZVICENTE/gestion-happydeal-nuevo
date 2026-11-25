@@ -2282,6 +2282,7 @@ ${ventas ? "<script>window.MODO_VENTAS = true;</script>" : ""}
     <li><a href="#" class="nav-link" data-tarifas="plataformas">Ficheros plataformas colchones API</a></li>
     <li><a href="#" class="nav-link" data-tarifas="completos">Ficheros plataformas completos</a></li>
     <li><a href="#" class="nav-link" data-tarifas="reforman">Tarifa Reforman</a></li>
+    <li><a href="#" class="nav-link" data-tarifas="ean">🏷 Códigos EAN</a></li>
   </ul>
   <button class="section-title" id="precios-bezen-toggle">
     <span>Precios BEZEN</span>
@@ -3097,6 +3098,29 @@ ${ventas ? "<script>window.MODO_VENTAS = true;</script>" : ""}
   <div style="padding:1rem 2rem">
     <div id="fc-clientes" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
     <div id="fc-contenido"></div>
+  </div>
+</div>
+
+<div id="view-tarifas-ean" style="display:none">
+  <p style="font-size:13px;color:var(--muted);margin:0 0 8px">Todos los códigos EAN de BEZEN: los de los ficheros de los marketplaces, los de Shopify y los listados de Jennifer. Busca por código, SKU o nombre del producto.</p>
+  <div class="toolbar">
+    <input id="ean-search" type="search" placeholder="Buscar por EAN, SKU o producto..." style="min-width:300px" autocomplete="off" />
+    <select id="ean-filtro">
+      <option value="">Todos</option>
+      <option value="revisar">Con algo que revisar</option>
+      <option value="reutilizado">Reutilizados (ahora canapé Initial)</option>
+      <option value="sinproducto">Sin nombre de producto</option>
+      <option value="mano">Añadidos o cambiados a mano</option>
+    </select>
+    <button type="button" id="ean-anadir">➕ Añadir EAN</button>
+    <button type="button" id="ean-excel" class="secondary">⬇ Descargar Excel</button>
+  </div>
+  <div id="ean-count" class="inventario-count"></div>
+  <div class="table-wrap">
+    <table id="ean-table">
+      <thead><tr><th>EAN</th><th>SKU</th><th>Producto</th><th>Dónde está</th><th>Avisos</th><th>Nota</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
   </div>
 </div>
 
@@ -5722,7 +5746,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-contactos", "view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-groupon", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-stock-tapiceria", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-devoluciones-fabrica", "view-recogidas-furniture", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-nacex", "view-casos-revisar-seur", "view-devoluciones-seur", "view-reclamaciones-seur", "view-nacex-historico", "view-pendiente-recibir", "view-material-seur", "view-revision-facturas-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-tarifas-completos", "view-tarifas-reforman","view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas", "view-publicidad", "view-liquidacion", "view-presupuestos", "view-boveda", "view-imagenes"];
+const ALL_VIEWS = ["view-contactos", "view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-groupon", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-stock-tapiceria", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-devoluciones-fabrica", "view-recogidas-furniture", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-nacex", "view-casos-revisar-seur", "view-devoluciones-seur", "view-reclamaciones-seur", "view-nacex-historico", "view-pendiente-recibir", "view-material-seur", "view-revision-facturas-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-tarifas-completos", "view-tarifas-reforman", "view-tarifas-ean","view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas", "view-publicidad", "view-liquidacion", "view-presupuestos", "view-boveda", "view-imagenes"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -6238,9 +6262,118 @@ function rfEnlazarSubida() {
   });
 }
 
+// Códigos EAN (Jennifer, 2026-11-25: "por si en algún momento tengo que
+// buscar alguno"). Lista guardada en OrdersStore (/api/ean).
+let eanFilas = [];
+function eanValido(e) {
+  e = String(e || "").trim();
+  if (!/^[0-9]{13}$/.test(e)) return false;
+  let s = 0;
+  for (let i = 0; i < 12; i++) s += Number(e[i]) * (i % 2 ? 3 : 1);
+  return (10 - s % 10) % 10 === Number(e[12]);
+}
+async function cargarEan() {
+  try { const d = await fetch("/api/ean").then(r => r.json()); eanFilas = Array.isArray(d.filas) ? d.filas : []; } catch (e) { eanFilas = []; }
+  renderEan();
+}
+function eanFiltradas() {
+  const q = document.getElementById("ean-search").value.trim().toLowerCase();
+  const f = document.getElementById("ean-filtro").value;
+  return eanFilas.filter(r => {
+    if (r.borrado) return false;
+    if (f === "revisar" && !r.revisar && !r.ojo) return false;
+    if (f === "reutilizado" && !r.reutilizado) return false;
+    if (f === "sinproducto" && r.producto) return false;
+    if (f === "mano" && !r.editado) return false;
+    if (q && ![r.ean, r.sku, r.otros, r.producto, r.nota].join(" ").toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+function renderEan() {
+  const lista = eanFiltradas();
+  const MAX = 300;
+  const vivas = eanFilas.filter(r => !r.borrado).length;
+  document.getElementById("ean-count").textContent = vivas + " códigos guardados · " + lista.length + " con este filtro" + (lista.length > MAX ? " (se ven los " + MAX + " primeros: afina la búsqueda)" : "");
+  document.querySelector("#ean-table tbody").innerHTML = lista.length ? lista.slice(0, MAX).map(r => {
+    const avisos = [];
+    if (r.reutilizado) avisos.push('<span class="badge" style="background:#dc2626;color:#fff">Reutilizado: ahora canapé Initial</span>');
+    if (r.ojo) avisos.push('<span class="badge" style="background:#f59e0b;color:#fff">' + escapeAttr(r.ojo) + "</span>");
+    if (r.revisar) avisos.push('<small style="color:#92400e">' + escapeAttr(r.revisar) + "</small>");
+    return "<tr>"
+      + '<td style="font-family:monospace;white-space:nowrap"><strong>' + escapeAttr(r.ean) + "</strong></td>"
+      + "<td><strong>" + escapeAttr(r.sku || "") + "</strong>" + (r.otros ? '<br><small style="color:var(--muted)">' + escapeAttr(r.otros) + "</small>" : "") + "</td>"
+      + '<td style="max-width:280px">' + escapeAttr(r.producto || "") + "</td>"
+      + "<td><small>" + escapeAttr(r.donde || "") + (r.ultimo ? "<br>último fichero " + escapeAttr(r.ultimo) : "") + "</small></td>"
+      + '<td style="max-width:260px">' + avisos.join("<br>") + "</td>"
+      + '<td><input type="text" class="ean-nota" data-ean="' + escapeAttr(r.ean) + '" value="' + escapeAttr(r.nota || "") + '" placeholder="Nota..." style="min-width:140px">'
+      + (r.editado ? '<br><small style="color:var(--muted)">' + escapeAttr(r.editado.usuario || "") + " " + escapeAttr(new Date(r.editado.fecha).toLocaleDateString("es-ES")) + "</small>" : "") + "</td>"
+      + '<td style="white-space:nowrap"><button type="button" class="secondary ean-editar" data-ean="' + escapeAttr(r.ean) + '" style="padding:2px 6px;font-size:11px">✏ SKU</button></td></tr>';
+  }).join("") : '<tr><td colspan="7" style="color:var(--muted)">No hay códigos con este filtro.</td></tr>';
+}
+async function guardarEan(datos) {
+  const res = await fetch("/api/ean/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...datos, usuario: currentUser || null }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { alert(d.error || "No se ha podido guardar."); return null; }
+  const i = eanFilas.findIndex(x => x.ean === d.fila.ean);
+  if (i >= 0) eanFilas[i] = d.fila; else eanFilas.push(d.fila);
+  return d.fila;
+}
+document.getElementById("ean-search").addEventListener("input", renderEan);
+document.getElementById("ean-filtro").addEventListener("change", renderEan);
+document.querySelector("#ean-table tbody").addEventListener("change", async (e) => {
+  const inp = e.target.closest(".ean-nota");
+  if (inp) await guardarEan({ ean: inp.dataset.ean, nota: inp.value.trim() });
+});
+document.querySelector("#ean-table tbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".ean-editar");
+  if (!btn) return;
+  const r = eanFilas.find(x => x.ean === btn.dataset.ean);
+  const sku = prompt("SKU para el EAN " + btn.dataset.ean + ":", r ? r.sku || "" : "");
+  if (sku === null) return;
+  const producto = prompt("Nombre del producto (opcional):", r ? r.producto || "" : "");
+  if (producto === null) return;
+  if (await guardarEan({ ean: btn.dataset.ean, sku: sku.trim(), producto: producto.trim() })) renderEan();
+});
+document.getElementById("ean-anadir").addEventListener("click", async () => {
+  const ean = (prompt("Código EAN (13 números):") || "").trim();
+  if (!ean) return;
+  if (!eanValido(ean)) { alert("Ese código no es un EAN válido (tiene que tener 13 números y el último es de control). Revisa que esté bien copiado."); return; }
+  const ya = eanFilas.find(x => x.ean === ean && !x.borrado);
+  if (ya) {
+    if (!confirm("Ese EAN ya está guardado con el SKU " + (ya.sku || "(sin SKU)") + (ya.reutilizado ? " — OJO: es un EAN reutilizado, ahora de canapé Initial" : "") + ". ¿Quieres cambiarlo?")) {
+      document.getElementById("ean-search").value = ean; renderEan(); return;
+    }
+  }
+  const sku = prompt("SKU:", ya ? ya.sku || "" : "");
+  if (sku === null || !sku.trim()) return;
+  const otro = eanFilas.find(x => !x.borrado && x.ean !== ean && String(x.sku || "").toUpperCase() === sku.trim().toUpperCase());
+  if (otro && !confirm("OJO: el SKU " + sku.trim() + " ya tiene el EAN " + otro.ean + ". ¿Guardar también este?")) return;
+  const producto = prompt("Nombre del producto (opcional):", ya ? ya.producto || "" : "");
+  if (producto === null) return;
+  if (await guardarEan({ ean, sku: sku.trim(), producto: producto.trim() })) {
+    document.getElementById("ean-search").value = ean;
+    renderEan();
+  }
+});
+document.getElementById("ean-excel").addEventListener("click", () => {
+  const lista = eanFiltradas();
+  const filas = [["EAN", "SKU", "Otros SKU", "Producto", "Dónde está", "Último fichero", "Avisos", "Nota"]].concat(lista.map(r => [r.ean, r.sku || "", r.otros || "", r.producto || "", r.donde || "", r.ultimo || "", [r.reutilizado ? "Reutilizado: ahora canapé Initial" : "", r.ojo || "", r.revisar || ""].filter(Boolean).join(" · "), r.nota || ""]));
+  const ws = XLSX.utils.aoa_to_sheet(filas);
+  ws["!cols"] = [{ wch: 15 }, { wch: 30 }, { wch: 30 }, { wch: 50 }, { wch: 30 }, { wch: 12 }, { wch: 50 }, { wch: 30 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "EAN");
+  XLSX.writeFile(wb, "Codigos EAN BEZEN.xlsx");
+});
+
 function selectTarifas(id) {
   document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.tarifas === id));
   hideAllViews();
+  if (id === "ean") {
+    document.getElementById("view-title").textContent = "Tarifas · Códigos EAN";
+    document.getElementById("view-tarifas-ean").style.display = "block";
+    cargarEan();
+    return;
+  }
   if (id === "reforman") {
     document.getElementById("view-title").textContent = "Tarifas · Tarifa Reforman";
     document.getElementById("view-tarifas-reforman").style.display = "block";
@@ -21458,6 +21591,12 @@ async function handleFetch(request, env) {
 
     // Solo recogidas por Furniture (Jennifer, 2026-11-25): desistimiento o
     // devolución, fichero suelto por recogida (no va en ninguna carga).
+    // Códigos EAN (Jennifer, 2026-11-25).
+    if ((url.pathname === "/api/ean" && request.method === "GET") || ((url.pathname === "/api/ean/guardar" || url.pathname === "/api/ean/cargar") && request.method === "POST")) {
+      const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
+      const res = await stub.fetch("https://do" + url.pathname.slice(4), request.method === "POST" ? { method: "POST", body: await request.text() } : undefined);
+      return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/api/recogidas-furniture" && (request.method === "GET" || request.method === "POST")) {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do/recogidas-furniture", request.method === "POST" ? { method: "POST", body: await request.text() } : undefined);

@@ -310,6 +310,23 @@ export class OrdersStore {
     this.sockets = new Set();
   }
 
+  // Códigos EAN en trozos de 500 filas (cada valor de storage < 128 KB).
+  async leerEan() {
+    const meta = await this.state.storage.get("ean:meta");
+    if (!meta) return { meta: null, filas: [] };
+    const filas = [];
+    for (let i = 0; i < (meta.trozos || 0); i++) filas.push(...((await this.state.storage.get("ean:" + i)) || []));
+    return { meta, filas };
+  }
+  async escribirEan(filas, meta) {
+    const anterior = await this.state.storage.get("ean:meta");
+    const T = 500;
+    const trozos = Math.ceil(filas.length / T);
+    for (let i = 0; i < trozos; i++) await this.state.storage.put("ean:" + i, filas.slice(i * T, (i + 1) * T));
+    for (let i = trozos; i < ((anterior && anterior.trozos) || 0); i++) await this.state.storage.delete("ean:" + i);
+    await this.state.storage.put("ean:meta", { ...(meta || {}), trozos, total: filas.length });
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
 
@@ -1795,6 +1812,29 @@ export class OrdersStore {
     // crea también su línea en «Pendiente de devolución a fábrica»
     // (devolucionesFabrica, recogidaId) y, al marcarla recibida, esa línea
     // pasa a «Devuelto al almacén».
+    // Códigos EAN (Jennifer, 2026-11-25). Lista grande (~3.300): se guarda
+    // en trozos de 500 filas ("ean:meta" + "ean:<i>").
+    if (url.pathname === "/ean" && request.method === "GET") {
+      return Response.json(await this.leerEan());
+    }
+    if (url.pathname === "/ean/cargar" && request.method === "POST") {
+      const { filas, usuario } = await request.json();
+      if (!Array.isArray(filas) || !filas.length) return Response.json({ ok: false, error: "Sin filas." }, { status: 400 });
+      await this.escribirEan(filas, { cargado: new Date().toISOString(), cargadoPor: usuario || null });
+      return Response.json({ ok: true, total: filas.length });
+    }
+    if (url.pathname === "/ean/guardar" && request.method === "POST") {
+      const d = await request.json();
+      const ean = String(d.ean || "").trim();
+      if (!/^[0-9]{13}$/.test(ean)) return Response.json({ ok: false, error: "EAN no válido." }, { status: 400 });
+      const { meta, filas } = await this.leerEan();
+      let fila = filas.find((x) => x.ean === ean);
+      if (!fila) { fila = { ean, donde: "Añadido a mano" }; filas.push(fila); }
+      for (const k of ["sku", "producto", "nota", "borrado"]) if (d[k] !== undefined) fila[k] = d[k];
+      fila.editado = { usuario: d.usuario || null, fecha: new Date().toISOString() };
+      await this.escribirEan(filas, meta || {});
+      return Response.json({ ok: true, fila });
+    }
     if (url.pathname === "/recogidas-furniture" && request.method === "GET") {
       return Response.json((await this.state.storage.get("recogidasFurniture")) || []);
     }
