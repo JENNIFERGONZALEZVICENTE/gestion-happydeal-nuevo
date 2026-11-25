@@ -18335,7 +18335,9 @@ async function buildFurnitureExport(env, cargaId) {
     const envio = (o.grupoEnvio && orders.find((x) => x.id === o.grupoEnvio)) || o;
     const montaje = tieneMontajeFurniture(serviciosEfectivos(o));
     const telefono = limpiarTelefonoFurniture(envio.phone);
-    const observaciones = "Resto del pedido " + referenciaPedido(o) + " (segundo envío)";
+    // Nota a mano para Furniture (Jennifer, 2026-11-25, BEZEN12399 BIS: "se
+    // tiene que juntar con el pedido que ya tiene FUR para la entrega").
+    const observaciones = b.notaFurniture || ("Resto del pedido " + referenciaPedido(o) + " (segundo envío)");
     for (const descrip of descripcionesBackorder(b, o.product, tapaPartidaFurniture(o.services), o.services)) {
       rows.push([
         fechaTexto, "", referenciaPedido(envio) + (b.refSuffix || ""), envio.name, envio.furnitureAddress || envio.address || "",

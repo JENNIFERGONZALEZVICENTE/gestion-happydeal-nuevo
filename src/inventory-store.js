@@ -2854,7 +2854,7 @@ export class InventoryStore {
     }
 
     if (url.pathname === "/backorders/set-campo" && method === "POST") {
-      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, cuarentena, previsionEntrega, cantidad, enStock, refSuffix, desdeStock, serviciosReposicion, paraTenerEnCuenta, color, cambioColorUsuario, nacex, desdeDevolucion, devolucionFabrica, mercanciaCliente, talla, proveedor, recogidaQue } = await request.json();
+      const { id, referencia, mercanciaFabrica, tapaStock, estado, recibidoFabrica, revision, cuarentena, previsionEntrega, cantidad, enStock, refSuffix, desdeStock, serviciosReposicion, paraTenerEnCuenta, color, cambioColorUsuario, nacex, desdeDevolucion, devolucionFabrica, mercanciaCliente, talla, proveedor, recogidaQue, notaFurniture } = await request.json();
       const backorders = await this.load("backorders", []);
       const entry = backorders.find((b) => b.id === id);
       if (!entry) return new Response("not found", { status: 404 });
@@ -2893,6 +2893,9 @@ export class InventoryStore {
       // Sufijo de la referencia de SEUR a mano (Jennifer, 2026-10-15,
       // 002-26246L38546-A: la "-A2" ya se usó y se anuló en SEUR).
       if (refSuffix !== undefined) entry.refSuffix = String(refSuffix || "");
+      // Observaciones a mano para el fichero de Furniture de un envío aparte
+      // (Jennifer, 2026-11-25, BEZEN12399 BIS).
+      if (notaFurniture !== undefined) entry.notaFurniture = String(notaFurniture || "").trim() || null;
       // Sale del stock del almacén aunque el pendiente sea de proveedor: en
       // el listado de la carga de SEUR sale como STOCK.
       if (desdeStock !== undefined) entry.desdeStock = !!desdeStock;
