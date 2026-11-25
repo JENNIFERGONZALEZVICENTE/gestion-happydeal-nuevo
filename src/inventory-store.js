@@ -1,5 +1,5 @@
 import { calcularPrecioReforman, anadirColumnaReforman } from "./reforman.js";
-import { CABECERAS_MIRAKL, CLIENTES_FICHERO_COMPLETO, filasDesdeCsvImport, toCsv, calcularPrecioOferta, STOCK_VIVO, esDescatalogado, skuDesdeNombreWorten } from "./ficheros-completos.js";
+import { CABECERAS_MIRAKL, CLIENTES_FICHERO_COMPLETO, filasDesdeCsvImport, toCsv, calcularPrecioOferta, STOCK_VIVO, esDescatalogado, skuDesdeNombreWorten, alertaEanReutilizado } from "./ficheros-completos.js";
 const TYPE_MAP = {
   Colchones: "colchon",
   Almohada: "almohada",
@@ -6737,7 +6737,9 @@ export class InventoryStore {
       const descatalogado = esDescatalogado(sku) || (cfg.stockCero || []).some((p) => String(sku).toUpperCase().startsWith(p));
       if (ix.has(colCantidad.toLowerCase())) out[colCantidad] = String(descatalogado ? 0 : STOCK_VIVO);
       const cambios = Object.entries(out).filter(([col, v]) => num(val(fila, col)) !== num(v)).map(([col]) => (col === colCantidad ? "quantity" : col));
-      salida.push({ sku: skuFichero, skuNuestro: alias || (skuNuestro && skuNuestro !== String(skuFichero).toUpperCase() ? skuNuestro : null), canales, general, salida: out, cambios, descatalogado, stockGuardado: num(val(fila, colCantidad)) });
+      // EAN reutilizado de un producto antiguo (Jennifer, 2026-11-25).
+      const alertaEan = alertaEanReutilizado(Array.isArray(fila) ? fila : Object.values(fila || {}), alias || skuNuestro || skuFichero);
+      salida.push({ sku: skuFichero, skuNuestro: alias || (skuNuestro && skuNuestro !== String(skuFichero).toUpperCase() ? skuNuestro : null), canales, general, salida: out, cambios, descatalogado, stockGuardado: num(val(fila, colCantidad)), alertaEan });
     }
     return salida;
   }

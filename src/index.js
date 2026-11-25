@@ -5953,6 +5953,8 @@ function pintarFicheroCompleto() {
   const cambian = filas.filter(fcCambiaPrecio);
   const cambiaStock = filas.filter(f => (f.cambios || []).includes("quantity"));
   const descatalogados = filas.filter(f => f.descatalogado);
+  // EAN reutilizados, ahora de canapés Initial (Jennifer, 2026-11-25).
+  const alertasEan = filas.filter(f => f.alertaEan);
   const m = d.meta;
   const varios = (d.canales || []).length > 1;
   cont.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">'
@@ -5964,6 +5966,7 @@ function pintarFicheroCompleto() {
     + (d.general ? (fcCliente === "CONFORAMA_ES" || fcCliente === "MAISON" ? ' · precio general = el tachado de España' : ' · precio general: se mantiene, salvo que haga falta subirlo para que todas las ofertas queden un 30 % por debajo') : "")
     + ' · fichero guardado el ' + escapeAttr(fcFecha(m.cargado)) + (m.cargadoPor ? " por " + escapeAttr(m.cargadoPor) : "")
     + (m.ultimaDescarga ? ' · última descarga el ' + escapeAttr(fcFecha(m.ultimaDescarga.fecha)) + (m.ultimaDescarga.usuario ? " por " + escapeAttr(m.ultimaDescarga.usuario) : "") : " · todavía no se ha descargado desde aquí") + '</div>'
+    + (alertasEan.length ? '<div style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;border-radius:8px;padding:8px 12px;margin:8px 0;font-size:13px"><strong>⚠ OJO EAN:</strong> ' + alertasEan.length + ' artículo(s) usan un código EAN que ahora es de un canapé Initial:<br>' + alertasEan.map(f => escapeAttr(f.alertaEan)).join("<br>") + '</div>' : "")
     + '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0">'
     + '<span class="badge" style="background:' + (cambian.length ? "#f59e0b" : "#16a34a") + ';color:#fff">' + cambian.length + ' artículos cambian de precio desde la última descarga</span>'
     + '<span class="badge" style="background:' + (sinTarifa.length ? "#dc2626" : "#16a34a") + ';color:#fff">' + sinTarifa.length + ' sin tarifa en algún país (se queda el último precio)</span>'
@@ -5990,6 +5993,7 @@ function pintarFicheroCompleto() {
     pintarFilasFicheroCompleto();
   });
   document.getElementById("fc-descargar").addEventListener("click", () => {
+    if (alertasEan.length && !confirm("⚠ OJO EAN: " + alertasEan.length + " artículo(s) usan un EAN que AHORA es de un canapé Initial:\\n\\n" + alertasEan.slice(0, 8).map(f => "· " + f.alertaEan).join("\\n") + (alertasEan.length > 8 ? "\\n…" : "") + "\\n\\n¿Descargar igualmente?")) return;
     if (sinTarifa.length && !confirm(sinTarifa.length + " artículos no tienen tarifa en algún país y saldrán con su último precio. ¿Descargar igualmente?")) return;
     window.location.href = "/api/fichero-completo/" + encodeURIComponent(fcCliente) + "/csv?usuario=" + encodeURIComponent(currentUser || "");
     mostrarAvisoBreve("Descargando el CSV de " + d.nombre + ". Súbelo en el panel del market: Ofertas > Importar.");
@@ -6046,7 +6050,7 @@ function pintarFilasFicheroCompleto() {
     const g = f.general;
     let html = '<tr class="fc-fila" data-sku="' + escapeAttr(f.sku) + '" style="cursor:pointer' + (sin ? ";background:#fef9c3" : "") + '" title="Pulsa para ver el cálculo paso a paso">'
       + '<td style="width:24px;color:var(--muted)">' + (abierta ? "▾" : "▸") + '</td>'
-      + '<td style="white-space:nowrap"><strong>' + escapeAttr(f.sku) + '</strong>' + (f.skuNuestro ? '<br><span style="font-size:12px;color:var(--muted)">= ' + escapeAttr(f.skuNuestro) + '</span>' : "") + (f.descatalogado ? '<br><span class="badge" style="background:#6b7280;color:#fff">Descatalogado · stock 0</span>' : "") + '</td>'
+      + '<td style="white-space:nowrap"><strong>' + escapeAttr(f.sku) + '</strong>' + (f.skuNuestro ? '<br><span style="font-size:12px;color:var(--muted)">= ' + escapeAttr(f.skuNuestro) + '</span>' : "") + (f.descatalogado ? '<br><span class="badge" style="background:#6b7280;color:#fff">Descatalogado · stock 0</span>' : "") + (f.alertaEan ? '<br><span class="badge" style="background:#dc2626;color:#fff" title="' + escapeAttr(f.alertaEan) + '">⚠ EAN de canapé Initial</span>' : "") + '</td>'
       + '<td style="max-width:320px;font-size:12px" title="' + escapeAttr(desc) + '">' + (desc ? escapeAttr(desc.length > 80 ? desc.slice(0, 80) + "…" : desc) : '<span style="color:#dc2626">SIN DESCRIPCIÓN</span>') + '</td>'
       + '<td style="white-space:nowrap">' + fcEur(c.ofertaGuardada) + ' / ' + fcEur(c.tachadoGuardado) + '</td>'
       + '<td style="white-space:nowrap' + (cambia ? ";font-weight:700" : "") + '">' + (sin ? '<span style="color:#b45309">Sin tarifa: se queda ' + fcEur(c.ofertaGuardada) + '</span>' : fcEur(c.oferta) + ' / ' + fcEur(c.tachado) + flecha) + '</td>'
