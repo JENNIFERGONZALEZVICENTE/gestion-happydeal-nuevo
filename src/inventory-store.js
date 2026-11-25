@@ -6648,10 +6648,10 @@ export class InventoryStore {
         // no tenga precio en ese canal (solo se escribe el general).
         const aliasSinCanal = alias && val(fila, c.colOferta) === "";
         if (cfg.canales.length > 1 && val(fila, c.colOferta) === "" && !(alias && cfg.general && c.id === cfg.general.canalOferta)) continue;
-        const k = sku + "|" + c.columna + "|" + claveColch(c);
+        const k = sku + "|" + c.columna + "|" + claveColch(c) + "|" + (c.iva || "");
         if (!resCache.has(k)) {
           let r;
-          try { r = cfg.skuDesdeNombre && !skuNuestro ? { oferta: null, tachado: null, como: "SIN TARIFA: no se reconoce el modelo por el nombre", pasos: [{ label: "No se ha podido saber qué modelo/medida es este EAN por el nombre del producto: se queda el último precio guardado", valor: null }] } : await calcularPrecioOferta(sku, { columna: c.columna, tabla, pb, colchon: colchones.get(claveColch(c)), tachado: cfg.tachado, redondeo: cfg.redondeo }); }
+          try { r = cfg.skuDesdeNombre && !skuNuestro ? { oferta: null, tachado: null, como: "SIN TARIFA: no se reconoce el modelo por el nombre", pasos: [{ label: "No se ha podido saber qué modelo/medida es este EAN por el nombre del producto: se queda el último precio guardado", valor: null }] } : await calcularPrecioOferta(sku, { columna: c.columna, iva: c.iva, tabla, pb, colchon: colchones.get(claveColch(c)), tachado: cfg.tachado, redondeo: cfg.redondeo }); }
           catch (e) { r = { oferta: null, tachado: null, como: "ERROR: " + e.message, pasos: [] }; }
           resCache.set(k, r);
         }
@@ -6859,6 +6859,9 @@ export class InventoryStore {
         const col = calculo && calculo.columnas && calculo.columnas[cfg.columnaPrecio];
         if (col && col.precio != null) {
           precioOferta = col.precio;
+          // Ficheros de Portugal (…_PT): IVA del 23 %, no el 21 % de la tarifa
+          // (Jennifer, 2026-11-25) → ÷ 1,21 × 1,23 y al alza al euro.
+          if (/_PT$/i.test(plataforma)) precioOferta = Math.ceil(col.precio / 1.21 * 1.23 - 0.000001);
           sinRecalcular = false;
         }
       }

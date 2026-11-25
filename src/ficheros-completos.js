@@ -37,7 +37,7 @@ export const CLIENTES_FICHERO_COMPLETO = {
       { id: "001", pais: "Francia", columna: "RESTO_FR", plataformaColchones: "LEROY_MERLIN_FR", colTachado: "price[channel=001]", colOferta: "discount-price[channel=001]", tachadoModo: "ancho" },
       { id: "005", pais: "Italia", columna: "RESTO_IT", plataformaColchones: "LEROY_MERLIN_IT", colTachado: "price[channel=005]", colOferta: "discount-price[channel=005]", tachadoModo: "ancho" },
       // Portugal con el precio de España (Jennifer, 2026-11-04).
-      { id: "003", pais: "Portugal", columna: "RESTO_ES", plataformaColchones: "LEROY_MERLIN_ES", colTachado: "price[channel=003]", colOferta: "discount-price[channel=003]", tachadoModo: "mantener" },
+      { id: "003", pais: "Portugal", columna: "RESTO_ES", iva: 1.23, plataformaColchones: "LEROY_MERLIN_ES", colTachado: "price[channel=003]", colOferta: "discount-price[channel=003]", tachadoModo: "mantener" },
     ],
     general: { colTachado: "price", colOferta: "discount-price", canalOferta: "002" },
   },
@@ -50,7 +50,7 @@ export const CLIENTES_FICHERO_COMPLETO = {
     nombre: "Conforama España", sep: ";", tachado: "fuera", redondeo: "tarifa",
     canales: [
       { id: "ES", pais: "España", columna: "RESTO_ES", plataformaColchones: "CONFORAMA_ES", colTachado: "price[channel=ES]", colOferta: "discount-price[channel=ES]", tachadoModo: "anchoColchones" },
-      { id: "PT", pais: "Portugal", columna: "RESTO_ES", plataformaColchones: "CONFORAMA_ES", colTachado: "price[channel=PT]", colOferta: "discount-price[channel=PT]", tachadoModo: "mantener" },
+      { id: "PT", pais: "Portugal", columna: "RESTO_ES", iva: 1.23, plataformaColchones: "CONFORAMA_ES", colTachado: "price[channel=PT]", colOferta: "discount-price[channel=PT]", tachadoModo: "mantener" },
     ],
     general: { colTachado: "price", colOferta: "discount-price", canalOferta: "ES", igualAlCanal: "ES" },
     // SKU del fichero que no son nuestros → nuestro SKU para Tarifas
@@ -99,7 +99,7 @@ export const CLIENTES_FICHERO_COMPLETO = {
   WORTEN: {
     nombre: "Worten", sep: ";", tachado: "fuera", redondeo: "tarifa", colSkuNuestro: "internal-description",
     canales: [
-      { id: "PT", pais: "Portugal", columna: "RESTO_ES", plataformaColchones: "WORTEN_PT", colTachado: "price[channel=WRT_PT_ONLINE]", colOferta: "discount-price[channel=WRT_PT_ONLINE]", tachadoModo: "anchoColchones" },
+      { id: "PT", pais: "Portugal", columna: "RESTO_ES", iva: 1.23, plataformaColchones: "WORTEN_PT", colTachado: "price[channel=WRT_PT_ONLINE]", colOferta: "discount-price[channel=WRT_PT_ONLINE]", tachadoModo: "anchoColchones" },
     ],
     general: { colTachado: "price", colOferta: "discount-price", canalOferta: "PT", ofertaSiHay: true },
   },
@@ -424,7 +424,15 @@ export async function calcularPrecioOferta(skuOriginal, ctx) {
   // Leroy (redondeo "tarifa"): el precio que sale tal cual de Tarifas se
   // respeta (los colchones acaban en ,99); solo se redondea al alza lo que
   // se calcula aquí (packs, montaje). Carrefour: siempre al alza.
-  const derivado = esPack || montaje || montajeTela;
+  // IVA del país (Jennifer, 2026-11-25): las tarifas llevan el 21 % de
+  // España; en Portugal se cobra el 23 % → ÷ 1,21 × 1,23 y al alza.
+  const ivaPais = ctx.iva && ctx.iva !== 1.21 ? ctx.iva : null;
+  if (ivaPais) {
+    oferta = oferta / 1.21 * ivaPais;
+    como += " · IVA " + Math.round((ivaPais - 1) * 100) + " %";
+    pasos.push({ label: "IVA de " + (ivaPais === 1.23 ? "Portugal" : "su país") + ": ÷ 1,21 × " + String(ivaPais).replace(".", ","), valor: r2(oferta) });
+  }
+  const derivado = esPack || montaje || montajeTela || !!ivaPais;
   if (ctx.redondeo === "tarifa" && !derivado) {
     oferta = r2(oferta);
     pasos.push({ label: "Precio de oferta (el de Tarifas, sin redondear)", valor: oferta, destacado: true });
