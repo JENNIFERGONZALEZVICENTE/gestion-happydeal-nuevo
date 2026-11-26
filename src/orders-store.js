@@ -302,6 +302,34 @@ function tokenPresupuesto() {
   return [...crypto.getRandomValues(new Uint8Array(18))].map((b) => "abcdefghijkmnpqrstuvwxyz23456789"[b % 32]).join("");
 }
 // Categorías con las que empieza Contactos de interés (Jennifer, 2026-11-12).
+// Guías de partida de "Cómo se hace en Shopify" (Jennifer, 2026-11-26).
+const GUIAS_SHOPIFY_INICIALES = [
+  {
+    id: "regalo-almohadas", creado: "2026-11-26T10:00:00.000Z", modificado: "2026-11-26T10:00:00.000Z", modificadoPor: "JENNIFER",
+    titulo: "Poner o quitar la etiqueta «ALMOHADAS DE REGALO» en los packs",
+    texto: "Lo explicó la agencia (26/11/2026): la etiqueta va en un METACAMPO de cada producto. Si pone exactamente «ALMOHADAS DE REGALO», sale la etiqueta en la foto y el sistema añade la opción de almohadas de regalo.\n\nQUITARLA:\n1. Shopify › Productos › abrir el pack.\n2. Bajar casi al final de la ficha, a «Metacampos».\n3. Borrar el texto «ALMOHADAS DE REGALO» (dejarlo vacío).\n4. Guardar.\n5. Repetir en cada pack que la lleve.\n\nPONERLA: escribir «ALMOHADAS DE REGALO» exactamente así en ese metacampo y guardar.\n\nSi después sigue saliendo la opción de almohadas, revisar la opción «Almohadas de regalo» en YMQ de ese pack.",
+  },
+  {
+    id: "etiquetas-foto", creado: "2026-11-26T10:00:00.000Z", modificado: "2026-11-26T10:00:00.000Z", modificadoPor: "JENNIFER",
+    titulo: "Etiquetas de la foto: PACK AHORRO, NOVEDAD, ¡ÚLTIMAS UNIDADES!…",
+    texto: "Van en un metacampo de cada producto (texto libre, el «badge»).\n\n1. Shopify › Productos › abrir el producto.\n2. Sección «Metacampos», al final de la ficha.\n3. Escribir o cambiar el texto de la etiqueta (vacío = sin etiqueta).\n4. Guardar.\n\nPara muchos productos a la vez: ver la guía «Rellenar un metacampo en muchos productos a la vez».",
+  },
+  {
+    id: "coleccion-metacampo", creado: "2026-11-26T10:00:00.000Z", modificado: "2026-11-26T10:00:00.000Z", modificadoPor: "JENNIFER",
+    titulo: "Meter productos en una colección (p. ej. Black Friday): ¿se rellena solo el metacampo?",
+    texto: "NO. La colección y el metacampo son independientes: meter un producto en una colección no cambia su metacampo, hay que rellenarlo aparte.\n\nDos formas de ahorrar trabajo:\n\n1. Edición en bloque: ver la guía «Rellenar un metacampo en muchos productos a la vez».\n\n2. Al revés, que el metacampo meta el producto en la colección:\n- Shopify › Productos › Colecciones › abrir (o crear) la colección.\n- Tipo de colección: AUTOMÁTICA.\n- Condición: el metacampo es igual a un texto (p. ej. BLACK FRIDAY).\n- Así basta con rellenar el metacampo y el producto entra solo; al vaciarlo, sale solo.",
+  },
+  {
+    id: "metacampo-en-bloque", creado: "2026-11-26T10:00:00.000Z", modificado: "2026-11-26T10:00:00.000Z", modificadoPor: "JENNIFER",
+    titulo: "Rellenar un metacampo en muchos productos a la vez",
+    texto: "1. Shopify › Productos.\n2. Marcar las casillas de todos los productos (se puede filtrar antes por colección o buscar).\n3. Pulsar «Editar productos» (edición en bloque).\n4. Añadir la columna del metacampo (botón de columnas, apartado Metacampos).\n5. Escribir el texto en la primera fila y copiarlo hacia abajo, o escribirlo en cada una.\n6. Guardar.",
+  },
+  {
+    id: "sku-variante", creado: "2026-11-26T10:00:00.000Z", modificado: "2026-11-26T10:00:00.000Z", modificadoPor: "JENNIFER",
+    titulo: "Corregir el SKU de una variante mal puesto",
+    texto: "1. Shopify › Productos › abrir el producto.\n2. Abrir la variante (medida/color) que está mal.\n3. Cambiar el SKU y guardar.\n\nOJO: los pedidos que ya entraron con el SKU malo NO cambian solos. En el programa: abrir el pedido y usar «Cambiar medida» (o avisar a Claude). Ejemplo: BEZEN12451, colchón del pack con SKU 80X200 que era 180X200 (25/11/2026).",
+  },
+];
 const CONTACTOS_CATEGORIAS_INICIALES = ["Proveedores", "Transporte", "Marketplaces", "Contabilidad / Gestoría", "Clientes", "Otros"];
 export class OrdersStore {
   constructor(state, env) {
@@ -1932,6 +1960,30 @@ export class OrdersStore {
       if (c.categoria && !categorias.includes(c.categoria)) categorias.push(c.categoria);
       await this.state.storage.put("contactos", { lista, categorias });
       return Response.json({ ok: true, contacto: c, categorias });
+    }
+    // Ayuda · Cómo se hace en Shopify (Jennifer, 2026-11-26): guías editables.
+    if (url.pathname === "/guias-shopify" && request.method === "GET") {
+      const lista = (await this.state.storage.get("guiasShopify")) || GUIAS_SHOPIFY_INICIALES;
+      return Response.json({ lista: lista.filter((g) => !g.borrado) });
+    }
+    if (url.pathname === "/guias-shopify/guardar" && request.method === "POST") {
+      const datos = await request.json();
+      const lista = (await this.state.storage.get("guiasShopify")) || GUIAS_SHOPIFY_INICIALES.map((g) => ({ ...g }));
+      const ahora = new Date().toISOString();
+      let g = datos.id ? lista.find((x) => x.id === datos.id) : null;
+      if (datos.id && !g) return Response.json({ ok: false, error: "Esa guía ya no existe." }, { status: 404 });
+      if (!g) {
+        if (!String(datos.titulo || "").trim()) return Response.json({ ok: false, error: "Pon un título." }, { status: 400 });
+        g = { id: crypto.randomUUID(), creado: ahora, creadoPor: datos.usuario || null };
+        lista.push(g);
+      }
+      if (datos.titulo !== undefined && String(datos.titulo).trim()) g.titulo = String(datos.titulo).trim().slice(0, 300);
+      if (datos.texto !== undefined) g.texto = String(datos.texto || "").trim().slice(0, 20000);
+      if (datos.borrado) { g.borrado = true; g.borradoPor = datos.usuario || null; }
+      g.modificado = ahora;
+      g.modificadoPor = datos.usuario || null;
+      await this.state.storage.put("guiasShopify", lista);
+      return Response.json({ ok: true, guia: g });
     }
     if (url.pathname === "/no-tramitar" && request.method === "GET") {
       return Response.json((await this.state.storage.get("noTramitar")) || []);

@@ -2336,6 +2336,13 @@ ${ventas ? "<script>window.MODO_VENTAS = true;</script>" : ""}
   <ul id="contactos-list">
     <li><a href="#" class="nav-link" data-contactos="lista">📇 Contactos de interés</a></li>
   </ul>
+  <button class="section-title" id="ayuda-toggle">
+    <span>Ayuda</span>
+    <span class="chevron">▶</span>
+  </button>
+  <ul id="ayuda-list">
+    <li><a href="#" class="nav-link" data-guias="shopify">🛍 Cómo se hace en Shopify</a></li>
+  </ul>
 </nav>
 <div class="main">
 <header>
@@ -3223,6 +3230,26 @@ ${ventas ? "<script>window.MODO_VENTAS = true;</script>" : ""}
         <div id="img-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px"></div>
       </div>
     </div>
+  </div>
+</div>
+<div id="view-guias-shopify" style="display:none">
+  <div style="padding:1rem 2rem;max-width:980px">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+      <input type="search" id="guias-buscar" placeholder="Buscar: metacampo, colección, etiqueta, SKU…" style="flex:1;min-width:220px" />
+      <span id="guias-cuenta" style="color:var(--muted);font-size:13px"></span>
+      <button type="button" id="guias-nueva">＋ Nueva guía</button>
+    </div>
+    <div id="guias-form" style="display:none;border:1px solid var(--border,#d1d5db);border-radius:10px;padding:12px 14px;margin-bottom:14px;background:#f9fafb">
+      <input type="text" id="guias-titulo" placeholder="Título (qué se quiere hacer)" style="width:100%;margin-bottom:8px;font-weight:600" />
+      <textarea id="guias-texto" rows="9" placeholder="Pasos, uno por línea" style="width:100%;font-family:inherit"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+        <button type="button" id="guias-guardar">Guardar</button>
+        <button type="button" class="secondary" id="guias-cancelar">Cancelar</button>
+        <button type="button" class="secondary" id="guias-borrar" style="margin-left:auto;display:none">🗑 Borrar</button>
+        <span id="guias-info" style="color:var(--muted);font-size:12px"></span>
+      </div>
+    </div>
+    <div id="guias-lista"></div>
   </div>
 </div>
 <div id="view-contactos" style="display:none">
@@ -5746,7 +5773,7 @@ document.getElementById("sync").addEventListener("click", async () => {
   loadOrders();
 });
 
-const ALL_VIEWS = ["view-contactos", "view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-groupon", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-stock-tapiceria", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-devoluciones-fabrica", "view-recogidas-furniture", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-nacex", "view-casos-revisar-seur", "view-devoluciones-seur", "view-reclamaciones-seur", "view-nacex-historico", "view-pendiente-recibir", "view-material-seur", "view-revision-facturas-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-tarifas-completos", "view-tarifas-reforman", "view-tarifas-ean","view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas", "view-publicidad", "view-liquidacion", "view-presupuestos", "view-boveda", "view-imagenes"];
+const ALL_VIEWS = ["view-guias-shopify", "view-contactos","view-shopify", "view-carrefour", "view-maison-du-monde", "view-worten", "view-conforama", "view-conforama-es", "view-leroy-merlin", "view-groupon", "view-placeholder", "view-catalogo", "view-stock", "view-abiertos", "view-stock-tapiceria", "view-pendientes", "view-historial", "view-furniture", "view-historial-cargas", "view-casos-revisar", "view-devoluciones-fabrica", "view-recogidas-furniture", "view-seur", "view-historial-cargas-seur", "view-buscar-logistica", "view-nacex", "view-casos-revisar-seur", "view-devoluciones-seur", "view-reclamaciones-seur", "view-nacex-historico", "view-pendiente-recibir", "view-material-seur", "view-revision-facturas-seur", "view-pesos", "view-historico-rep", "view-tarifas", "view-tarifas-plataformas", "view-tarifas-completos", "view-tarifas-reforman", "view-tarifas-ean","view-precios-bezen", "view-plazos-marketplace", "view-casos", "view-tareas", "view-publicidad", "view-liquidacion", "view-presupuestos", "view-boveda", "view-imagenes"];
 function hideAllViews() {
   ALL_VIEWS.forEach(id => { document.getElementById(id).style.display = "none"; });
 }
@@ -6415,6 +6442,7 @@ document.querySelectorAll(".nav-link").forEach(a => {
     else if (a.dataset.boveda) selectBoveda();
     else if (a.dataset.imagenes) selectImagenes();
     else if (a.dataset.contactos) selectContactos();
+    else if (a.dataset.guias) selectGuias();
     else if (a.dataset.agenda === "tareas") selectTareas();
     else if (a.dataset.agenda) selectAgenda();
   });
@@ -7219,6 +7247,76 @@ const contactosListEl = document.getElementById("contactos-list");
 contactosToggle.addEventListener("click", () => {
   contactosToggle.classList.toggle("open");
   contactosListEl.classList.toggle("open");
+});
+
+// ===== Ayuda · Cómo se hace en Shopify (Jennifer, 2026-11-26) =====
+let guiasLista = [];
+let guiaEditando = null;
+let guiaBorrarArmado = false;
+const ayudaToggle = document.getElementById("ayuda-toggle");
+const ayudaListEl = document.getElementById("ayuda-list");
+ayudaToggle.addEventListener("click", () => {
+  ayudaToggle.classList.toggle("open");
+  ayudaListEl.classList.toggle("open");
+});
+async function selectGuias() {
+  document.querySelectorAll(".nav-link").forEach(a => a.classList.toggle("active", a.dataset.guias === "shopify"));
+  hideAllViews();
+  document.getElementById("view-title").textContent = "Ayuda · Cómo se hace en Shopify";
+  document.getElementById("view-guias-shopify").style.display = "block";
+  await guiasCargar();
+}
+async function guiasCargar() {
+  try {
+    const d = await (await fetch("/api/guias-shopify", { cache: "no-store" })).json();
+    guiasLista = d.lista || [];
+  } catch (e) { document.getElementById("guias-lista").innerHTML = '<div style="color:#b91c1c">No se pudieron cargar las guías.</div>'; return; }
+  guiasPintar();
+}
+function guiasPintar() {
+  const q = document.getElementById("guias-buscar").value.trim().toLowerCase();
+  const lista = guiasLista.filter(g => !q || ((g.titulo || "") + " " + (g.texto || "")).toLowerCase().indexOf(q) >= 0)
+    .sort((a, b) => (a.titulo || "").localeCompare(b.titulo || "", "es"));
+  document.getElementById("guias-cuenta").textContent = lista.length + (lista.length === 1 ? " guía" : " guías");
+  document.getElementById("guias-lista").innerHTML = lista.length ? lista.map(g => '<details class="guia-card" style="border:1px solid var(--border,#d1d5db);border-radius:10px;padding:10px 14px;margin-bottom:10px;background:#fff"' + (q ? " open" : "") + '>'
+    + '<summary style="cursor:pointer;font-weight:700;font-size:15px">' + escapeAttr(g.titulo || "") + '</summary>'
+    + '<div style="white-space:pre-wrap;line-height:1.5;margin-top:8px">' + escapeAttr(g.texto || "") + '</div>'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-top:8px;color:var(--muted);font-size:12px">'
+    + '<span>' + (g.modificadoPor ? "Último cambio: " + escapeAttr(g.modificadoPor) + " · " : "") + (g.modificado ? new Date(g.modificado).toLocaleDateString("es-ES") : "") + '</span>'
+    + '<button type="button" class="secondary guia-editar" data-id="' + escapeAttr(g.id) + '" style="margin-left:auto">✏️ Editar</button></div>'
+    + '</details>').join("") : '<div style="color:var(--muted)">' + (guiasLista.length ? "Ninguna guía coincide con la búsqueda." : "Todavía no hay guías.") + '</div>';
+}
+function guiaAbrir(g) {
+  guiaEditando = g || null;
+  guiaBorrarArmado = false;
+  document.getElementById("guias-titulo").value = g ? g.titulo || "" : "";
+  document.getElementById("guias-texto").value = g ? g.texto || "" : "";
+  document.getElementById("guias-borrar").style.display = g ? "" : "none";
+  document.getElementById("guias-borrar").textContent = "🗑 Borrar";
+  document.getElementById("guias-info").textContent = "";
+  document.getElementById("guias-form").style.display = "block";
+  document.getElementById("guias-titulo").focus();
+}
+function guiaCerrar() { document.getElementById("guias-form").style.display = "none"; guiaEditando = null; }
+async function guiaGuardar(extra) {
+  const datos = Object.assign({ id: guiaEditando ? guiaEditando.id : undefined, usuario: currentUser || null, titulo: document.getElementById("guias-titulo").value, texto: document.getElementById("guias-texto").value }, extra || {});
+  const res = await fetch("/api/guias-shopify/guardar", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(datos) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) { document.getElementById("guias-info").textContent = "Error: " + (d.error || res.status); return; }
+  guiaCerrar();
+  await guiasCargar();
+}
+document.getElementById("guias-buscar").addEventListener("input", guiasPintar);
+document.getElementById("guias-nueva").addEventListener("click", () => guiaAbrir(null));
+document.getElementById("guias-cancelar").addEventListener("click", guiaCerrar);
+document.getElementById("guias-guardar").addEventListener("click", () => guiaGuardar());
+document.getElementById("guias-borrar").addEventListener("click", () => {
+  if (!guiaBorrarArmado) { guiaBorrarArmado = true; document.getElementById("guias-borrar").textContent = "⚠️ Pulsa otra vez para borrarla"; return; }
+  guiaGuardar({ borrado: true });
+});
+document.getElementById("guias-lista").addEventListener("click", (e) => {
+  const b = e.target.closest(".guia-editar");
+  if (b) guiaAbrir(guiasLista.find(g => g.id === b.dataset.id));
 });
 
 async function selectBoveda() {
@@ -20713,7 +20811,7 @@ async function handleFetch(request, env) {
     }
 
     // Contactos de interés (Jennifer, 2026-11-12).
-    if (url.pathname === "/api/contactos" || url.pathname === "/api/contactos/guardar") {
+    if (url.pathname === "/api/contactos" || url.pathname === "/api/contactos/guardar" || url.pathname === "/api/guias-shopify" || url.pathname === "/api/guias-shopify/guardar") {
       const stub = env.ORDERS_STORE.get(env.ORDERS_STORE.idFromName("shopify"));
       const res = await stub.fetch("https://do" + url.pathname.slice(4), request.method === "POST" ? { method: "POST", body: await request.text() } : {});
       return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
