@@ -1182,6 +1182,16 @@ export class OrdersStore {
         return new Response("ok");
       }
       await this.releaseInventoryDecision(existing.id, !allAnswered);
+      // Campana contestada (Jennifer, 2026-11-27, BEZEN12475): si lo de
+      // Furniture ya está todo en el almacén (p. ej. base de liquidación),
+      // entra solo en la próxima carga, igual que un pedido sin campana.
+      if (allAnswered && existing.agencia === "FURNITURE" && !existing.cargaId) {
+        await this.autoCargaFurnitureDeStock(existing, { ignorarRevision: true });
+        if (existing.cargaId) {
+          orders[id] = existing;
+          await this.state.storage.put("orders", orders);
+        }
+      }
       this.broadcast();
       return new Response("ok");
     }
@@ -2622,9 +2632,9 @@ export class OrdersStore {
   // nunca pasa por "Marcar recibido", así que entra aquí en la próxima carga
   // de Furniture abierta. Con notas, retenido, envío conjunto, CP de montaña
   // o para revisar se deja a mano (misma regla que la subida automática).
-  async autoCargaFurnitureDeStock(order) {
+  async autoCargaFurnitureDeStock(order, { ignorarRevision = false } = {}) {
     try {
-      if (order.cargaId || pedidoCancelado(order) || order.recogeCliente || order.retenido || order.grupoEnvio || order.notas || order.needsReview || montanaPendiente(order)) return;
+      if (order.cargaId || pedidoCancelado(order) || order.recogeCliente || order.retenido || order.grupoEnvio || order.notas || (order.needsReview && !ignorarRevision) || montanaPendiente(order)) return;
       const stub = this.env.INVENTORY_STORE.get(this.env.INVENTORY_STORE.idFromName("main"));
       const backorders = await (await stub.fetch("https://do/backorders")).json();
       const items = backorders.filter((b) => String(b.orderId) === String(order.id) && !b.reposicion && !b.gestoComercial
