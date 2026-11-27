@@ -10790,7 +10790,21 @@ function renderPendientes() {
   tbody.querySelectorAll(".recibido-seur-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
-      const bo = backorders.find(x => x.id === btn.dataset.id);
+      let bo = backorders.find(x => x.id === btn.dataset.id);
+      // Varias unidades (Jennifer, 2026-11-27, BEZEN12376: de 2 Zen Natural
+      // solo vino 1 y entraron las 2 en la carga): se pregunta cuántas han
+      // llegado; solo esas van a SEUR, el resto sigue pendiente en su proveedor.
+      const unidades = preguntarUnidadesRecibidas(bo);
+      if (unidades === null) { btn.disabled = false; return; }
+      if (unidades !== "todas") {
+        const resP = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/recibir-parcial", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ unidades }),
+        });
+        const parte = await resP.json().catch(() => null);
+        if (!resP.ok || !parte || parte.ok === false) { alert((parte && parte.error) || "No se pudo marcar la recepción parcial."); btn.disabled = false; return; }
+        mostrarAvisoBreve(refLabel(bo) + (bo.refSuffix || "") + ": recibidas " + unidades + " de " + bo.cantidad + ". Las otras " + (bo.cantidad - unidades) + " siguen pendientes en " + (bo.proveedor || "su proveedor") + ".");
+        bo = Object.assign({}, bo, parte);
+      }
       const r = await marcarRecibidoSeur(bo || { id: btn.dataset.id });
       if (!r.ok) { alert(r.error || "No se pudo preparar para SEUR."); btn.disabled = false; return; }
       if (r.retenido) {
