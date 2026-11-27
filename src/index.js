@@ -12069,6 +12069,9 @@ function renderFurniture() {
     // buscar por la referencia real del marketplace, no solo BEZEN+número.
     // En un envío conjunto se busca en todos sus pedidos (la línea es una).
     const grupo = pedidosDelGrupo(o);
+    // Cancelados fuera: no están pendientes de envío (Jennifer, 2026-11-27:
+    // salían tachados). En un envío conjunto, solo si se cancelan todos.
+    if (grupo.every(p => p.cancelado)) return false;
     if (busquedaPedido) {
       const encaja = grupo.some(p => ("bezen" + p.orderNumber).toLowerCase().includes(busquedaPedido)
         || (p.orderRef || "").toLowerCase().includes(busquedaPedido));
