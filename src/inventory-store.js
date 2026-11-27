@@ -2551,8 +2551,8 @@ export class InventoryStore {
     }
     const parcialMatch = url.pathname.match(/^\/backorders\/([^/]+)\/recibir-parcial$/);
     if (parcialMatch && method === "POST") {
-      const { unidades } = await request.json();
-      return this.recibirParcial(decodeURIComponent(parcialMatch[1]), unidades);
+      const { unidades, sufijoResto } = await request.json();
+      return this.recibirParcial(decodeURIComponent(parcialMatch[1]), unidades, { sufijoResto: !!sufijoResto });
     }
     const cancelarMatch = url.pathname.match(/^\/backorders\/([^/]+)\/cancelar$/);
     if (cancelarMatch && method === "POST") {
@@ -4377,7 +4377,7 @@ export class InventoryStore {
   // pendiente con las unidades que faltan; se crea una línea nueva, copia de
   // la original, con las unidades que han llegado y marcada como recibida.
   // No toca stock: igual que el "recibido" normal de Furniture.
-  async recibirParcial(id, unidades) {
+  async recibirParcial(id, unidades, { sufijoResto = false } = {}) {
     const backorders = await this.load("backorders", []);
     const entry = backorders.find((b) => b.id === id);
     if (!entry) return new Response("not found", { status: 404 });
@@ -4400,6 +4400,10 @@ export class InventoryStore {
     };
     delete recibida.reservaEnviada;
     entry.cantidad = total - n;
+    // SEUR (Jennifer, 2026-11-27, BEZEN12376): lo que queda pendiente saldrá
+    // en otro envío, así que lleva la referencia con el sufijo siguiente
+    // ("…2") para que no choque con la etiqueta de lo que sale ahora.
+    if (sufijoResto) entry.refSuffix = nextRefSuffix(entry.refSuffix);
     entry.recepcionesParciales = [...(entry.recepcionesParciales || []), { fecha: ahora, unidades: n, id: nuevoId }];
     backorders.splice(backorders.indexOf(entry) + 1, 0, recibida);
     await this.state.storage.put("backorders", backorders);

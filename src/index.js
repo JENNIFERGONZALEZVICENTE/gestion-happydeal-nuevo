@@ -10798,11 +10798,11 @@ function renderPendientes() {
       if (unidades === null) { btn.disabled = false; return; }
       if (unidades !== "todas") {
         const resP = await fetch("/api/inventario/pendientes/" + encodeURIComponent(bo.id) + "/recibir-parcial", {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ unidades }),
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ unidades, sufijoResto: true }),
         });
         const parte = await resP.json().catch(() => null);
         if (!resP.ok || !parte || parte.ok === false) { alert((parte && parte.error) || "No se pudo marcar la recepción parcial."); btn.disabled = false; return; }
-        mostrarAvisoBreve(refLabel(bo) + (bo.refSuffix || "") + ": recibidas " + unidades + " de " + bo.cantidad + ". Las otras " + (bo.cantidad - unidades) + " siguen pendientes en " + (bo.proveedor || "su proveedor") + ".");
+        mostrarAvisoBreve(refLabel(bo) + (bo.refSuffix || "") + ": recibidas " + unidades + " de " + bo.cantidad + ". Las otras " + (bo.cantidad - unidades) + " siguen pendientes en " + (bo.proveedor || "su proveedor") + " con la referencia terminada en " + (parseInt(bo.refSuffix, 10) ? parseInt(bo.refSuffix, 10) + 1 : 2) + ".");
         bo = Object.assign({}, bo, parte);
       }
       const r = await marcarRecibidoSeur(bo || { id: btn.dataset.id });
