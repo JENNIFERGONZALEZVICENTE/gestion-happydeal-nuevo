@@ -1182,6 +1182,16 @@ export class OrdersStore {
         return new Response("ok");
       }
       await this.releaseInventoryDecision(existing.id, !allAnswered);
+      // Campana contestada en un pedido con tapicería de LIQUIDACIÓN (Jennifer,
+      // 2026-11-27, BEZEN12475): ya está en el almacén, así que entra solo en
+      // la próxima carga de Furniture. El resto de pedidos sigue a mano.
+      if (allAnswered && existing.agencia === "FURNITURE" && !existing.cargaId) {
+        await this.autoCargaFurnitureDeStock(existing, { soloLiquidacion: true });
+        if (existing.cargaId) {
+          orders[id] = existing;
+          await this.state.storage.put("orders", orders);
+        }
+      }
       this.broadcast();
       return new Response("ok");
     }
@@ -2622,14 +2632,17 @@ export class OrdersStore {
   // nunca pasa por "Marcar recibido", así que entra aquí en la próxima carga
   // de Furniture abierta. Con notas, retenido, envío conjunto, CP de montaña
   // o para revisar se deja a mano (misma regla que la subida automática).
-  async autoCargaFurnitureDeStock(order) {
+  async autoCargaFurnitureDeStock(order, { soloLiquidacion = false } = {}) {
     try {
-      if (order.cargaId || pedidoCancelado(order) || order.recogeCliente || order.retenido || order.grupoEnvio || order.notas || order.needsReview || montanaPendiente(order)) return;
+      // soloLiquidacion: la campana ya está contestada; solo entra si lleva
+      // tapicería de liquidación (referencia STOCK que pone el motor).
+      if (order.cargaId || pedidoCancelado(order) || order.recogeCliente || order.retenido || order.grupoEnvio || order.notas || (order.needsReview && !soloLiquidacion) || montanaPendiente(order)) return;
       const stub = this.env.INVENTORY_STORE.get(this.env.INVENTORY_STORE.idFromName("main"));
       const backorders = await (await stub.fetch("https://do/backorders")).json();
       const items = backorders.filter((b) => String(b.orderId) === String(order.id) && !b.reposicion && !b.gestoComercial
         && (b.estado === "pendiente" || b.estado === "cubierto") && !(b.tipo === "colchon" && b.tipoEnvio === "FPK"));
       if (!items.length || !items.every((b) => b.recibidoFabrica)) return;
+      if (soloLiquidacion && !items.some((b) => /^LIQUIDACI[OÓ]N/i.test(b.mercanciaFabrica || ""))) return;
       const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Madrid" });
       const cargas = (await this.state.storage.get("cargas")) || [];
       const proxima = cargas.filter((c) => (c.tipo || "furniture") === "furniture" && c.estado === "abierta" && c.fecha > hoy).sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
