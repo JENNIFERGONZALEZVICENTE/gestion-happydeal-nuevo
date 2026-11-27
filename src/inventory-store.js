@@ -1526,7 +1526,7 @@ function resolveItem(item, products) {
     const { medida, color } = parseCabeceroVariant(item.variantTitle);
     return { tipo, product, talla: medida ? medida.ancho : normalizeTalla(item.variantTitle), color: color || "", variantTitle: item.variantTitle, qty: item.qty };
   }
-  return { tipo, product, talla: normalizeTalla(item.variantTitle), color: tipo === "tapiceria" ? extractColor(item.variantTitle) : "", variantTitle: item.variantTitle, qty: item.qty };
+  return { tipo, product, talla: normalizeTalla(item.variantTitle), color: tipo === "tapiceria" ? extractColor(item.variantTitle) : "", variantTitle: item.variantTitle, qty: item.qty, sku: item.sku || "" };
 }
 
 // Reposición que en realidad es un CAMBIO de modelo/medida (Jennifer,
@@ -7122,6 +7122,22 @@ export class InventoryStore {
             bo.recibidoFabrica = true;
             bo.fechaRecibido = new Date().toISOString();
             bo.stockTapiceriaId = deStockTap.id;
+          }
+          continue;
+        }
+        // Tapicería de LIQUIDACIÓN (Jennifer, 2026-11-27, BEZEN12475): está
+        // en el almacén siempre, así que no se pide a fábrica — queda
+        // recibida y entra directa a la carga de Furniture. Se reconoce por
+        // la ficha o por el SKU (la ficha nueva de Black Friday no lo dice).
+        const esLiquidacionTap = item.tipo === "tapiceria"
+          && /LIQUIDACI[OÓ]N/i.test([item.product.stockModel, item.product.title, item.sku].join(" "));
+        if (esLiquidacionTap) {
+          const idLiq = this.addNoStockBackorder(backorders, item, orderId, orderNumber, hasTapiceria, orderDate, proveedor, needsDecision, "STOCK", "LIQUIDACIÓN — ya en el almacén, no pedir a fábrica", platform, orderRef);
+          const bo = backorders.find((b) => b.id === idLiq);
+          if (bo && bo.estado === "pendiente") {
+            bo.estado = "cubierto";
+            bo.recibidoFabrica = true;
+            bo.fechaRecibido = new Date().toISOString();
           }
           continue;
         }
