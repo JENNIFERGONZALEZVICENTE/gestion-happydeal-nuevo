@@ -2637,7 +2637,7 @@ ${ventas ? "<script>window.MODO_VENTAS = true;</script>" : ""}
     <h3>Dar de alta tapicería en el almacén</h3>
     <p style="margin:0 0 8px;color:var(--muted);font-size:13px">Una ficha por unidad. Cuando entra un pedido del mismo modelo, medida y color: un canapé completo se coge solo (sale por Furniture con su referencia, sin pedir a fábrica); una pieza suelta también se coge sola, se avisa en el pedido y en el pedido a Polival va "LA PIEZA X ESTÁ EN STOCK, ASÍ QUE SUBIR A FÁBRICA PARA REVISAR, SI ESTÁ BIEN NO FABRICAR ESA PIEZA".</p>
     <div class="toolbar">
-      <input id="st-modelo" type="text" list="st-modelos-datalist" placeholder="Modelo de tapicería..." autocomplete="off" style="min-width:320px" />
+      <input id="st-modelo" type="text" list="st-modelos-datalist" placeholder="Modelo de tapicería..." autocomplete="off" title="" style="flex:1 1 100%;width:100%;min-width:320px;box-sizing:border-box" oninput="this.title=this.value" />
       <datalist id="st-modelos-datalist"></datalist>
       <input id="st-talla" type="text" list="st-tallas-datalist" placeholder="Medida (150x190)" autocomplete="off" style="width:140px" />
       <datalist id="st-tallas-datalist"></datalist>
