@@ -20935,7 +20935,24 @@ async function handleFetch(request, env) {
       const stub = env.ORDERS_STORE.get(id);
       const res = await stub.fetch("https://do/orders/tracking-import-seur", { method: "POST", body: await request.text() });
       const data = await res.json();
-      const shopify = await procesarFulfillmentsShopify(env, data.paraShopify);
+      // Nunca dar por enviado en Shopify un pedido cuyo artículo de SEUR ha
+      // vuelto a pendiente (Jennifer, 2026-11-27, BEZEN12346: etiqueta hecha
+      // pero se desmarcó el recibido porque no había llegado).
+      let candidatos = data.paraShopify || [];
+      const saltados = [];
+      if (candidatos.length) {
+        try {
+          const bos = await (await inventoryStub(env).fetch("https://do/backorders")).json();
+          candidatos = candidatos.filter((c) => {
+            const suyos = bos.filter((b) => String(b.orderId) === String(c.orderId) && !b.reposicion && !b.gestoComercial && b.estado !== "cancelado");
+            const algoSale = suyos.some((b) => ["listo-seur", "servido", "cubierto"].includes(b.estado));
+            if (suyos.length && !algoSale) { saltados.push({ orderNumber: c.orderNumber, albaran: c.trackingNumber, reason: "no_recibido", detail: "Su artículo sigue pendiente de llegar: no se marca enviado en Shopify." }); return false; }
+            return true;
+          });
+        } catch (e) { /* si falla la comprobación, se sigue como siempre */ }
+      }
+      const shopify = await procesarFulfillmentsShopify(env, candidatos);
+      shopify.errores = (shopify.errores || []).concat(saltados);
       delete data.paraShopify;
       return Response.json({ ...data, shopify });
     }

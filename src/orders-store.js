@@ -1721,8 +1721,11 @@ export class OrdersStore {
         // pedido — no se marca nada como enviado en Shopify ni se avisa al
         // cliente con ese seguimiento.
         const esEtiquetaGC = /^GC/i.test(String(e.referencia || "").trim());
+        // Reintento (Jennifer, 2026-11-27, BEZEN12447/12440): si la primera
+        // vez no se pudo marcar en Shopify, al volver a subir el fichero la
+        // etiqueta ya no era "nueva" y no se reintentaba nunca.
         if (
-          esNuevo && order.platform === "Shopify" && !esEtiquetaGC &&
+          (esNuevo || (!order.shopifyFulfilled && !(idx >= 0 && tracking[idx].anulado))) && order.platform === "Shopify" && !esEtiquetaGC &&
           !order.cancelado && order.shippingStatus !== "cancelado" &&
           order.paymentStatus === "PAGADO" && e.seguimiento
         ) {
